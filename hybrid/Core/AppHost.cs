@@ -9,6 +9,8 @@ public interface IPlatform
 {
     string Version { get; }
     void OpenPath(string path);
+    string? PickFolder();
+    void MoveToTrash(string path);
 }
 
 // 画面 (WebView2 やブラウザ) とのやり取りを一手に引き受ける。通信路には依存しない
@@ -40,7 +42,7 @@ public sealed class AppHost : IAsyncDisposable
         conversations = new ConversationStore(paths);
         ledger = new UsageLedger(paths);
         mcp = new McpHub(paths);
-        tools = new ToolRegistry([mcp]);
+        tools = new ToolRegistry([new FileToolProvider(settings, platform), mcp]);
         orgCost = new OrgCostClient(paths, http);
         mcp.Changed += () => Emit("mcp.changed", mcp.Describe());
     }
@@ -98,6 +100,7 @@ public sealed class AppHost : IAsyncDisposable
         "usage.org" => OrgUsageAsync(Str(p, "range")),
         "pricing.reload" => ReloadPricingAsync(),
         "app.open" => OpenTargetAsync(Str(p, "target")),
+        "app.pickFolder" => Task.FromResult<JsonNode?>(platform.PickFolder()),
         _ => throw new InvalidOperationException($"未知のメソッドです: {method}"),
     };
 
@@ -132,6 +135,7 @@ public sealed class AppHost : IAsyncDisposable
         ["profile"] = Json.ToNode(s.Profile),
         ["appearance"] = Json.ToNode(s.Appearance),
         ["chat"] = Json.ToNode(s.Chat),
+        ["files"] = Json.ToNode(s.Files),
         ["mcpServers"] = JsonSerializer.SerializeToNode(s.McpServers, Json.Wire),
         ["toolPermissions"] = JsonSerializer.SerializeToNode(s.ToolPermissions, Json.Wire),
     };
@@ -151,11 +155,19 @@ public sealed class AppHost : IAsyncDisposable
 
     async Task<JsonNode?> UpdateSettingsAsync(JsonObject patch)
     {
+        if (patch["files"]?["folders"] is JsonArray folders)
+        {
+            foreach (var path in folders.Select(f => (string?)f?["path"]))
+            {
+                if (string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path) || !Directory.Exists(path)) throw new InvalidOperationException($"フォルダが見つかりません: {path}");
+            }
+        }
         var updated = await settings.UpdateAsync(s =>
         {
             if (patch["profile"] is JsonObject profile) s.Profile = Merge(s.Profile, profile);
             if (patch["appearance"] is JsonObject appearance) s.Appearance = Merge(s.Appearance, appearance);
             if (patch["chat"] is JsonObject chat) s.Chat = Merge(s.Chat, chat);
+            if (patch["files"] is JsonObject files) s.Files = Merge(s.Files, files);
         });
         return SettingsView(updated);
     }
@@ -228,14 +240,16 @@ public sealed class AppHost : IAsyncDisposable
         return null;
     }
 
-    async Task<string> BuildSystemPromptAsync()
+    async Task<string> BuildSystemPromptAsync(ISet<string>? enabledSources)
     {
-        var profile = (await settings.GetAsync()).Profile;
+        var current = await settings.GetAsync();
+        var profile = current.Profile;
         // OS の言語設定に関係なく日本語の曜日にする
         var today = DateTime.Now.ToString("yyyy年M月d日 dddd", System.Globalization.CultureInfo.GetCultureInfo("ja-JP"));
         var parts = new List<string> { $"今日の日付は {today} です。" };
         var name = profile.Nickname.Length > 0 ? profile.Nickname : profile.FullName;
         if (name.Length > 0) parts.Add($"ユーザーの呼び名は {name} です。");
+        if ((enabledSources is null || enabledSources.Contains(FileToolProvider.Source)) && FileToolProvider.DescribeForPrompt(current.Files) is { } folders) parts.Add(folders);
         if (profile.Preferences.Trim().Length > 0) parts.Add($"ユーザーが設定した個人設定です。回答に反映してください:\n{profile.Preferences.Trim()}");
         return string.Join("\n\n", parts);
     }
@@ -249,7 +263,7 @@ public sealed class AppHost : IAsyncDisposable
             (string?)p["effort"] ?? defaults.Effort,
             (bool?)p["webSearch"] ?? defaults.WebSearch,
             enabled,
-            await BuildSystemPromptAsync(),
+            await BuildSystemPromptAsync(enabled),
             Math.Max(1, defaults.MaxToolTurns));
     }
 

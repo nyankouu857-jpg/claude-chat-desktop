@@ -26,6 +26,19 @@ public sealed class ChatDefaults
     public int MaxToolTurns { get; set; } = 30;
 }
 
+public sealed class FolderAccess
+{
+    public string Path { get; set; } = "";
+    public bool ReadOnly { get; set; }
+}
+
+public sealed class FileAccessSettings
+{
+    public bool Enabled { get; set; }
+    public bool AutoApproveReads { get; set; } = true;
+    public List<FolderAccess> Folders { get; set; } = [];
+}
+
 // Claude Desktop の claude_desktop_config.json と同じ書き方を受け付ける
 public sealed class McpServerConfig
 {
@@ -47,6 +60,7 @@ public sealed class AppSettings
     public ProfileSettings Profile { get; set; } = new();
     public AppearanceSettings Appearance { get; set; } = new();
     public ChatDefaults Chat { get; set; } = new();
+    public FileAccessSettings Files { get; set; } = new();
     public Dictionary<string, McpServerConfig> McpServers { get; set; } = [];
     // ツールの API 名 -> "always"。毎回確認を出さないツールを覚えておく
     public Dictionary<string, string> ToolPermissions { get; set; } = [];
@@ -60,6 +74,9 @@ public sealed class SettingsStore(AppPaths paths)
 {
     readonly SemaphoreSlim gate = new(1, 1);
     AppSettings? current;
+
+    // ツール一覧は同期で組み立てるため。起動時の GetAsync 以降は必ず入っている
+    public AppSettings? Current => current;
 
     public async Task<AppSettings> GetAsync()
     {

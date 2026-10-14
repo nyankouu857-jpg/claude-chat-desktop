@@ -784,3 +784,8 @@ code { font-family: var(--font-mono); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+.folder-row { gap: 10px; justify-content: flex-start; }
+.folder-icon { color: var(--text-300); flex-shrink: 0; }
+.folder-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.folder-readonly { display: flex; align-items: center; gap: 6px; cursor: pointer; }

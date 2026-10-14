@@ -14,6 +14,9 @@ import type {
   WireMessage,
 } from "./types";
 
+// C# 側の FileToolProvider.Source と同じ
+export const FILES_SOURCE = "files";
+
 let toastId = 0;
 
 export function toast(text: string, kind: "info" | "error" = "info") {
@@ -192,7 +195,7 @@ function chatOptions() {
     model: choice.model,
     effort: choice.effort,
     webSearch: choice.webSearch,
-    enabledSources: mcp.map((m) => m.name).filter((name) => !choice.disabledSources.includes(name)),
+    enabledSources: [FILES_SOURCE, ...mcp.map((m) => m.name)].filter((name) => !choice.disabledSources.includes(name)),
   };
 }
 
@@ -278,6 +281,8 @@ export async function revokePermission(apiName: string) {
 
 export const openPath = (target: "root" | "config" | "data" | "logs" | "settings" | "pricing") =>
   guard(() => call("app.open", { target }));
+
+export const pickFolder = () => guard(() => call<string | null>("app.pickFolder"));
 
 export const localUsage = () => guard(() => call("usage.local"));
 export const reloadPricing = () => guard(() => call("pricing.reload"));

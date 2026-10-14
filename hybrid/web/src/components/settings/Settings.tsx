@@ -6,12 +6,14 @@ import { useStore } from "../../store";
 import type { Settings, SettingsTab } from "../../types";
 import { Toggle } from "../ui";
 import { Connectors } from "./Connectors";
+import { Files } from "./Files";
 import { Usage } from "./Usage";
 
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "general", label: "一般" },
   { id: "appearance", label: "外観" },
   { id: "api", label: "API とモデル" },
+  { id: "files", label: "フォルダ" },
   { id: "connectors", label: "コネクタ" },
   { id: "permissions", label: "ツールの権限" },
   { id: "usage", label: "使用量と料金" },
@@ -276,6 +278,7 @@ export function SettingsPage({ tab }: { tab: SettingsTab }) {
             {tab === "general" && <General settings={settings} />}
             {tab === "appearance" && <Appearance settings={settings} />}
             {tab === "api" && <Api settings={settings} />}
+            {tab === "files" && <Files settings={settings} />}
             {tab === "connectors" && <Connectors settings={settings} />}
             {tab === "permissions" && <Permissions settings={settings} />}
             {tab === "usage" && <Usage />}

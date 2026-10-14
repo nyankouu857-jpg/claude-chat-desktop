@@ -54,8 +54,20 @@ export interface Settings {
   profile: { fullName: string; nickname: string; preferences: string };
   appearance: { theme: "light" | "dark" | "system"; chatFont: "default" | "sans" | "large" };
   chat: { model: string; effort: Effort; webSearch: boolean; showThinking: boolean; maxToolTurns: number };
+  files: FileAccess;
   mcpServers: Record<string, McpServerConfig>;
   toolPermissions: Record<string, string>;
+}
+
+export interface FolderAccess {
+  path: string;
+  readOnly: boolean;
+}
+
+export interface FileAccess {
+  enabled: boolean;
+  autoApproveReads: boolean;
+  folders: FolderAccess[];
 }
 
 export interface SecretsView {
@@ -120,4 +132,4 @@ export type View =
   | { name: "recents" }
   | { name: "settings"; tab: SettingsTab };
 
-export type SettingsTab = "general" | "appearance" | "api" | "connectors" | "permissions" | "usage" | "data";
+export type SettingsTab = "general" | "appearance" | "api" | "files" | "connectors" | "permissions" | "usage" | "data";

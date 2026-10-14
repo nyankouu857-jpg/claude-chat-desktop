@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
@@ -71,4 +72,46 @@ sealed class WindowsPlatform : IPlatform
     }
 
     public static void OpenUrl(string url) => Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+
+    // 画面からの呼び出しはスレッドプール上なので UI スレッドに戻す
+    public string? PickFolder() => Application.Current.Dispatcher.Invoke(() =>
+    {
+        var dialog = new Microsoft.Win32.OpenFolderDialog { Title = "Claude に操作を許可するフォルダ" };
+        return dialog.ShowDialog(Application.Current.MainWindow) == true ? dialog.FolderName : null;
+    });
+
+    public void MoveToTrash(string path)
+    {
+        var operation = new ShFileOperation
+        {
+            Func = FoDelete,
+            // 二重の NUL 終端
+            From = path + "\0\0",
+            Flags = FofAllowUndo | FofNoConfirmation | FofSilent | FofNoErrorUi,
+        };
+        var code = SHFileOperation(ref operation);
+        if (code != 0 || operation.AnyOperationsAborted) throw new IOException($"ごみ箱へ移せませんでした (コード {code})");
+    }
+
+    const uint FoDelete = 3;
+    const ushort FofSilent = 0x0004;
+    const ushort FofNoConfirmation = 0x0010;
+    const ushort FofAllowUndo = 0x0040;
+    const ushort FofNoErrorUi = 0x0400;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct ShFileOperation
+    {
+        public IntPtr Hwnd;
+        public uint Func;
+        public string From;
+        public string? To;
+        public ushort Flags;
+        public bool AnyOperationsAborted;
+        public IntPtr NameMappings;
+        public string? ProgressTitle;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    static extern int SHFileOperation(ref ShFileOperation operation);
 }

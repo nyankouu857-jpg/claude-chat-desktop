@@ -1,6 +1,6 @@
-import { ChevronRight, Copy, Globe, LoaderCircle, Pencil, Plug, RotateCcw, TriangleAlert } from "lucide-react";
+import { ChevronRight, Copy, FolderOpen, Globe, LoaderCircle, Pencil, Plug, RotateCcw, TriangleAlert } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type ReactElement } from "react";
-import { approve, edit, retry, textOf, toast } from "../actions";
+import { FILES_SOURCE, approve, edit, retry, textOf, toast } from "../actions";
 import { renderMarkdown } from "../markdown";
 import { useStore } from "../store";
 import type { Approval, LiveReply, WireBlock, WireMessage } from "../types";
@@ -148,7 +148,11 @@ function ApprovalCard({ conversationId, approval }: { conversationId: string; ap
     <div className="approval">
       <div className="approval-title">
         <Plug size={16} />
-        <span><b>{approval.source}</b> の <b>{approval.title || approval.tool}</b> を使おうとしています</span>
+        <span>
+          {approval.source === FILES_SOURCE
+            ? <>Claude が <b>{approval.title || approval.tool}</b> を実行しようとしています</>
+            : <><b>{approval.source}</b> の <b>{approval.title || approval.tool}</b> を使おうとしています</>}
+        </span>
       </div>
       {approval.description && <div className="approval-desc">{approval.description}</div>}
       <pre className="approval-input">{JSON.stringify(approval.input, null, 2)}</pre>
@@ -161,19 +165,35 @@ function ApprovalCard({ conversationId, approval }: { conversationId: string; ap
   );
 }
 
+const FILE_TOOL_TITLES: Record<string, string> = {
+  list_allowed_folders: "許可フォルダを確認",
+  list_directory: "フォルダの中身を見る",
+  read_file: "ファイルを読む",
+  search_files: "ファイルを探す",
+  get_file_info: "ファイルの情報",
+  write_file: "ファイルに書き込む",
+  edit_file: "ファイルを直す",
+  create_directory: "フォルダを作る",
+  move_path: "移動",
+  copy_file: "コピー",
+  delete_path: "ごみ箱へ移す",
+};
+
 function ToolUseBlock({ block, result, conversationId, live }: { block: WireBlock; result?: WireBlock; conversationId: string; live: LiveReply | null }) {
   const [open, setOpen] = useState(false);
   const approval = live?.approvals.find((a) => a.toolUseId === block.id);
   const running = live?.runningTools.includes(block.id) ?? false;
   const [source, ...rest] = String(block.name).split("__");
-  const toolName = rest.join("__") || source;
+  const isFileTool = source === FILES_SOURCE;
+  const toolName = (isFileTool ? FILE_TOOL_TITLES[rest.join("__")] : undefined) ?? (rest.join("__") || source);
+  const subject = isFileTool ? block.input?.path ?? block.input?.source ?? "" : rest.length ? source : "";
   const status = approval ? "承認待ち" : running ? "実行中" : result ? (result.is_error ? "エラー" : "完了") : live ? "準備中" : "";
   return (
     <div className="tool-card">
       <button type="button" className="tool-card-header" onClick={() => setOpen((o) => !o)}>
-        {running || (live && !result && !approval) ? <LoaderCircle size={15} className="spin" /> : result?.is_error ? <TriangleAlert size={15} /> : <Plug size={15} />}
+        {running || (live && !result && !approval) ? <LoaderCircle size={15} className="spin" /> : result?.is_error ? <TriangleAlert size={15} /> : isFileTool ? <FolderOpen size={15} /> : <Plug size={15} />}
         <span className="tool-card-title">{toolName}</span>
-        <span className="tool-card-sub">{rest.length ? source : ""}</span>
+        <span className="tool-card-sub">{subject}</span>
         {status && <span className={`tool-badge${result?.is_error ? " error" : approval ? " waiting" : ""}`}>{status}</span>}
         <ChevronRight size={14} className={`chevron${open ? " open" : ""}`} />
       </button>

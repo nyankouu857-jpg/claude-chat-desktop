@@ -3,7 +3,9 @@ using System.Text.Json.Nodes;
 namespace ClaudeChat.Core;
 
 // ApiName は Claude に見せる名前。ツールの持ち主ごとに重ならないよう接頭辞を付ける
-public sealed record ToolSpec(string ApiName, string Source, string Name, string? Title, string Description, JsonObject InputSchema);
+public sealed record ToolSpec(string ApiName, string Source, string Name, string? Title, string Description, JsonObject InputSchema, bool AutoApprove = false);
+
+public sealed class ToolException(string message) : Exception(message);
 
 public sealed record ToolCallResult(JsonArray Content, bool IsError);
 
@@ -32,6 +34,10 @@ public sealed class ToolRegistry(IEnumerable<IToolProvider> providers)
         try
         {
             return await provider.CallAsync(apiName, input, cancellationToken);
+        }
+        catch (ToolException e)
+        {
+            return Error(e.Message);
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {

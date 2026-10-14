@@ -30,7 +30,7 @@ async Task PumpAsync(WebSocket socket, Channel<string> outbox)
     }
 }
 
-await using var host = new AppHost(paths, new PlainSecretProtector(), new ConsolePlatform(), Broadcast);
+await using var host = new AppHost(paths, new PlainSecretProtector(), new ConsolePlatform(Path.Combine(paths.DataDir, "trash")), Broadcast);
 await host.StartAsync();
 
 var listener = new HttpListener();
@@ -95,8 +95,20 @@ static Dictionary<string, string> ParseArgs(string[] args)
     return result;
 }
 
-sealed class ConsolePlatform : IPlatform
+sealed class ConsolePlatform(string trashDir) : IPlatform
 {
     public string Version => "dev";
     public void OpenPath(string path) => Console.WriteLine($"開く: {path}");
+
+    // ブラウザからはフォルダ選択ダイアログを出せない
+    public string? PickFolder() => null;
+
+    // ごみ箱の代わり
+    public void MoveToTrash(string path)
+    {
+        Directory.CreateDirectory(trashDir);
+        var destination = Path.Combine(trashDir, $"{DateTime.Now:yyyyMMdd-HHmmss}-{Path.GetFileName(path)}");
+        if (Directory.Exists(path)) Directory.Move(path, destination);
+        else File.Move(path, destination);
+    }
 }

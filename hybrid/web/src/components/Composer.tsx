@@ -1,6 +1,6 @@
-import { ArrowUp, ChevronDown, Globe, ImagePlus, Plug, Plus, SlidersHorizontal, Square, X } from "lucide-react";
+import { ArrowUp, ChevronDown, FolderOpen, Globe, ImagePlus, Plug, Plus, SlidersHorizontal, Square, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { openSettings, send, setChoice, stop, toast } from "../actions";
+import { FILES_SOURCE, openSettings, send, setChoice, stop, toast } from "../actions";
 import { EFFORTS, MODELS, modelLabel } from "../models";
 import { useStore } from "../store";
 import type { WireBlock } from "../types";
@@ -74,7 +74,10 @@ function ModelMenu() {
 function ToolsMenu() {
   const choice = useStore((s) => s.choice);
   const mcp = useStore((s) => s.mcp);
-  const activeConnectors = mcp.filter((m) => m.status === "running" && !choice.disabledSources.includes(m.name)).length;
+  const files = useStore((s) => s.settings?.files);
+  const filesAvailable = !!files?.enabled && files.folders.length > 0;
+  const filesOn = filesAvailable && !choice.disabledSources.includes(FILES_SOURCE);
+  const activeConnectors = mcp.filter((m) => m.status === "running" && !choice.disabledSources.includes(m.name)).length + (filesOn ? 1 : 0);
   const toggleSource = (name: string, enabled: boolean) =>
     setChoice({
       disabledSources: enabled ? choice.disabledSources.filter((n) => n !== name) : [...choice.disabledSources, name],
@@ -97,6 +100,16 @@ function ToolsMenu() {
             <span className="menu-label">Web 検索</span>
             <Toggle checked={choice.webSearch} onChange={(v) => setChoice({ webSearch: v })} label="Web 検索" />
           </div>
+          {filesAvailable && (
+            <div className="menu-row">
+              <FolderOpen size={16} />
+              <span className="menu-label">
+                フォルダ
+                <span className="menu-hint">{files!.folders.length} 個のフォルダを操作</span>
+              </span>
+              <Toggle checked={filesOn} onChange={(v) => toggleSource(FILES_SOURCE, v)} label="フォルダ" />
+            </div>
+          )}
           {mcp.length > 0 && <div className="menu-separator" />}
           {mcp.map((server) => (
             <div className="menu-row" key={server.name}>
@@ -115,6 +128,7 @@ function ToolsMenu() {
             </div>
           ))}
           <div className="menu-separator" />
+          {!filesAvailable && <MenuItem icon={<FolderOpen size={16} />} onClick={() => { close(); openSettings("files"); }}>フォルダ操作を設定</MenuItem>}
           <MenuItem icon={<Plug size={16} />} onClick={() => { close(); openSettings("connectors"); }}>コネクタを管理</MenuItem>
         </>
       )}

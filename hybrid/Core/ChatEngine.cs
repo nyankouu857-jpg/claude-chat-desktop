@@ -287,7 +287,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
     async Task<bool> IsAllowedAsync(ToolSpec spec, string toolUseId, JsonObject input, Action<JsonObject> emit, IApprovalGate gate, CancellationToken cancellationToken)
     {
         var current = await settings.GetAsync();
-        if (current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always") return true;
+        if (spec.AutoApprove || current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always") return true;
 
         var decision = await gate.RequestAsync(new JsonObject
         {
