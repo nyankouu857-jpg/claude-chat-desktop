@@ -792,3 +792,7 @@ code { font-family: var(--font-mono); }
 .folder-icon { color: var(--text-300); flex-shrink: 0; }
 .folder-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
 .folder-readonly { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.language-picker { display: grid; gap: 10px; justify-items: center; margin-bottom: 18px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 14px; }
+.language-picker-title { font-weight: 600; }
+.language-picker-options { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }

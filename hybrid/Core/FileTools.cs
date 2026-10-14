@@ -417,7 +417,7 @@ public sealed class FileToolProvider : IToolProvider
     public static string? DescribeForPrompt(FileAccessSettings access)
     {
         if (!access.Enabled || access.Folders.Count == 0) return null;
-        var folders = string.Join("\n", access.Folders.Select(f => $"- {Normalize(f.Path)}{(f.ReadOnly ? " (読み取り専用)" : "")}"));
-        return $"ユーザーの PC の次のフォルダを files__ で始まるツールで読み書きできます。相対パスは最初のフォルダが基準です。\n{folders}";
+        var folders = string.Join("\n", access.Folders.Select(f => $"- {Normalize(f.Path)}{(f.ReadOnly ? " (read-only)" : "")}"));
+        return $"<file_access>\nYou can read and write files on the user's PC with the tools whose names start with files__, but only inside the folders below. Relative paths resolve against the first folder. Deleted files go to the recycle bin.\n{folders}\n</file_access>";
     }
 }

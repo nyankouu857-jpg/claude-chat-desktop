@@ -51,7 +51,7 @@ export interface McpServerConfig {
 }
 
 export interface Settings {
-  profile: { fullName: string; nickname: string; preferences: string };
+  profile: { fullName: string; nickname: string; preferences: string; language?: string | null };
   appearance: { theme: "light" | "dark" | "system"; chatFont: "default" | "sans" | "large" };
   chat: { model: string; effort: Effort; webSearch: boolean; showThinking: boolean; maxToolTurns: number; systemPrompt: string; appendAppContext: boolean };
   files: FileAccess;

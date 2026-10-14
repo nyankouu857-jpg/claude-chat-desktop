@@ -1,6 +1,7 @@
 import { ExternalLink, FolderOpen, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { navigate, openPath, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
+import { DEFAULT_LANGUAGE, LANGUAGES } from "../../languages";
 import { EFFORTS, MODELS } from "../../models";
 import { useStore } from "../../store";
 import type { Settings, SettingsTab } from "../../types";
@@ -55,6 +56,12 @@ function General({ settings }: { settings: Settings }) {
             <input className="input" value={profile.nickname} placeholder="例: たろう" onChange={(e) => setProfile({ ...profile, nickname: e.target.value })} />
           </Field>
         </div>
+      </Section>
+      <Section title="Claude が答える言語" description="すべての会話で、この言語で答えるように Claude へ伝えます。">
+        <select className="input" value={profile.language ?? DEFAULT_LANGUAGE} onChange={(e) => setProfile({ ...profile, language: e.target.value })}>
+          {LANGUAGES.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+          {profile.language && !LANGUAGES.some((l) => l.value === profile.language) && <option value={profile.language}>{profile.language}</option>}
+        </select>
       </Section>
       <Section title="個人設定" description="Claude に考慮してほしい好みや前提を書いてください。すべての会話に反映されます。">
         <textarea
@@ -211,7 +218,7 @@ function SystemPrompt({ chat }: { chat: Settings["chat"] }) {
   return (
     <Section
       title="システムプロンプト"
-      description={<>すべての会話で、最初に Claude へ渡す指示です。空のままでも使えます。<code>{"{{currentDateTime}}"}</code> と書いた所は今日の日付に置き換わります。</>}
+      description={<>すべての会話で Claude へ渡す指示に、アプリの基本の指示に続けて入ります。空のままでも使えます。<code>{"{{currentDateTime}}"}</code> と書いた所は今日の日付に置き換わります。</>}
     >
       <textarea
         className="input"
@@ -222,8 +229,8 @@ function SystemPrompt({ chat }: { chat: Settings["chat"] }) {
       />
       <div className="switch-row">
         <div>
-          <div>日付、呼び名、フォルダの一覧を自動で付ける</div>
-          <div className="field-hint">オフにすると、Claude は今日の日付が分からなくなります。個人設定はオンオフに関係なく付きます</div>
+          <div>アプリの基本の指示を付ける</div>
+          <div className="field-hint">日付、知識の期限の扱い、口調と書式、呼び名、フォルダの一覧です。オフにすると Claude は今日の日付が分からなくなります。言語と個人設定はオンオフに関係なく付きます</div>
         </div>
         <Toggle checked={chat.appendAppContext} onChange={(v) => void updateSettings({ chat: { appendAppContext: v } })} />
       </div>

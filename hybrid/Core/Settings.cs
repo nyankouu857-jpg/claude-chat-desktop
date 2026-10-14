@@ -9,6 +9,9 @@ public sealed class ProfileSettings
     public string Nickname { get; set; } = "";
     // claude.ai の個人設定と同じく、全会話のシステムプロンプトに入る
     public string Preferences { get; set; } = "";
+    // null は未選択、空文字は入力に合わせる
+    public string? Language { get; set; }
+    public const string DefaultLanguage = "Japanese";
 }
 
 public sealed class AppearanceSettings
