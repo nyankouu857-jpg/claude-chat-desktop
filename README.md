@@ -3,7 +3,7 @@
 Claude API を使って、claude.ai のデスクトップ版のようにチャットできる Windows アプリです。
 同じ機能のアプリを **Electron 版** と **ネイティブ版 (C# / WPF)** の 2 種類で作り、作り方の違いでどこまで差が出るかを比べられるようにしています。
 
-趣味で作ったもので、公開や商用利用は想定していません。
+趣味で作ったもので、商用利用は想定していません。
 
 リポジトリ: https://github.com/nyankouu857-jpg/claude-chat-desktop
 
@@ -53,7 +53,7 @@ Claude API を使って、claude.ai のデスクトップ版のようにチャ�
 
 ### 手順
 
-1. ブラウザで GitHub にログインします。リポジトリは private なので、ログインしていないと見えません。
+1. ブラウザで GitHub にログインします。Artifacts のダウンロードは、GitHub にログインしていないとできません。
 2. https://github.com/nyankouu857-jpg/claude-chat-desktop/actions を開きます。
 3. 一覧の一番上にある、緑のチェックが付いた「build」の実行をクリックします。
 4. ページ下部の **Artifacts** に 2 つのファイルがあるので、使いたい方をクリックしてダウンロードします。
