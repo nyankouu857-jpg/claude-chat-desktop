@@ -62,6 +62,8 @@ async function runChat(conversationId: string) {
     const client = new Anthropic({ apiKey });
     const settings = await store.getSettings();
     const outcome = await streamReply(client, settings, conversation, controller.signal, emit);
+    // 応答中に削除された会話を保存し直して復活させない
+    if (!(await store.getConversation(conversationId))) return;
     await store.saveConversation(conversation);
     if (outcome !== "error") emit({ type: "done", conversation });
     sendToRenderer("conversations:changed");

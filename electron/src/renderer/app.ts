@@ -270,6 +270,7 @@ function renderSidebar() {
         event.stopPropagation();
         if (!confirm(`${summary.title} を削除しますか?`)) return;
         await api.deleteConversation(summary.id);
+        liveReplies.delete(summary.id);
         if (summary.id === currentId) startNewChat();
       });
       li.append(deleteButton);

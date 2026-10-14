@@ -77,6 +77,8 @@ export async function updateSettings(update: SettingsUpdate) {
 // 履歴本体は画像の base64 で重くなるので、一覧は index.json だけ読む
 let summaries: ConversationSummary[] | null = null;
 const conversations = new Map<string, Conversation>();
+// 削除中にファイルを読み直して復活させないため
+const deletedIds = new Set<string>();
 
 export async function listConversations(): Promise<ConversationSummary[]> {
   summaries ??= (await readJson<ConversationSummary[]>(indexPath())) ?? [];
@@ -84,6 +86,7 @@ export async function listConversations(): Promise<ConversationSummary[]> {
 }
 
 export async function getConversation(id: string): Promise<Conversation | null> {
+  if (deletedIds.has(id)) return null;
   const cached = conversations.get(id);
   if (cached) return cached;
   const loaded = await readJson<Conversation>(path.join(conversationDir(), `${id}.json`));
@@ -115,6 +118,7 @@ export async function saveConversation(conversation: Conversation) {
 }
 
 export async function deleteConversation(id: string) {
+  deletedIds.add(id);
   conversations.delete(id);
   summaries = (await listConversations()).filter((s) => s.id !== id);
   await writeJsonAtomic(indexPath(), summaries);
