@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
+  <title>ClaudeChat</title>
+  <link rel="stylesheet" href="hljs-light.css" media="(prefers-color-scheme: light)">
+  <link rel="stylesheet" href="hljs-dark.css" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <button id="new-chat" class="new-chat">+ 新しいチャット</button>
+      <div class="sidebar-label">履歴</div>
+      <ul id="conversation-list" class="conversation-list"></ul>
+      <button id="open-settings" class="sidebar-footer">設定</button>
+    </aside>
+
+    <main class="chat">
+      <header class="chat-header">
+        <h1 id="chat-title">新しいチャット</h1>
+        <span id="usage" class="usage"></span>
+      </header>
+
+      <div id="messages" class="messages"></div>
+
+      <form id="composer" class="composer">
+        <div id="attachments" class="attachments"></div>
+        <textarea id="prompt" rows="1" placeholder="Claude にメッセージを送る"></textarea>
+        <div class="composer-bar">
+          <button type="button" id="attach" class="ghost" title="画像を添付">画像</button>
+          <label class="toggle"><input type="checkbox" id="web-search"> Web検索</label>
+          <span class="spacer"></span>
+          <select id="model" title="モデル"></select>
+          <select id="effort" title="思考の深さ"></select>
+          <button type="submit" id="send" class="primary">送信</button>
+          <button type="button" id="stop" class="danger" hidden>停止</button>
+        </div>
+        <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+      </form>
+    </main>
+  </div>
+
+  <dialog id="settings-dialog" class="settings">
+    <form method="dialog" id="settings-form">
+      <h2>設定</h2>
+      <label>
+        APIキー
+        <input type="password" id="api-key" autocomplete="off" spellcheck="false">
+      </label>
+      <p id="api-key-state" class="hint"></p>
+      <label>
+        システムプロンプト
+        <textarea id="system-prompt" rows="6" placeholder="例: 回答は簡潔に"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button value="cancel" class="ghost">キャンセル</button>
+        <button value="save" class="primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
