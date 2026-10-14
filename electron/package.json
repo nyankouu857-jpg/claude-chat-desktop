@@ -8,7 +8,7 @@
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
     "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --win portable"
+    "dist": "npm run build && electron-builder --win portable --publish never"
   },
   "build": {
     "appId": "local.claude-chat.electron",

@@ -5,6 +5,9 @@ import { DEFAULT_TITLE, type ChatMessage, type SettingsUpdate, type SettingsView
 import { generateTitle, streamReply } from "./chat";
 import * as store from "./store";
 
+// 開発時とビルド後で保存先が package.json の name と productName に分かれないように固定する
+app.setPath("userData", path.join(app.getPath("appData"), "ClaudeChat-Electron"));
+
 let window: BrowserWindow | null = null;
 const runningChats = new Map<string, AbortController>();
 
