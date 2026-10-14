@@ -1,0 +1,8 @@
+<Window x:Class="ClaudeChat.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="Claude" Width="1280" Height="860" MinWidth="760" MinHeight="520"
+        WindowStartupLocation="CenterScreen">
+    <wv2:WebView2 x:Name="Browser" />
+</Window>

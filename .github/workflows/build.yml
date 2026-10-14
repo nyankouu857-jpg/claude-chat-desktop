@@ -6,6 +6,28 @@ on:
   workflow_dispatch:
 
 jobs:
+  hybrid:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hybrid/web/package-lock.json
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: npm ci
+        working-directory: hybrid/web
+      - run: npm run typecheck
+        working-directory: hybrid/web
+      - run: dotnet publish hybrid/App -c Release -o publish/ClaudeChat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeChat
+          path: publish/
+
   electron:
     runs-on: windows-latest
     defaults:
@@ -37,3 +59,33 @@ jobs:
         with:
           name: ClaudeChat-Native
           path: publish/ClaudeChat.Native.exe
+
+  # 公開リポジトリの Releases は GitHub にログインしなくてもダウンロードできる
+  release:
+    needs: [hybrid, electron, native]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: zip にまとめる
+        working-directory: artifacts
+        run: |
+          (cd ClaudeChat && zip -r ../ClaudeChat.zip ClaudeChat)
+          (cd ClaudeChat-Electron && zip ../ClaudeChat-Electron.zip *.exe)
+          (cd ClaudeChat-Native && zip ../ClaudeChat-Native.zip *.exe)
+      - name: latest リリースを作り直す
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --repo "${{ github.repository }}" --yes --cleanup-tag || true
+          gh release create latest artifacts/*.zip \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "最新ビルド" \
+            --notes "main ブランチの最新コミットから自動で作ったビルドです。ふだん使うのは ClaudeChat.zip です。" \
+            --latest

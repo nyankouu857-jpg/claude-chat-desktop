@@ -1,0 +1,102 @@
+using System.Net;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading.Channels;
+using ClaudeChat.Core;
+
+// Windows 以外でも画面と中身を通しで動かすための開発用ホスト。配布物には含めない
+var options = ParseArgs(args);
+var webRoot = Path.GetFullPath(options.GetValueOrDefault("web", Path.Combine("..", "web", "dist")));
+var port = int.Parse(options.GetValueOrDefault("port", "5180"));
+var paths = AppPaths.Resolve(Path.GetFullPath(options.GetValueOrDefault("data", Path.Combine("..", ".devdata"))));
+
+var sockets = new List<(WebSocket Socket, Channel<string> Outbox)>();
+
+// 通知の順番が入れ替わるとストリーミング表示が崩れるので、ソケットごとに1本の送信列で順に送る
+void Broadcast(string message)
+{
+    lock (sockets)
+    {
+        foreach (var (_, outbox) in sockets) outbox.Writer.TryWrite(message);
+    }
+}
+
+async Task PumpAsync(WebSocket socket, Channel<string> outbox)
+{
+    await foreach (var message in outbox.Reader.ReadAllAsync())
+    {
+        if (socket.State != WebSocketState.Open) break;
+        await socket.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+    }
+}
+
+await using var host = new AppHost(paths, new PlainSecretProtector(), new ConsolePlatform(), Broadcast);
+await host.StartAsync();
+
+var listener = new HttpListener();
+listener.Prefixes.Add($"http://localhost:{port}/");
+listener.Start();
+Console.WriteLine($"http://localhost:{port}/ で待ち受けています。データ: {paths.Root}");
+
+while (true)
+{
+    var context = await listener.GetContextAsync();
+    _ = Task.Run(() => HandleAsync(context));
+}
+
+async Task HandleAsync(HttpListenerContext context)
+{
+    if (context.Request.IsWebSocketRequest && context.Request.Url?.AbsolutePath == "/ws")
+    {
+        var socket = (await context.AcceptWebSocketAsync(null)).WebSocket;
+        var entry = (socket, Channel.CreateUnbounded<string>());
+        lock (sockets) sockets.Add(entry);
+        _ = PumpAsync(socket, entry.Item2);
+        try
+        {
+            var buffer = new byte[64 * 1024];
+            var message = new MemoryStream();
+            while (socket.State == WebSocketState.Open)
+            {
+                var result = await socket.ReceiveAsync(buffer, CancellationToken.None);
+                if (result.MessageType == WebSocketMessageType.Close) break;
+                message.Write(buffer, 0, result.Count);
+                if (!result.EndOfMessage) continue;
+                var text = Encoding.UTF8.GetString(message.ToArray());
+                message.SetLength(0);
+                _ = host.HandleAsync(text);
+            }
+        }
+        catch (WebSocketException)
+        {
+            // ブラウザを閉じただけ
+        }
+        finally
+        {
+            lock (sockets) sockets.Remove(entry);
+            entry.Item2.Writer.TryComplete();
+        }
+        return;
+    }
+
+    var relative = Uri.UnescapeDataString(context.Request.Url?.AbsolutePath.TrimStart('/') ?? "");
+    var file = Path.GetFullPath(Path.Combine(webRoot, relative.Length == 0 ? "index.html" : relative));
+    if (!file.StartsWith(webRoot) || !File.Exists(file)) file = Path.Combine(webRoot, "index.html");
+    context.Response.ContentType = ContentTypes.Of(file);
+    var bytes = await File.ReadAllBytesAsync(file);
+    await context.Response.OutputStream.WriteAsync(bytes);
+    context.Response.Close();
+}
+
+static Dictionary<string, string> ParseArgs(string[] args)
+{
+    var result = new Dictionary<string, string>();
+    for (var i = 0; i + 1 < args.Length; i += 2) result[args[i].TrimStart('-')] = args[i + 1];
+    return result;
+}
+
+sealed class ConsolePlatform : IPlatform
+{
+    public string Version => "dev";
+    public void OpenPath(string path) => Console.WriteLine($"開く: {path}");
+}

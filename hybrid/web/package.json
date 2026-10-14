@@ -1,0 +1,25 @@
+{
+  "name": "claude-chat-web",
+  "version": "0.2.0",
+  "private": true,
+  "description": "ClaudeChat の画面部分。WebView2 に埋め込んで使う",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "dompurify": "^3.4.17",
+    "esbuild": "^0.28.2",
+    "highlight.js": "^11.12.0",
+    "katex": "^0.18.10",
+    "lucide-react": "^1.57.0",
+    "marked": "^18.1.1",
+    "marked-katex-extension": "^5.1.13",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2"
+  }
+}

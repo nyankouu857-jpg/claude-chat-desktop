@@ -1,0 +1,7 @@
+<Project>
+  <!-- 配布フォルダに exe 以外を混ぜない -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
+  </PropertyGroup>
+</Project>
