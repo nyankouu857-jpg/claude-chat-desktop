@@ -253,11 +253,54 @@ ClaudeChat/
 }
 ```
 
+例: GitHub につなぐ
+
+GitHub 公式の MCP サーバーに、個人用アクセストークンで接続します。トークンは GitHub の Settings → Developer settings → Personal access tokens で作ります。`X-MCP-Toolsets` で使う機能を絞ると、毎回のリクエストに載るツールの説明が減って入力トークンを節約できます。書き込みをさせたくないときは `"X-MCP-Readonly": "true"` を足します。
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer github_pat_xxxx",
+        "X-MCP-Toolsets": "repos,issues,pull_requests"
+      }
+    }
+  }
+}
+```
+
+「unauthorized: token authentication failed」と出るときは、ヘッダーは届いていて、GitHub がトークンを無効と判断しています。PowerShell で次を実行し、トークン自体が使えるか確かめてください。401 が返るなら、トークンを作り直す必要があります。
+
+```
+curl.exe -H "Authorization: Bearer github_pat_xxxx" https://api.github.com/user
+```
+
+PC 上で動かしたい場合は、Docker Desktop を入れて次のように登録します。
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "-e", "GITHUB_TOOLSETS", "ghcr.io/github/github-mcp-server"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "github_pat_xxxx",
+        "GITHUB_TOOLSETS": "repos,issues,pull_requests"
+      }
+    }
+  }
+}
+```
+
 ### 注意
 
+- **トークンは平文で保存されます:** ヘッダーや環境変数に書いたトークンは、`config/settings.json` にそのまま保存されます。権限を絞ったトークンを使い、代表フォルダを人に渡すときは消してください。
 - **Node.js が必要なもの:** `npx` で起動するサーバーには Node.js が必要です。https://nodejs.org から入れてください。Python 製のサーバーなら `uvx` などが必要です。
 - **`.cmd` のコマンド:** `npx` のような `.cmd` 形式のコマンドは、アプリが自動で `cmd.exe /c` を付けて起動します。
-- **初回の起動:** `npx` は初回にパッケージをダウンロードするので、接続まで時間がかかることがあります。最大 90 秒待ちます。
+- **初回の起動:** `npx` の初回ダウンロードや Docker の起動で、接続まで時間がかかることがあります。最大 2 分待ちます。
 - **エラーのとき:** カードのエラー表示と、ファイルのアイコンから開けるログを確認してください。
 - **会話ごとのオンオフ:** 入力欄のつまみのボタンで、コネクタを会話ごとにオフにできます。
 - **OAuth:** OAuth でログインが必要なリモートサーバーには、まだ対応していません。ヘッダーでトークンを渡せるものは使えます。

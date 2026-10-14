@@ -94,11 +94,18 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
                     AdditionalHeaders = state.Config.Headers,
                 })
                 : new StdioClientTransport(StdioOptions(state));
-            // npx が初回にパッケージを落とす時間を見込む
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            // npx の初回ダウンロードや Docker の起動を見込む
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(150));
             var client = await McpClient.CreateAsync(
                 transport,
-                new McpClientOptions { ClientInfo = new Implementation { Name = "ClaudeChat", Version = "0.2.0" } },
+                new McpClientOptions
+                {
+                    ClientInfo = new Implementation { Name = "ClaudeChat", Version = "0.2.0" },
+                    InitializationTimeout = TimeSpan.FromSeconds(120),
+                    // 既定の 5 秒だと起動の遅いサーバーで server/discover の返事を待ちきれず initialize を重ねて送り、
+                    // 遅れて discover を処理したサーバーに duplicate initialize で拒否される
+                    DiscoverProbeTimeout = TimeSpan.FromSeconds(60),
+                },
                 cancellationToken: timeout.Token);
             var tools = await client.ListToolsAsync(cancellationToken: timeout.Token);
             state.Client = client;
