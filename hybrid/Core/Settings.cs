@@ -24,6 +24,9 @@ public sealed class ChatDefaults
     public bool WebSearch { get; set; }
     public bool ShowThinking { get; set; } = true;
     public int MaxToolTurns { get; set; } = 30;
+    public string SystemPrompt { get; set; } = "";
+    // オフで日付・呼び名・フォルダ一覧を付けない
+    public bool AppendAppContext { get; set; } = true;
 }
 
 public sealed class FolderAccess

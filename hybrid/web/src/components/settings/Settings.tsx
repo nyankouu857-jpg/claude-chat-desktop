@@ -1,6 +1,6 @@
 import { ExternalLink, FolderOpen, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { navigate, openPath, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
+import { navigate, openPath, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
 import { EFFORTS, MODELS } from "../../models";
 import { useStore } from "../../store";
 import type { Settings, SettingsTab } from "../../types";
@@ -197,7 +197,49 @@ function Api({ settings }: { settings: Settings }) {
             onChange={(e) => void updateSettings({ chat: { maxToolTurns: Math.max(1, Number(e.target.value) || 1) } })} />
         </div>
       </Section>
+
+      <SystemPrompt chat={chat} />
     </>
+  );
+}
+
+function SystemPrompt({ chat }: { chat: Settings["chat"] }) {
+  const [draft, setDraft] = useState(chat.systemPrompt);
+  const [preview, setPreview] = useState<string | null>(null);
+  useEffect(() => setDraft(chat.systemPrompt), [chat.systemPrompt]);
+  const dirty = draft !== chat.systemPrompt;
+  return (
+    <Section
+      title="システムプロンプト"
+      description={<>すべての会話で、最初に Claude へ渡す指示です。空のままでも使えます。<code>{"{{currentDateTime}}"}</code> と書いた所は今日の日付に置き換わります。</>}
+    >
+      <textarea
+        className="input"
+        rows={10}
+        value={draft}
+        placeholder={"例: あなたは丁寧な日本語で答えるアシスタントです。\n箇条書きは必要なときだけ使ってください。"}
+        onChange={(e) => setDraft(e.target.value)}
+      />
+      <div className="switch-row">
+        <div>
+          <div>日付、呼び名、フォルダの一覧を自動で付ける</div>
+          <div className="field-hint">オフにすると、Claude は今日の日付が分からなくなります。個人設定はオンオフに関係なく付きます</div>
+        </div>
+        <Toggle checked={chat.appendAppContext} onChange={(v) => void updateSettings({ chat: { appendAppContext: v } })} />
+      </div>
+      <div className="settings-actions">
+        <button type="button" className="button" disabled={dirty} title={dirty ? "保存してから確認できます" : undefined} onClick={async () => {
+          setPreview((await previewSystemPrompt()) ?? null);
+        }}>送る内容を確認</button>
+        <button type="button" className="button primary" disabled={!dirty} onClick={async () => {
+          if (await updateSettings({ chat: { systemPrompt: draft } })) {
+            setPreview(null);
+            toast("保存しました");
+          }
+        }}>変更を保存</button>
+      </div>
+      {preview !== null && <pre className="prompt-preview">{preview || "何も送りません"}</pre>}
+    </Section>
   );
 }
 

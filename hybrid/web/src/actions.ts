@@ -283,6 +283,7 @@ export const openPath = (target: "root" | "config" | "data" | "logs" | "settings
   guard(() => call("app.open", { target }));
 
 export const pickFolder = () => guard(() => call<string | null>("app.pickFolder"));
+export const previewSystemPrompt = () => guard(() => call<string>("chat.systemPrompt"));
 
 export const localUsage = () => guard(() => call("usage.local"));
 export const reloadPricing = () => guard(() => call("pricing.reload"));

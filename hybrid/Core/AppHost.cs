@@ -101,6 +101,7 @@ public sealed class AppHost : IAsyncDisposable
         "pricing.reload" => ReloadPricingAsync(),
         "app.open" => OpenTargetAsync(Str(p, "target")),
         "app.pickFolder" => Task.FromResult<JsonNode?>(platform.PickFolder()),
+        "chat.systemPrompt" => PreviewSystemPromptAsync(),
         _ => throw new InvalidOperationException($"未知のメソッドです: {method}"),
     };
 
@@ -246,13 +247,23 @@ public sealed class AppHost : IAsyncDisposable
         var profile = current.Profile;
         // OS の言語設定に関係なく日本語の曜日にする
         var today = DateTime.Now.ToString("yyyy年M月d日 dddd", System.Globalization.CultureInfo.GetCultureInfo("ja-JP"));
-        var parts = new List<string> { $"今日の日付は {today} です。" };
-        var name = profile.Nickname.Length > 0 ? profile.Nickname : profile.FullName;
-        if (name.Length > 0) parts.Add($"ユーザーの呼び名は {name} です。");
-        if ((enabledSources is null || enabledSources.Contains(FileToolProvider.Source)) && FileToolProvider.DescribeForPrompt(current.Files) is { } folders) parts.Add(folders);
+        var parts = new List<string>();
+        // 公式プロンプトの書き方をそのまま貼れるように
+        var custom = current.Chat.SystemPrompt.Trim();
+        var hasDate = custom.Contains("{{currentDateTime}}");
+        if (custom.Length > 0) parts.Add(custom.Replace("{{currentDateTime}}", today));
+        if (current.Chat.AppendAppContext)
+        {
+            if (!hasDate) parts.Add($"今日の日付は {today} です。");
+            var name = profile.Nickname.Length > 0 ? profile.Nickname : profile.FullName;
+            if (name.Length > 0) parts.Add($"ユーザーの呼び名は {name} です。");
+            if ((enabledSources is null || enabledSources.Contains(FileToolProvider.Source)) && FileToolProvider.DescribeForPrompt(current.Files) is { } folders) parts.Add(folders);
+        }
         if (profile.Preferences.Trim().Length > 0) parts.Add($"ユーザーが設定した個人設定です。回答に反映してください:\n{profile.Preferences.Trim()}");
         return string.Join("\n\n", parts);
     }
+
+    async Task<JsonNode?> PreviewSystemPromptAsync() => await BuildSystemPromptAsync(null);
 
     async Task<ChatOptions> OptionsFromAsync(JsonObject p)
     {
