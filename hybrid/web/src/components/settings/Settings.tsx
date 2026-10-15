@@ -1,12 +1,14 @@
 import { ExternalLink, FolderOpen, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { navigate, openPath, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
+import { findBuiltin } from "../../builtins";
 import { DEFAULT_LANGUAGE, LANGUAGES } from "../../languages";
 import { EFFORTS, MODELS } from "../../models";
 import { useStore } from "../../store";
 import type { Settings, SettingsTab } from "../../types";
 import { Toggle } from "../ui";
 import { Connectors } from "./Connectors";
+import { Computer } from "./Computer";
 import { Files } from "./Files";
 import { Usage } from "./Usage";
 
@@ -15,6 +17,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: "外観" },
   { id: "api", label: "API とモデル" },
   { id: "files", label: "フォルダ" },
+  { id: "computer", label: "PC 操作" },
   { id: "connectors", label: "コネクタ" },
   { id: "permissions", label: "ツールの権限" },
   { id: "usage", label: "使用量と料金" },
@@ -124,6 +127,15 @@ function Appearance({ settings }: { settings: Settings }) {
   );
 }
 
+// API の下限が 5 万
+const COMPACT_THRESHOLDS = [
+  { value: 50_000, label: "5 万トークン" },
+  { value: 100_000, label: "10 万トークン" },
+  { value: 150_000, label: "15 万トークン (既定)" },
+  { value: 300_000, label: "30 万トークン" },
+  { value: 500_000, label: "50 万トークン" },
+];
+
 function Api({ settings }: { settings: Settings }) {
   const secrets = useStore((s) => s.secrets);
   const [key, setKey] = useState("");
@@ -203,6 +215,16 @@ function Api({ settings }: { settings: Settings }) {
           <input className="input number" type="number" min={1} max={200} value={chat.maxToolTurns}
             onChange={(e) => void updateSettings({ chat: { maxToolTurns: Math.max(1, Number(e.target.value) || 1) } })} />
         </div>
+        <div className="switch-row">
+          <div>
+            <div>会話を要約し始める長さ</div>
+            <div className="field-hint">会話がこの長さを超えると、古い部分を Claude が要約して続けます。短いほど 1 回あたりの料金が下がります</div>
+          </div>
+          <select className="input compact-select" value={chat.compactThreshold} onChange={(e) => void updateSettings({ chat: { compactThreshold: Number(e.target.value) } })}>
+            {COMPACT_THRESHOLDS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+            {!COMPACT_THRESHOLDS.some((t) => t.value === chat.compactThreshold) && <option value={chat.compactThreshold}>{chat.compactThreshold.toLocaleString()} トークン</option>}
+          </select>
+        </div>
       </Section>
 
       <SystemPrompt chat={chat} />
@@ -258,7 +280,10 @@ function Permissions({ settings }: { settings: Settings }) {
       const tool = server.tools.find((t) => t.apiName === apiName);
       if (tool) return `${server.name} / ${tool.title || tool.name}`;
     }
-    return apiName;
+    const [source, ...rest] = apiName.split("__");
+    const builtin = findBuiltin(source);
+    const title = builtin?.titles[rest.join("__")];
+    return builtin && title ? `${builtin.label} / ${title}` : apiName;
   };
   return (
     <Section title="常に許可しているツール" description="ここにないツールは、Claude が使おうとするたびに確認が出ます。">
@@ -328,6 +353,7 @@ export function SettingsPage({ tab }: { tab: SettingsTab }) {
             {tab === "appearance" && <Appearance settings={settings} />}
             {tab === "api" && <Api settings={settings} />}
             {tab === "files" && <Files settings={settings} />}
+            {tab === "computer" && <Computer settings={settings} />}
             {tab === "connectors" && <Connectors settings={settings} />}
             {tab === "permissions" && <Permissions settings={settings} />}
             {tab === "usage" && <Usage />}

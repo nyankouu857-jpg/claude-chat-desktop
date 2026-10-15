@@ -3,13 +3,13 @@ using System.Text.Json.Nodes;
 namespace ClaudeChat.Core;
 
 // ApiName は Claude に見せる名前。ツールの持ち主ごとに重ならないよう接頭辞を付ける
-public sealed record ToolSpec(string ApiName, string Source, string Name, string? Title, string Description, JsonObject InputSchema, bool AutoApprove = false);
+// AllowAlways が false のツールは「常に許可」を出さない。中身次第で何でもできるもの用
+public sealed record ToolSpec(string ApiName, string Source, string Name, string? Title, string Description, JsonObject InputSchema, bool AutoApprove = false, bool AllowAlways = true);
 
 public sealed class ToolException(string message) : Exception(message);
 
 public sealed record ToolCallResult(JsonArray Content, bool IsError);
 
-// 今は MCP だけだが、ターミナルやブラウザ操作の組み込みツールも同じ口で足せるようにしておく
 public interface IToolProvider
 {
     IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources);
@@ -47,4 +47,21 @@ public sealed class ToolRegistry(IEnumerable<IToolProvider> providers)
 
     public static ToolCallResult Error(string message) =>
         new(new JsonArray(new JsonObject { ["type"] = "text", ["text"] = message }), true);
+}
+
+// 組み込みツールで共通の入出力
+public static class ToolJson
+{
+    public static JsonObject Schema(params (string Name, string Type, string Description, bool Required)[] fields) => new()
+    {
+        ["type"] = "object",
+        ["properties"] = new JsonObject(fields.Select(f => KeyValuePair.Create(f.Name, (JsonNode?)new JsonObject { ["type"] = f.Type, ["description"] = f.Description }))),
+        ["required"] = new JsonArray(fields.Where(f => f.Required).Select(f => (JsonNode)f.Name).ToArray()),
+        ["additionalProperties"] = false,
+    };
+
+    public static ToolCallResult Text(string text) => new(new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text }), false);
+
+    public static string Required(JsonObject input, string key) =>
+        (string?)input[key] is { Length: > 0 } value ? value : throw new ToolException($"{key} を指定してください");
 }

@@ -1,9 +1,11 @@
-import { ChevronRight, Copy, FolderOpen, Globe, LoaderCircle, Pencil, Plug, RotateCcw, TriangleAlert } from "lucide-react";
+import { ChevronRight, Copy, Globe, LoaderCircle, Pencil, Plug, RotateCcw, TriangleAlert } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type ReactElement } from "react";
-import { FILES_SOURCE, approve, edit, retry, textOf, toast } from "../actions";
+import { approve, edit, retry, textOf, toast } from "../actions";
+import { findBuiltin } from "../builtins";
 import { renderMarkdown } from "../markdown";
 import { useStore } from "../store";
 import type { Approval, LiveReply, WireBlock, WireMessage } from "../types";
+import { FileChip } from "./Composer";
 import { Spark } from "./ui";
 
 export type Turn =
@@ -103,6 +105,25 @@ function ThinkingBlock({ block, active }: { block: WireBlock; active: boolean })
   );
 }
 
+function CompactionBlock({ block, active }: { block: WireBlock; active: boolean }) {
+  const [open, setOpen] = useState(false);
+  // 要約の指示で <summary> で囲ませているので、表示では外す
+  const summary = typeof block.content === "string" ? block.content.replace(/<\/?summary>/g, "").trim() : "";
+  // 要約は最後に一度に届くので、届くまでは空
+  const pending = active && !summary;
+  const label = pending ? "会話が長くなったので要約しています..." : summary ? "ここまでの会話を要約しました" : "会話の要約に失敗しました";
+  return (
+    <div className={`thinking compaction${open ? " open" : ""}`}>
+      <button type="button" className="thinking-toggle" onClick={() => setOpen((o) => !o)} disabled={!summary}>
+        {pending && <LoaderCircle size={14} className="spin" />}
+        <span>{label}</span>
+        {summary && <ChevronRight size={14} className="chevron" />}
+      </button>
+      {open && summary && <div className="thinking-body">{summary}</div>}
+    </div>
+  );
+}
+
 function WebSearchBlock({ query, result, active }: { query: string; result?: WireBlock; active: boolean }) {
   const [open, setOpen] = useState(false);
   const hits: { title: string; url: string }[] = Array.isArray(result?.content) ? result!.content : [];
@@ -143,55 +164,65 @@ function resultText(result: WireBlock | undefined) {
   return (result.content ?? []).map((c: WireBlock) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");
 }
 
+function ApprovalInput({ approval }: { approval: Approval }) {
+  const input = (approval.input ?? {}) as Record<string, any>;
+  // コマンドは JSON のままだと読みにくいので、そのまま見せる
+  if (approval.source === "terminal" && typeof input.command === "string") {
+    return (
+      <>
+        <pre className="approval-input command">{input.command}</pre>
+        {input.working_directory && <div className="approval-desc">場所: {input.working_directory}</div>}
+      </>
+    );
+  }
+  return <pre className="approval-input">{JSON.stringify(approval.input, null, 2)}</pre>;
+}
+
 function ApprovalCard({ conversationId, approval }: { conversationId: string; approval: Approval }) {
+  const builtin = findBuiltin(approval.source);
+  const name = builtin?.titles[approval.tool] ?? approval.title ?? approval.tool;
   return (
     <div className="approval">
       <div className="approval-title">
-        <Plug size={16} />
+        {builtin ? <builtin.icon size={16} /> : <Plug size={16} />}
         <span>
-          {approval.source === FILES_SOURCE
-            ? <>Claude が <b>{approval.title || approval.tool}</b> を実行しようとしています</>
-            : <><b>{approval.source}</b> の <b>{approval.title || approval.tool}</b> を使おうとしています</>}
+          {builtin
+            ? <>Claude が <b>{name}</b> を実行しようとしています</>
+            : <><b>{approval.source}</b> の <b>{name}</b> を使おうとしています</>}
         </span>
       </div>
-      {approval.description && <div className="approval-desc">{approval.description}</div>}
-      <pre className="approval-input">{JSON.stringify(approval.input, null, 2)}</pre>
+      {!builtin && approval.description && <div className="approval-desc">{approval.description}</div>}
+      <ApprovalInput approval={approval} />
       <div className="approval-actions">
-        <button type="button" className="button primary" onClick={() => approve(conversationId, approval.requestId, "always")}>常に許可</button>
-        <button type="button" className="button" onClick={() => approve(conversationId, approval.requestId, "once")}>今回だけ許可</button>
+        {approval.allowAlways !== false && <button type="button" className="button primary" onClick={() => approve(conversationId, approval.requestId, "always")}>常に許可</button>}
+        <button type="button" className={`button${approval.allowAlways === false ? " primary" : ""}`} onClick={() => approve(conversationId, approval.requestId, "once")}>{approval.allowAlways === false ? "許可" : "今回だけ許可"}</button>
         <button type="button" className="button ghost" onClick={() => approve(conversationId, approval.requestId, "deny")}>拒否</button>
       </div>
+      {approval.allowAlways === false && <div className="approval-note">内容によって何でもできる操作なので、毎回確認します</div>}
     </div>
   );
 }
 
-const FILE_TOOL_TITLES: Record<string, string> = {
-  list_allowed_folders: "許可フォルダを確認",
-  list_directory: "フォルダの中身を見る",
-  read_file: "ファイルを読む",
-  search_files: "ファイルを探す",
-  get_file_info: "ファイルの情報",
-  write_file: "ファイルに書き込む",
-  edit_file: "ファイルを直す",
-  create_directory: "フォルダを作る",
-  move_path: "移動",
-  copy_file: "コピー",
-  delete_path: "ごみ箱へ移す",
-};
+function resultImages(result: WireBlock | undefined): WireBlock[] {
+  return Array.isArray(result?.content) ? result!.content.filter((c: WireBlock) => c.type === "image") : [];
+}
 
 function ToolUseBlock({ block, result, conversationId, live }: { block: WireBlock; result?: WireBlock; conversationId: string; live: LiveReply | null }) {
   const [open, setOpen] = useState(false);
   const approval = live?.approvals.find((a) => a.toolUseId === block.id);
   const running = live?.runningTools.includes(block.id) ?? false;
   const [source, ...rest] = String(block.name).split("__");
-  const isFileTool = source === FILES_SOURCE;
-  const toolName = (isFileTool ? FILE_TOOL_TITLES[rest.join("__")] : undefined) ?? (rest.join("__") || source);
-  const subject = isFileTool ? block.input?.path ?? block.input?.source ?? "" : rest.length ? source : "";
+  const tool = rest.join("__");
+  const builtin = findBuiltin(source);
+  const toolName = (builtin ? builtin.titles[tool] : undefined) ?? (tool || source);
+  const subject = builtin ? builtin.subject(tool, block.input ?? {}) : rest.length ? source : "";
   const status = approval ? "承認待ち" : running ? "実行中" : result ? (result.is_error ? "エラー" : "完了") : live ? "準備中" : "";
+  const Icon = builtin?.icon ?? Plug;
+  const images = resultImages(result);
   return (
     <div className="tool-card">
       <button type="button" className="tool-card-header" onClick={() => setOpen((o) => !o)}>
-        {running || (live && !result && !approval) ? <LoaderCircle size={15} className="spin" /> : result?.is_error ? <TriangleAlert size={15} /> : isFileTool ? <FolderOpen size={15} /> : <Plug size={15} />}
+        {running || (live && !result && !approval) ? <LoaderCircle size={15} className="spin" /> : result?.is_error ? <TriangleAlert size={15} /> : <Icon size={15} />}
         <span className="tool-card-title">{toolName}</span>
         <span className="tool-card-sub">{subject}</span>
         {status && <span className={`tool-badge${result?.is_error ? " error" : approval ? " waiting" : ""}`}>{status}</span>}
@@ -204,7 +235,8 @@ function ToolUseBlock({ block, result, conversationId, live }: { block: WireBloc
           {result && (
             <>
               <div className="tool-section-label">結果</div>
-              <pre className={result.is_error ? "error" : ""}>{resultText(result)}</pre>
+              {images.map((img, i) => <img key={i} className="tool-image" src={`data:${img.source.media_type};base64,${img.source.data}`} alt="" />)}
+              {(images.length === 0 || resultText(result).replace(/\[image\]/g, "").trim()) && <pre className={result.is_error ? "error" : ""}>{resultText(result)}</pre>}
             </>
           )}
         </div>
@@ -250,6 +282,9 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
       case "tool_use":
         elements.push(<ToolUseBlock key={i} block={block} result={turn.results[block.id]} conversationId={conversationId} live={live} />);
         break;
+      case "compaction":
+        elements.push(<CompactionBlock key={i} block={block} active={active} />);
+        break;
       case "fallback":
         elements.push(<div key={i} className="notice">{block.from?.model} が応答を断ったため {block.to?.model} が続きを書きました</div>);
         break;
@@ -282,11 +317,13 @@ function UserTurn({ turn, conversationId, running }: { turn: Extract<Turn, { kin
   const text = textOf(turn.content);
   const [draft, setDraft] = useState(text);
   const images = Array.isArray(turn.content) ? turn.content.filter((b) => b.type === "image") : [];
+  const documents = Array.isArray(turn.content) ? turn.content.filter((b) => b.type === "document") : [];
 
   if (editing) {
     const save = () => {
       setEditing(false);
-      const content = images.length ? [...images, { type: "text", text: draft }] : draft;
+      const attached = [...documents, ...images];
+      const content = attached.length ? [...attached, { type: "text", text: draft }] : draft;
       void edit(conversationId, turn.index, content);
     };
     return (
@@ -303,6 +340,7 @@ function UserTurn({ turn, conversationId, running }: { turn: Extract<Turn, { kin
   return (
     <div className="user-turn">
       <div className="user-bubble">
+        {documents.map((doc, i) => <FileChip key={`d${i}`} name={doc.title || "添付ファイル"} kind={doc.source?.media_type === "application/pdf" ? "pdf" : "text"} />)}
         {images.map((img, i) => <img key={i} src={`data:${img.source.media_type};base64,${img.source.data}`} alt="" />)}
         {text && <div className="user-text">{text}</div>}
       </div>

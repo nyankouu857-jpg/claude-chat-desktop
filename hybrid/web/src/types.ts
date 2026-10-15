@@ -53,8 +53,11 @@ export interface McpServerConfig {
 export interface Settings {
   profile: { fullName: string; nickname: string; preferences: string; language?: string | null };
   appearance: { theme: "light" | "dark" | "system"; chatFont: "default" | "sans" | "large" };
-  chat: { model: string; effort: Effort; webSearch: boolean; showThinking: boolean; maxToolTurns: number; systemPrompt: string; appendAppContext: boolean };
+  chat: { model: string; effort: Effort; webSearch: boolean; showThinking: boolean; maxToolTurns: number; compactThreshold: number; systemPrompt: string; appendAppContext: boolean };
   files: FileAccess;
+  terminal: { enabled: boolean; timeoutSeconds: number };
+  programs: { enabled: boolean };
+  browser: { enabled: boolean; executablePath?: string | null };
   mcpServers: Record<string, McpServerConfig>;
   toolPermissions: Record<string, string>;
 }
@@ -101,6 +104,7 @@ export interface Approval {
   tool: string;
   title?: string;
   description?: string;
+  allowAlways?: boolean;
   input: unknown;
 }
 
@@ -132,4 +136,4 @@ export type View =
   | { name: "recents" }
   | { name: "settings"; tab: SettingsTab };
 
-export type SettingsTab = "general" | "appearance" | "api" | "files" | "connectors" | "permissions" | "usage" | "data";
+export type SettingsTab = "general" | "appearance" | "api" | "files" | "computer" | "connectors" | "permissions" | "usage" | "data";

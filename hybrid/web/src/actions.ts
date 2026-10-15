@@ -16,6 +16,8 @@ import type {
 
 // C# 側の FileToolProvider.Source と同じ
 export const FILES_SOURCE = "files";
+// 組み込みツールの持ち主。サーバー側の Source と同じ名前
+export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser"];
 
 let toastId = 0;
 
@@ -195,7 +197,7 @@ function chatOptions() {
     model: choice.model,
     effort: choice.effort,
     webSearch: choice.webSearch,
-    enabledSources: [FILES_SOURCE, ...mcp.map((m) => m.name)].filter((name) => !choice.disabledSources.includes(name)),
+    enabledSources: [...BUILTIN_SOURCE_IDS, ...mcp.map((m) => m.name)].filter((name) => !choice.disabledSources.includes(name)),
   };
 }
 

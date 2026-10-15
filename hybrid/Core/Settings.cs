@@ -27,6 +27,8 @@ public sealed class ChatDefaults
     public bool WebSearch { get; set; }
     public bool ShowThinking { get; set; } = true;
     public int MaxToolTurns { get; set; } = 30;
+    // 長い会話を要約し始める入力トークン数
+    public int CompactThreshold { get; set; } = 150_000;
     public string SystemPrompt { get; set; } = "";
     // オフで日付・呼び名・フォルダ一覧を付けない
     public bool AppendAppContext { get; set; } = true;
@@ -36,6 +38,24 @@ public sealed class FolderAccess
 {
     public string Path { get; set; } = "";
     public bool ReadOnly { get; set; }
+}
+
+public sealed class TerminalSettings
+{
+    public bool Enabled { get; set; }
+    public int TimeoutSeconds { get; set; } = 120;
+}
+
+public sealed class ProgramSettings
+{
+    public bool Enabled { get; set; }
+}
+
+public sealed class BrowserSettings
+{
+    public bool Enabled { get; set; }
+    // 空なら Chrome、無ければ Edge を探す
+    public string? ExecutablePath { get; set; }
 }
 
 public sealed class FileAccessSettings
@@ -67,6 +87,9 @@ public sealed class AppSettings
     public AppearanceSettings Appearance { get; set; } = new();
     public ChatDefaults Chat { get; set; } = new();
     public FileAccessSettings Files { get; set; } = new();
+    public TerminalSettings Terminal { get; set; } = new();
+    public ProgramSettings Programs { get; set; } = new();
+    public BrowserSettings Browser { get; set; } = new();
     public Dictionary<string, McpServerConfig> McpServers { get; set; } = [];
     // ツールの API 名 -> "always"。毎回確認を出さないツールを覚えておく
     public Dictionary<string, string> ToolPermissions { get; set; } = [];

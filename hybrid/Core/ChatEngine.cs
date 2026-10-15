@@ -1,14 +1,16 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Anthropic;
+using Anthropic.Core;
 using Anthropic.Exceptions;
 using Anthropic.Helpers;
+using Anthropic.Models.Beta;
 using Anthropic.Models.Beta.Messages;
 using NonBeta = Anthropic.Models.Messages;
 
 namespace ClaudeChat.Core;
 
-public sealed record ChatOptions(string Model, string Effort, bool WebSearch, ISet<string>? EnabledSources, string? SystemPrompt, int MaxToolTurns);
+public sealed record ChatOptions(string Model, string Effort, bool WebSearch, ISet<string>? EnabledSources, string? SystemPrompt, int MaxToolTurns, int CompactThreshold);
 
 public enum ChatStatus
 {
@@ -28,6 +30,10 @@ public interface IApprovalGate
 public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, UsageLedger ledger, SettingsStore settings)
 {
     const string TitleModel = "claude-haiku-5-5";
+    // API の下限
+    const int MinCompactThreshold = 50_000;
+    // ツールがあると要約中にツールを呼んで要約が空になることがあるため、既定の指示を差し替える
+    const string CompactInstructions = "Summarize the transcript inside <summary></summary> tags. Include everything needed to continue the conversation in the next context window: the user's goals and preferences, decisions made, facts and numbers established, file paths and commands used, and anything still pending. Write the summary in the language of the conversation. Do not call any tools while writing this summary; respond with text only.";
 
     static bool IsHaiku(string model) => model.StartsWith("claude-haiku");
 
@@ -66,9 +72,25 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             Model = options.Model,
             MaxTokens = 64000,
             Messages = conversation.CopyMessages().Select(ToParam).ToList(),
-            Thinking = new BetaThinkingConfigAdaptive { Display = Display.Summarized },
+            Thinking = new BetaThinkingConfigAdaptive
+            {
+                Display = Display.Summarized,
+                // 日付入りのシステムプロンプトやツールの増減で前の思考ブロックが無効になっても 400 にしない
+                BlockBinding = new BetaThinkingBlockBinding { PrefixMismatchBehavior = BetaThinkingPrefixMismatchBehavior.DropBlock },
+            },
             OutputConfig = new BetaOutputConfig { Effort = ParseEffort(options.Effort) },
             CacheControl = new BetaCacheControlEphemeral(),
+            ContextManagement = new BetaContextManagementConfig
+            {
+                Edits =
+                [
+                    new BetaCompact20260112Edit
+                    {
+                        Trigger = new BetaInputTokensTrigger { ValueValue = Math.Max(MinCompactThreshold, options.CompactThreshold) },
+                        Instructions = CompactInstructions,
+                    },
+                ],
+            },
         };
         if (!string.IsNullOrWhiteSpace(options.SystemPrompt)) parameters = parameters with { System = options.SystemPrompt };
 
@@ -83,12 +105,14 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         toolList.AddRange(toolSpecs.Select(ToTool));
         if (toolList.Count > 0) parameters = parameters with { Tools = toolList };
 
+        List<ApiEnum<string, AnthropicBeta>> betas = ["compact-2026-01-12", "thinking-binding-controls-2026-08-01"];
         // Haiku 5.5 にはサーバー側フォールバックが無い
         if (!IsHaiku(options.Model))
         {
-            parameters = parameters with { Betas = ["server-side-fallback-2026-07-01"], Fallbacks = new Default() };
+            betas.Add("server-side-fallback-2026-07-01");
+            parameters = parameters with { Fallbacks = new Default() };
         }
-        return parameters;
+        return parameters with { Betas = betas };
     }
 
     public static string Describe(Exception error) => error switch
@@ -287,7 +311,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
     async Task<bool> IsAllowedAsync(ToolSpec spec, string toolUseId, JsonObject input, Action<JsonObject> emit, IApprovalGate gate, CancellationToken cancellationToken)
     {
         var current = await settings.GetAsync();
-        if (spec.AutoApprove || current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always") return true;
+        if (spec.AutoApprove || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return true;
 
         var decision = await gate.RequestAsync(new JsonObject
         {
@@ -297,32 +321,43 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             ["tool"] = spec.Name,
             ["title"] = spec.Title,
             ["description"] = spec.Description,
+            ["allowAlways"] = spec.AllowAlways,
             ["input"] = input.DeepClone(),
         }, cancellationToken);
 
-        if (decision == "always") await settings.UpdateAsync(s => s.ToolPermissions[spec.ApiName] = "always");
+        if (decision == "always" && spec.AllowAlways) await settings.UpdateAsync(s => s.ToolPermissions[spec.ApiName] = "always");
         return decision is "once" or "always";
     }
 
+    // 要約やフォールバックの分は iterations にしか載らないので、あればそちらを合算する
     async Task RecordUsageAsync(Conversation conversation, string model, string kind, BetaUsage usage)
     {
-        var record = await ledger.RecordAsync(new UsageRecord
+        var wire = ToWire(usage);
+        var iterations = (wire["iterations"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
+        if (iterations.Count == 0) iterations = [wire];
+        var webSearches = usage.ServerToolUse?.WebSearchRequests ?? 0;
+        foreach (var group in iterations.GroupBy(i => (string?)i["model"] ?? model))
         {
-            At = DateTimeOffset.UtcNow,
-            ConversationId = conversation.Id,
-            Kind = kind,
-            Model = model,
-            Input = usage.InputTokens,
-            Output = usage.OutputTokens,
-            CacheWrite = usage.CacheCreationInputTokens ?? 0,
-            CacheRead = usage.CacheReadInputTokens ?? 0,
-            WebSearches = usage.ServerToolUse?.WebSearchRequests ?? 0,
-        });
-        conversation.Usage.Input += record.Input + record.CacheWrite;
-        conversation.Usage.Output += record.Output;
-        conversation.Usage.CacheRead += record.CacheRead;
-        conversation.Usage.CacheWrite += record.CacheWrite;
-        conversation.Usage.CostUsd += record.CostUsd ?? 0;
+            static long Sum(IEnumerable<JsonObject> items, string key) => items.Sum(i => (long?)i[key] ?? 0);
+            var record = await ledger.RecordAsync(new UsageRecord
+            {
+                At = DateTimeOffset.UtcNow,
+                ConversationId = conversation.Id,
+                Kind = kind,
+                Model = group.Key,
+                Input = Sum(group, "input_tokens"),
+                Output = Sum(group, "output_tokens"),
+                CacheWrite = Sum(group, "cache_creation_input_tokens"),
+                CacheRead = Sum(group, "cache_read_input_tokens"),
+                WebSearches = webSearches,
+            });
+            webSearches = 0;
+            conversation.Usage.Input += record.Input + record.CacheWrite;
+            conversation.Usage.Output += record.Output;
+            conversation.Usage.CacheRead += record.CacheRead;
+            conversation.Usage.CacheWrite += record.CacheWrite;
+            conversation.Usage.CostUsd += record.CostUsd ?? 0;
+        }
     }
 
     public async Task<string?> GenerateTitleAsync(Conversation conversation)

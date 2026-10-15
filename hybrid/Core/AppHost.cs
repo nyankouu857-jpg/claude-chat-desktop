@@ -24,6 +24,8 @@ public sealed class AppHost : IAsyncDisposable
     readonly ConversationStore conversations;
     readonly UsageLedger ledger;
     readonly McpHub mcp;
+    readonly TerminalToolProvider terminal;
+    readonly BrowserToolProvider browser;
     readonly ToolRegistry tools;
     readonly OrgCostClient orgCost;
     readonly HttpClient http = new();
@@ -42,7 +44,9 @@ public sealed class AppHost : IAsyncDisposable
         conversations = new ConversationStore(paths);
         ledger = new UsageLedger(paths);
         mcp = new McpHub(paths);
-        tools = new ToolRegistry([new FileToolProvider(settings, platform), mcp]);
+        terminal = new TerminalToolProvider(settings);
+        browser = new BrowserToolProvider(settings, paths);
+        tools = new ToolRegistry([new FileToolProvider(settings, platform), terminal, new ProgramToolProvider(settings), browser, mcp]);
         orgCost = new OrgCostClient(paths, http);
         mcp.Changed += () => Emit("mcp.changed", mcp.Describe());
     }
@@ -137,6 +141,9 @@ public sealed class AppHost : IAsyncDisposable
         ["appearance"] = Json.ToNode(s.Appearance),
         ["chat"] = Json.ToNode(s.Chat),
         ["files"] = Json.ToNode(s.Files),
+        ["terminal"] = Json.ToNode(s.Terminal),
+        ["programs"] = Json.ToNode(s.Programs),
+        ["browser"] = Json.ToNode(s.Browser),
         ["mcpServers"] = JsonSerializer.SerializeToNode(s.McpServers, Json.Wire),
         ["toolPermissions"] = JsonSerializer.SerializeToNode(s.ToolPermissions, Json.Wire),
     };
@@ -169,6 +176,9 @@ public sealed class AppHost : IAsyncDisposable
             if (patch["appearance"] is JsonObject appearance) s.Appearance = Merge(s.Appearance, appearance);
             if (patch["chat"] is JsonObject chat) s.Chat = Merge(s.Chat, chat);
             if (patch["files"] is JsonObject files) s.Files = Merge(s.Files, files);
+            if (patch["terminal"] is JsonObject terminalPatch) s.Terminal = Merge(s.Terminal, terminalPatch);
+            if (patch["programs"] is JsonObject programs) s.Programs = Merge(s.Programs, programs);
+            if (patch["browser"] is JsonObject browser) s.Browser = Merge(s.Browser, browser);
         });
         return SettingsView(updated);
     }
@@ -259,7 +269,8 @@ public sealed class AppHost : IAsyncDisposable
             (bool?)p["webSearch"] ?? defaults.WebSearch,
             enabled,
             await BuildSystemPromptAsync(enabled),
-            Math.Max(1, defaults.MaxToolTurns));
+            Math.Max(1, defaults.MaxToolTurns),
+            defaults.CompactThreshold);
     }
 
     async Task<JsonNode?> SendAsync(JsonObject p)
@@ -481,6 +492,8 @@ public sealed class AppHost : IAsyncDisposable
     {
         foreach (var cancellation in runningChats.Values) cancellation.Cancel();
         await mcp.DisposeAsync();
+        terminal.Dispose();
+        await browser.DisposeAsync();
         http.Dispose();
     }
 }

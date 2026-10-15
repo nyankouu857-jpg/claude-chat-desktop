@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json.Nodes;
+using static ClaudeChat.Core.ToolJson;
 
 namespace ClaudeChat.Core;
 
@@ -73,14 +74,6 @@ public sealed class FileToolProvider : IToolProvider
         ];
     }
 
-    static JsonObject Schema(params (string Name, string Type, string Description, bool Required)[] fields) => new()
-    {
-        ["type"] = "object",
-        ["properties"] = new JsonObject(fields.Select(f => KeyValuePair.Create(f.Name, (JsonNode?)new JsonObject { ["type"] = f.Type, ["description"] = f.Description }))),
-        ["required"] = new JsonArray(fields.Where(f => f.Required).Select(f => (JsonNode)f.Name).ToArray()),
-        ["additionalProperties"] = false,
-    };
-
     FileAccessSettings? ActiveAccess()
     {
         var access = settings.Current?.Files;
@@ -111,11 +104,6 @@ public sealed class FileToolProvider : IToolProvider
             throw new ToolException(e.Message);
         }
     }
-
-    static ToolCallResult Text(string text) => new(new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text }), false);
-
-    static string Required(JsonObject input, string key) =>
-        (string?)input[key] is { Length: > 0 } value ? value : throw new ToolException($"{key} を指定してください");
 
     static string Normalize(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 

@@ -796,3 +796,14 @@ code { font-family: var(--font-mono); }
 .language-picker { display: grid; gap: 10px; justify-items: center; margin-bottom: 18px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 14px; }
 .language-picker-title { font-weight: 600; }
 .language-picker-options { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.compact-select { width: auto; min-width: 170px; }
+.file-chip { display: flex; align-items: center; gap: 8px; height: 64px; max-width: 220px; padding: 0 12px; border: 0.5px solid var(--border); border-radius: 10px; background: var(--bg-000); color: var(--text-200); }
+.file-chip-text { display: grid; min-width: 0; }
+.file-chip-name { font-size: 13px; color: var(--text-100); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip-kind { font-size: 11.5px; color: var(--text-300); }
+.user-bubble .file-chip { height: 52px; margin-bottom: 6px; }
+.approval-input.command { white-space: pre-wrap; word-break: break-all; font-size: 13px; }
+.approval-note { margin-top: 8px; font-size: 12px; color: var(--text-300); }
+.tool-image { display: block; max-width: 100%; border-radius: 8px; border: 0.5px solid var(--border); margin-bottom: 8px; }
+.computer-warning { margin: 0 0 24px; }
+.browser-path-label { margin-top: 14px; }
