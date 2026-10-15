@@ -1,4 +1,4 @@
-import { ChevronRight, Copy, Globe, LoaderCircle, Pencil, Plug, RotateCcw, TriangleAlert } from "lucide-react";
+import { ChevronRight, Copy, Globe, LoaderCircle, Pencil, Plug, RotateCcw, TriangleAlert, X } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type ReactElement } from "react";
 import { approve, edit, retry, textOf, toast } from "../actions";
 import { findBuiltin } from "../builtins";
@@ -318,20 +318,34 @@ function UserTurn({ turn, conversationId, running }: { turn: Extract<Turn, { kin
   const [draft, setDraft] = useState(text);
   const images = Array.isArray(turn.content) ? turn.content.filter((b) => b.type === "image") : [];
   const documents = Array.isArray(turn.content) ? turn.content.filter((b) => b.type === "document") : [];
+  // 大きすぎる添付で送れなくなった会話から抜け出せるよう、編集で外せる
+  const [kept, setKept] = useState<WireBlock[]>([]);
 
   if (editing) {
     const save = () => {
       setEditing(false);
-      const attached = [...documents, ...images];
-      const content = attached.length ? [...attached, { type: "text", text: draft }] : draft;
+      // 空の text ブロックは API に拒否される
+      const content = kept.length ? [...kept, ...(draft.trim() ? [{ type: "text", text: draft }] : [])] : draft;
       void edit(conversationId, turn.index, content);
     };
     return (
       <div className="user-turn editing">
+        {kept.length > 0 && (
+          <div className="attachments">
+            {kept.map((b, i) => (
+              <div className={`attachment${b.type === "image" ? "" : " file"}`} key={i}>
+                {b.type === "image"
+                  ? <img src={`data:${b.source.media_type};base64,${b.source.data}`} alt="" />
+                  : <FileChip name={b.title || "添付ファイル"} kind={b.source?.media_type === "application/pdf" ? "pdf" : "text"} />}
+                <button type="button" aria-label="添付を外す" onClick={() => setKept((list) => list.filter((_, j) => j !== i))}><X size={12} /></button>
+              </div>
+            ))}
+          </div>
+        )}
         <textarea className="input" value={draft} autoFocus rows={Math.min(10, draft.split("\n").length + 1)} onChange={(e) => setDraft(e.target.value)} />
         <div className="edit-actions">
           <button type="button" className="button ghost" onClick={() => setEditing(false)}>キャンセル</button>
-          <button type="button" className="button primary" disabled={!draft.trim()} onClick={save}>保存して送信</button>
+          <button type="button" className="button primary" disabled={!draft.trim() && kept.length === 0} onClick={save}>保存して送信</button>
         </div>
       </div>
     );
@@ -346,7 +360,7 @@ function UserTurn({ turn, conversationId, running }: { turn: Extract<Turn, { kin
       </div>
       <div className="user-actions">
         <button type="button" className="icon-button small" title="コピー" onClick={() => void copyText(text)}><Copy size={14} /></button>
-        {!running && <button type="button" className="icon-button small" title="編集" onClick={() => { setDraft(text); setEditing(true); }}><Pencil size={14} /></button>}
+        {!running && <button type="button" className="icon-button small" title="編集" onClick={() => { setDraft(text); setKept([...documents, ...images]); setEditing(true); }}><Pencil size={14} /></button>}
       </div>
     </div>
   );

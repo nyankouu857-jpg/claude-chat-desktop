@@ -18,6 +18,7 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
     // バックグラウンドの出力を溜めすぎない
     const int MaxBackgroundBufferChars = 1_000_000;
     const int MaxTimeoutSeconds = 600;
+    static readonly TimeSpan OutputGrace = TimeSpan.FromSeconds(2);
 
     sealed class BackgroundCommand(int id, string command, Process process)
     {
@@ -72,8 +73,6 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
                 AutoApprove: true),
         ];
     }
-
-    public bool Owns(string apiName) => apiName.StartsWith(Prefix);
 
     public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
@@ -193,14 +192,18 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
         var output = new StringBuilder();
         using var process = CreateProcess(command, directory);
         Capture(process, output);
+        // WaitForExitAsync は出力の終わりまで待つので、& で残した子プロセスがいるとシェルが終わっても返らない
+        var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        process.Exited += (_, _) => exited.TrySetResult();
         Start(process);
+        if (process.HasExited) exited.TrySetResult();
 
         using var timer = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timer.CancelAfter(TimeSpan.FromSeconds(timeout));
         var timedOut = false;
         try
         {
-            await process.WaitForExitAsync(timer.Token);
+            await exited.Task.WaitAsync(timer.Token);
         }
         catch (OperationCanceledException)
         {
@@ -208,12 +211,19 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
             cancellationToken.ThrowIfCancellationRequested();
             timedOut = true;
         }
-        // 終了後に残りの出力が届くのを待つ
-        if (!timedOut) process.WaitForExit();
+
+        var leftRunning = false;
+        if (!timedOut)
+        {
+            // 残りの出力が届くのを少しだけ待つ
+            var drained = process.WaitForExitAsync(CancellationToken.None);
+            leftRunning = await Task.WhenAny(drained, Task.Delay(OutputGrace, CancellationToken.None)) != drained;
+        }
 
         string text;
         lock (output) text = Clean(output.ToString());
         var status = timedOut ? $"{timeout} 秒でタイムアウトしたので止めました" : $"終了コード {process.ExitCode}";
+        if (leftRunning) status += "。シェルの終了後も動き続けているプロセスがあります。止める必要があれば、次からは start_background で起動してください";
         var body = $"$ {command}\n({directory} / {status})\n{(text.Length > 0 ? text : "(出力なし)")}";
         return new ToolCallResult(new JsonArray(new JsonObject { ["type"] = "text", ["text"] = body }), timedOut || process.ExitCode != 0);
     }
@@ -226,6 +236,7 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
         var job = new BackgroundCommand(Interlocked.Increment(ref nextId), command, process);
         Capture(process, job.Output);
         process.OutputDataReceived += (_, _) => Trim(job);
+        process.ErrorDataReceived += (_, _) => Trim(job);
         Start(process);
         background[job.Id] = job;
         return Text($"id {job.Id} で開始しました ({directory})。出力は read_background で確認できます");

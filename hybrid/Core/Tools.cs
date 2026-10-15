@@ -13,7 +13,6 @@ public sealed record ToolCallResult(JsonArray Content, bool IsError);
 public interface IToolProvider
 {
     IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources);
-    bool Owns(string apiName);
     Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken);
 }
 
@@ -21,15 +20,17 @@ public sealed class ToolRegistry(IEnumerable<IToolProvider> providers)
 {
     readonly List<IToolProvider> providers = providers.ToList();
 
+    // 同じ名前は API が 400 にするので、先に登録した組み込みを優先して 1 つにする
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources) =>
-        providers.SelectMany(p => p.GetTools(enabledSources)).ToList();
+        providers.SelectMany(p => p.GetTools(enabledSources)).DistinctBy(t => t.ApiName).ToList();
 
     public ToolSpec? Find(string apiName, ISet<string>? enabledSources) =>
         GetTools(enabledSources).FirstOrDefault(t => t.ApiName == apiName);
 
-    public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
+    // 許可を取ったツールと同じ持ち主に渡す。名前の接頭辞だけで選ぶと、同名の MCP サーバーに取られる
+    public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, ISet<string>? enabledSources, CancellationToken cancellationToken)
     {
-        var provider = providers.FirstOrDefault(p => p.Owns(apiName));
+        var provider = providers.FirstOrDefault(p => p.GetTools(enabledSources).Any(t => t.ApiName == apiName));
         if (provider is null) return Error($"ツール {apiName} は現在使えません。接続が切れている可能性があります");
         try
         {

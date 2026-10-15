@@ -1,5 +1,5 @@
 import { RefreshCw, TriangleAlert } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { localUsage, openPath, orgUsage, reloadPricing, setSecret, toast } from "../../actions";
 import { modelLabel } from "../../models";
 import { useStore } from "../../store";
@@ -20,6 +20,7 @@ interface LocalSummary {
   thisMonth: Totals;
   lastMonth: Totals;
   lifetime: Totals;
+  pricingError?: string | null;
   since: string | null;
   daily: { date: string; costUsd: number }[];
   monthly: { month: string; costUsd: number }[];
@@ -140,6 +141,7 @@ function LocalUsage() {
         <StatTile label="先月" totals={summary.lastMonth} />
         <StatTile label="累計" totals={summary.lifetime} note={summary.since ? `${new Date(summary.since).toLocaleDateString("ja-JP")} から` : undefined} />
       </div>
+      {summary.pricingError && <div className="warning-box"><TriangleAlert size={16} /> {summary.pricingError}</div>}
       {summary.lifetime.unpriced > 0 && (
         <div className="warning-box"><TriangleAlert size={16} /> 料金表にないモデルの記録が {summary.lifetime.unpriced} 件あり、料金に含まれていません。pricing.json に単価を足すと反映されます。</div>
       )}
@@ -189,9 +191,14 @@ function OrgUsage() {
   const [result, setResult] = useState<{ data?: OrgSummary; error?: string } | null>(null);
   const [adminKey, setAdminKey] = useState("");
 
+  // 期間を続けて切り替えたとき、遅れて返った古い結果で上書きしない
+  const latestRequest = useRef(0);
   async function fetchCost(r = range) {
+    const request = ++latestRequest.current;
     setLoading(true);
-    setResult(await orgUsage(r));
+    const fetched = await orgUsage(r);
+    if (request !== latestRequest.current) return;
+    setResult(fetched);
     setLoading(false);
   }
 

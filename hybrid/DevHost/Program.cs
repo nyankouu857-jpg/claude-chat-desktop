@@ -48,6 +48,14 @@ async Task HandleAsync(HttpListenerContext context)
 {
     if (context.Request.IsWebSocketRequest && context.Request.Url?.AbsolutePath == "/ws")
     {
+        // ほかのサイトのページから ws://localhost に繋がれると、ツールやコネクタを勝手に動かされる
+        var origin = context.Request.Headers["Origin"];
+        if (origin != $"http://localhost:{port}" && origin != $"http://127.0.0.1:{port}")
+        {
+            context.Response.StatusCode = 403;
+            context.Response.Close();
+            return;
+        }
         var socket = (await context.AcceptWebSocketAsync(null)).WebSocket;
         var entry = (socket, Channel.CreateUnbounded<string>());
         lock (sockets) sockets.Add(entry);

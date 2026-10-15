@@ -109,6 +109,8 @@ public sealed class AppHost : IAsyncDisposable
         _ => throw new InvalidOperationException($"未知のメソッドです: {method}"),
     };
 
+    static readonly string[] BuiltinSources = [FileToolProvider.Source, TerminalToolProvider.Source, ProgramToolProvider.Source, BrowserToolProvider.Source];
+
     static string Str(JsonObject p, string key) => (string?)p[key] ?? throw new InvalidOperationException($"{key} がありません");
 
     async Task<JsonNode?> InitAsync()
@@ -277,13 +279,35 @@ public sealed class AppHost : IAsyncDisposable
     {
         var id = (string?)p["conversationId"];
         var conversation = (id is null ? null : await conversations.GetAsync(id)) ?? conversations.Create();
-        if (runningChats.ContainsKey(conversation.Id)) throw new InvalidOperationException("この会話は応答中です");
         var content = p["content"]?.DeepClone() ?? throw new InvalidOperationException("content がありません");
-        conversation.Append(new JsonObject { ["role"] = "user", ["content"] = content });
-        await conversations.SaveAsync(conversation);
-        Emit("conversations.changed", null);
-        StartChat(conversation, await OptionsFromAsync(p));
+        var cancellation = Reserve(conversation.Id);
+        try
+        {
+            conversation.Append(new JsonObject { ["role"] = "user", ["content"] = content });
+            await conversations.SaveAsync(conversation);
+            Emit("conversations.changed", null);
+            StartChat(conversation, await OptionsFromAsync(p), cancellation);
+        }
+        catch
+        {
+            Release(conversation.Id, cancellation);
+            throw;
+        }
         return new JsonObject { ["conversationId"] = conversation.Id };
+    }
+
+    // 確認と登録の間に await を挟むと、連打で同じ会話に 2 本走ってしまう
+    CancellationTokenSource Reserve(string conversationId)
+    {
+        var cancellation = new CancellationTokenSource();
+        if (runningChats.TryAdd(conversationId, cancellation)) return cancellation;
+        cancellation.Dispose();
+        throw new InvalidOperationException("この会話は応答中です");
+    }
+
+    void Release(string conversationId, CancellationTokenSource cancellation)
+    {
+        if (runningChats.TryRemove(new KeyValuePair<string, CancellationTokenSource>(conversationId, cancellation))) cancellation.Dispose();
     }
 
     static bool IsHumanTurn(JsonObject message) =>
@@ -293,33 +317,47 @@ public sealed class AppHost : IAsyncDisposable
     async Task<JsonNode?> RetryAsync(JsonObject p)
     {
         var conversation = await conversations.GetAsync(Str(p, "conversationId")) ?? throw new InvalidOperationException("会話が見つかりません");
-        if (runningChats.ContainsKey(conversation.Id)) throw new InvalidOperationException("この会話は応答中です");
-        var messages = conversation.CopyMessages();
-        var lastHuman = messages.FindLastIndex(IsHumanTurn);
-        if (lastHuman < 0) throw new InvalidOperationException("やり直す発言がありません");
-        // 最後の発言より前は一切変えないので、過去の思考ブロックはそのまま有効
-        conversation.TruncateFrom(lastHuman + 1);
-        await conversations.SaveAsync(conversation);
-        StartChat(conversation, await OptionsFromAsync(p));
+        var cancellation = Reserve(conversation.Id);
+        try
+        {
+            var messages = conversation.CopyMessages();
+            var lastHuman = messages.FindLastIndex(IsHumanTurn);
+            if (lastHuman < 0) throw new InvalidOperationException("やり直す発言がありません");
+            // 最後の発言より前は一切変えないので、過去の思考ブロックはそのまま有効
+            conversation.TruncateFrom(lastHuman + 1);
+            await conversations.SaveAsync(conversation);
+            StartChat(conversation, await OptionsFromAsync(p), cancellation);
+        }
+        catch
+        {
+            Release(conversation.Id, cancellation);
+            throw;
+        }
         return conversation.ToWire();
     }
 
     async Task<JsonNode?> EditAsync(JsonObject p)
     {
         var conversation = await conversations.GetAsync(Str(p, "conversationId")) ?? throw new InvalidOperationException("会話が見つかりません");
-        if (runningChats.ContainsKey(conversation.Id)) throw new InvalidOperationException("この会話は応答中です");
         var index = (int?)p["messageIndex"] ?? throw new InvalidOperationException("messageIndex がありません");
-        conversation.TruncateFrom(index);
-        conversation.Append(new JsonObject { ["role"] = "user", ["content"] = p["content"]?.DeepClone() });
-        await conversations.SaveAsync(conversation);
-        StartChat(conversation, await OptionsFromAsync(p));
+        var cancellation = Reserve(conversation.Id);
+        try
+        {
+            conversation.TruncateFrom(index);
+            conversation.Append(new JsonObject { ["role"] = "user", ["content"] = p["content"]?.DeepClone() });
+            await conversations.SaveAsync(conversation);
+            StartChat(conversation, await OptionsFromAsync(p), cancellation);
+        }
+        catch
+        {
+            Release(conversation.Id, cancellation);
+            throw;
+        }
         return conversation.ToWire();
     }
 
-    void StartChat(Conversation conversation, ChatOptions options)
+    void StartChat(Conversation conversation, ChatOptions options, CancellationTokenSource cancellation)
     {
-        var cancellation = new CancellationTokenSource();
-        runningChats[conversation.Id] = cancellation;
         Emit("chat.event", new JsonObject { ["conversationId"] = conversation.Id, ["event"] = new JsonObject { ["type"] = "started" } });
         _ = RunChatAsync(conversation, options, cancellation);
     }
@@ -355,6 +393,8 @@ public sealed class AppHost : IAsyncDisposable
             // 応答中に削除された会話を保存し直して復活させない
             if (await conversations.GetAsync(id) is null) return;
             await conversations.SaveAsync(conversation);
+            // 画面は done で入力できるようになるので、先に空けてタイトル作りの間も次の送信を受け付ける
+            Release(id, cancellation);
             EmitChat(new JsonObject
             {
                 ["type"] = "done",
@@ -369,7 +409,8 @@ public sealed class AppHost : IAsyncDisposable
                 try
                 {
                     var title = await engine.GenerateTitleAsync(conversation);
-                    if (title is not null && await conversations.GetAsync(id) is not null)
+                    // 待っている間にユーザーが名前を付けていたら上書きしない
+                    if (title is not null && conversation.Title == Conversation.DefaultTitle && await conversations.GetAsync(id) is not null)
                     {
                         conversation.Title = title;
                         await conversations.SaveAsync(conversation, touch: false);
@@ -388,8 +429,7 @@ public sealed class AppHost : IAsyncDisposable
         }
         finally
         {
-            runningChats.TryRemove(new KeyValuePair<string, CancellationTokenSource>(id, cancellation));
-            cancellation.Dispose();
+            Release(id, cancellation);
         }
     }
 
@@ -434,6 +474,8 @@ public sealed class AppHost : IAsyncDisposable
         foreach (var (name, config) in servers)
         {
             if (string.IsNullOrWhiteSpace(name)) throw new InvalidOperationException("サーバー名が空です");
+            // ツール名の接頭辞が組み込みツールと重なる
+            if (BuiltinSources.Contains(McpHub.SafeName(name), StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException($"{name} は組み込みのツールと同じ名前なので使えません。別の名前にしてください");
             if (!config.IsRemote && string.IsNullOrWhiteSpace(config.Command)) throw new InvalidOperationException($"{name} に command か url を指定してください");
         }
         var updated = await settings.UpdateAsync(s => s.McpServers = servers);

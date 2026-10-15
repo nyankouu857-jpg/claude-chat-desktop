@@ -21,5 +21,9 @@ marked.use({
 });
 
 export function renderMarkdown(text: string): string {
-  return DOMPurify.sanitize(marked.parse(text, { async: false }) as string, { ADD_ATTR: ["data-copy", "target"] });
+  // 回答の中のフォームから別のページへ送られないように
+  return DOMPurify.sanitize(marked.parse(text, { async: false }) as string, {
+    ADD_ATTR: ["data-copy", "target"],
+    FORBID_TAGS: ["form", "iframe", "object", "embed"],
+  });
 }

@@ -89,8 +89,6 @@ public sealed class FileToolProvider : IToolProvider
             .ToList();
     }
 
-    public bool Owns(string apiName) => apiName.StartsWith(Prefix);
-
     public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
         var access = ActiveAccess() ?? throw new ToolException("フォルダ操作は設定で無効になっています");
@@ -103,35 +101,59 @@ public sealed class FileToolProvider : IToolProvider
         {
             throw new ToolException(e.Message);
         }
+        catch (EncoderFallbackException)
+        {
+            throw new ToolException("このファイルの文字コードでは書けない文字が含まれています。その文字を使わずに書き直してください");
+        }
     }
 
     static string Normalize(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 
-    static bool IsInside(string path, string folder) =>
-        path.Equals(folder, PathComparison) || path.StartsWith(folder + Path.DirectorySeparatorChar, PathComparison);
+    // ドライブ直下 (D:\) は末尾の区切りが残るので二重にしない
+    static bool IsInside(string path, string folder)
+    {
+        var prefix = Path.EndsInDirectorySeparator(folder) ? folder : folder + Path.DirectorySeparatorChar;
+        return path.Equals(folder, PathComparison) || path.StartsWith(prefix, PathComparison);
+    }
+
+    // 一番内側の許可フォルダ。読み取り専用はこれで決まる
+    static (string? Root, bool ReadOnly) FolderOf(string full, FileAccessSettings access) => access.Folders
+        .Select(f => ((string?)Normalize(f.Path), f.ReadOnly))
+        .Where(f => IsInside(full, f.Item1!))
+        .OrderByDescending(f => f.Item1!.Length)
+        .FirstOrDefault();
 
     // 許可フォルダ外への脱出防止
     static string Resolve(string path, FileAccessSettings access, bool forWrite)
     {
         var baseFolder = Normalize(access.Folders[0].Path);
         var full = Normalize(Path.IsPathRooted(path) ? path : Path.Combine(baseFolder, path));
-        var folder = access.Folders
-            .Select(f => (Root: Normalize(f.Path), f.ReadOnly))
-            .Where(f => IsInside(full, f.Root))
-            .OrderByDescending(f => f.Root.Length)
-            .FirstOrDefault();
+        var folder = FolderOf(full, access);
         if (folder.Root is null) throw new ToolException($"{full} は許可されたフォルダの外です。list_allowed_folders で確認してください");
         if (forWrite && folder.ReadOnly) throw new ToolException($"{folder.Root} は読み取り専用です");
 
-        // 途中のジャンクションも含めて確認
         for (var current = full; current.Length > folder.Root.Length; current = Path.GetDirectoryName(current)!)
         {
+            RejectShortName(current);
+            // 途中のジャンクションも含めて確認
             FileSystemInfo info = Directory.Exists(current) ? new DirectoryInfo(current) : new FileInfo(current);
             if (!info.Exists || info.LinkTarget is null) continue;
             var target = info.ResolveLinkTarget(returnFinalTarget: true)?.FullName;
-            if (target is null || !IsInside(Normalize(target), folder.Root)) throw new ToolException($"{current} は許可フォルダの外を指すリンクです");
+            var targetFolder = target is null ? default : FolderOf(Normalize(target), access);
+            if (targetFolder.Root is null) throw new ToolException($"{current} は許可フォルダの外を指すリンクです");
+            if (forWrite && targetFolder.ReadOnly) throw new ToolException($"{current} は読み取り専用フォルダを指すリンクです");
         }
         return full;
+    }
+
+    // DOCS~1 のような 8.3 形式の別名だと、文字列の比較で読み取り専用フォルダをすり抜けられる
+    static void RejectShortName(string path)
+    {
+        var name = Path.GetFileName(path);
+        if (!name.Contains('~') || (!File.Exists(path) && !Directory.Exists(path))) return;
+        // 列挙は本当の名前としか一致しない
+        var parent = Path.GetDirectoryName(path);
+        if (parent is null || !Directory.EnumerateFileSystemEntries(parent, name).Any()) throw new ToolException($"{path} は短い形式の名前です。本来のフォルダ名やファイル名で指定してください");
     }
 
     static string Display(string full, FileAccessSettings access)
@@ -159,8 +181,18 @@ public sealed class FileToolProvider : IToolProvider
         }
         catch (DecoderFallbackException)
         {
-            // 古い Windows のテキストファイル
-            return Encoding.GetEncoding(932);
+        }
+        // 古い Windows のテキストファイル。書けない文字は ? にせず失敗させる
+        var shiftJis = Encoding.GetEncoding(932, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
+        try
+        {
+            shiftJis.GetString(bytes);
+            return shiftJis;
+        }
+        catch (DecoderFallbackException)
+        {
+            // どれでもなければ、バイトをそのまま往復できる Latin-1 で扱う
+            return Encoding.Latin1;
         }
     }
 
@@ -237,12 +269,16 @@ public sealed class FileToolProvider : IToolProvider
         var last = Math.Min(lines.Length, offset - 1 + limit);
         for (var i = offset - 1; i < last; i++)
         {
-            if (builder.Length > MaxReadChars)
+            var room = MaxReadChars - builder.Length;
+            if (room <= 0)
             {
                 last = i;
                 break;
             }
-            builder.Append(i + 1).Append('\t').Append(lines[i].TrimEnd('\r')).Append('\n');
+            // 圧縮された JS など 1 行が巨大なファイル
+            var line = lines[i].TrimEnd('\r');
+            if (line.Length > room) line = line[..room] + " ... (この行は長すぎるので途中まで)";
+            builder.Append(i + 1).Append('\t').Append(line).Append('\n');
         }
         var header = $"{Display(path, access)}  {lines.Length} 行  {EncodingName(encoding)}";
         var footer = last < lines.Length ? $"\n... {last} 行目まで表示しました。続きは offset={last + 1} で読んでください" : "";
@@ -257,6 +293,8 @@ public sealed class FileToolProvider : IToolProvider
         var root = Resolve(Required(input, "path"), access, forWrite: false);
         if (!Directory.Exists(root)) throw new ToolException($"{root} というフォルダはありません");
         var pattern = (string?)input["pattern"] is { Length: > 0 } p ? p : "*";
+        // パターンに .. やフォルダが入ると、列挙の起点が許可フォルダの外へずれる
+        if (pattern != Path.GetFileName(pattern) || pattern.Contains("..")) throw new ToolException("pattern にはファイル名のワイルドカード (例: *.cs) だけを指定してください");
         var contains = (string?)input["contains"];
         var options = new EnumerationOptions
         {
@@ -271,7 +309,7 @@ public sealed class FileToolProvider : IToolProvider
         foreach (var file in Directory.EnumerateFiles(root, pattern, options))
         {
             if (hits.Count >= MaxSearchHits) break;
-            if (IsSkipped(file, root)) continue;
+            if (!IsInside(Normalize(file), root) || IsSkipped(file, root)) continue;
             if (string.IsNullOrEmpty(contains))
             {
                 hits.Add(Display(file, access));
@@ -315,7 +353,7 @@ public sealed class FileToolProvider : IToolProvider
         var existed = File.Exists(path);
         var encoding = existed ? DetectEncoding(File.ReadAllBytes(path)) : new UTF8Encoding(false);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllText(path, content, encoding);
+        WriteText(path, content, encoding);
         return Text($"{Display(path, access)} を{(existed ? "上書き" : "作成")}しました ({EncodingName(encoding)}、{content.Split('\n').Length} 行)");
     }
 
@@ -339,8 +377,17 @@ public sealed class FileToolProvider : IToolProvider
         if (count > 1 && !replaceAll) throw new ToolException($"old_text が {count} 箇所に一致しました。前後の行を含めて一意にするか、replace_all を true にしてください");
 
         var edited = replaceAll ? text.Replace(oldText, newText) : ReplaceFirst(text, oldText, newText);
-        File.WriteAllText(path, edited, encoding);
+        WriteText(path, edited, encoding);
         return Text($"{Display(path, access)} の {count} 箇所を書き換えました");
+    }
+
+    // 先にバイト列にしておく。書けない文字で途中で失敗すると、元のファイルが空になる
+    static void WriteText(string path, string text, Encoding encoding)
+    {
+        var bytes = encoding.GetBytes(text);
+        using var stream = File.Create(path);
+        stream.Write(encoding.GetPreamble());
+        stream.Write(bytes);
     }
 
     static int CountOccurrences(string text, string value)
@@ -364,9 +411,10 @@ public sealed class FileToolProvider : IToolProvider
         return Text(existed ? $"{Display(path, access)} は既にあります" : $"{Display(path, access)} を作成しました");
     }
 
+    // 中に許可フォルダ (読み取り専用を含む) を抱えたフォルダも、まとめて消えないように止める
     static void RejectAllowedRoot(string path, FileAccessSettings access)
     {
-        if (access.Folders.Any(f => Normalize(f.Path).Equals(path, PathComparison))) throw new ToolException("許可フォルダそのものは移動や削除ができません");
+        if (access.Folders.Any(f => IsInside(Normalize(f.Path), path))) throw new ToolException("許可フォルダそのものや、許可フォルダを含むフォルダは移動や削除ができません");
     }
 
     static ToolCallResult MovePath(JsonObject input, FileAccessSettings access)

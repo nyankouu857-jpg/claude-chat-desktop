@@ -94,7 +94,8 @@ public partial class MainWindow : Window
         };
         core.NavigationStarting += (_, e) =>
         {
-            if (e.Uri.StartsWith(AppOrigin)) return;
+            // 前方一致だと app.claudechat.evil.example も通ってしまう
+            if (IsAppPage(e.Uri)) return;
             e.Cancel = true;
             if (e.Uri.StartsWith("http://") || e.Uri.StartsWith("https://")) WindowsPlatform.OpenUrl(e.Uri);
         };
@@ -106,6 +107,8 @@ public partial class MainWindow : Window
         });
         core.WebMessageReceived += (_, e) =>
         {
+            // アプリの画面以外から中身を操作させない
+            if (!IsAppPage(e.Source)) return;
             var message = e.TryGetWebMessageAsString();
             // 重い処理で画面が固まらないよう、受け取ったら UI スレッドから離す
             if (host is { } current) _ = Task.Run(() => current.HandleAsync(message));
@@ -113,6 +116,9 @@ public partial class MainWindow : Window
         await host.StartAsync();
         core.Navigate($"{AppOrigin}/index.html");
     }
+
+    static bool IsAppPage(string uri) =>
+        Uri.TryCreate(uri, UriKind.Absolute, out var parsed) && parsed.Scheme == Uri.UriSchemeHttps && parsed.Host == new Uri(AppOrigin).Host;
 
     CoreWebView2WebResourceResponse Serve(CoreWebView2 core, string uri)
     {

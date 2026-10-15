@@ -2,7 +2,7 @@ import { TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import { updateSettings } from "../../actions";
 import type { Settings } from "../../types";
-import { Toggle } from "../ui";
+import { NumberField, Toggle } from "../ui";
 import { Section } from "./Settings";
 
 export function Computer({ settings }: { settings: Settings }) {
@@ -30,8 +30,7 @@ export function Computer({ settings }: { settings: Settings }) {
             <div>1 回のコマンドで待つ時間 (秒)</div>
             <div className="field-hint">これを過ぎると止めます。サーバーのように動き続けるものは、Claude がバックグラウンドで実行します</div>
           </div>
-          <input className="input number" type="number" min={1} max={600} value={terminal.timeoutSeconds}
-            onChange={(e) => void updateSettings({ terminal: { timeoutSeconds: Math.min(600, Math.max(1, Number(e.target.value) || 1)) } })} />
+          <NumberField value={terminal.timeoutSeconds} min={1} max={600} onCommit={(v) => void updateSettings({ terminal: { timeoutSeconds: v } })} />
         </div>
       </Section>
 

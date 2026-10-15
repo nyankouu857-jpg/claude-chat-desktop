@@ -118,8 +118,6 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         return Tools().Select(t => new ToolSpec(Prefix + t.Name, Source, t.Name, t.Title, t.Description, t.Schema, t.AutoApprove, t.AllowAlways)).ToList();
     }
 
-    public bool Owns(string apiName) => apiName.StartsWith(Prefix);
-
     public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
         if (!Enabled) throw new ToolException("ブラウザ操作は設定で無効になっています");
@@ -128,11 +126,18 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         await gate.WaitAsync(cancellationToken);
         try
         {
-            return await tool.Run(input, cancellationToken);
+            var result = await tool.Run(input, cancellationToken);
+            if (session?.TakeDialogNote() is { } note) result.Content.Add(new JsonObject { ["type"] = "text", ["text"] = $"(ページの{note})" });
+            return result;
         }
         catch (HttpRequestException e)
         {
             throw new ToolException($"ブラウザに接続できませんでした: {e.Message}");
+        }
+        // HttpClient のタイムアウトもキャンセル扱いで飛んでくる
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new ToolException("ブラウザの応答がありませんでした。少し待ってからやり直してください");
         }
         finally
         {
@@ -182,7 +187,8 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
             await http.GetStringAsync($"http://127.0.0.1:{found}/json/version", cancellationToken);
             return found;
         }
-        catch (Exception e) when (e is IOException or HttpRequestException or TaskCanceledException)
+        // ユーザーの停止まで「ブラウザが無い」と扱うと、動いているブラウザの接続情報を消してしまう
+        catch (Exception e) when (e is IOException or HttpRequestException || (e is TaskCanceledException && !cancellationToken.IsCancellationRequested))
         {
             return null;
         }
@@ -198,6 +204,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
             port = existing;
             return;
         }
+        cancellationToken.ThrowIfCancellationRequested();
         Directory.CreateDirectory(ProfileDir);
         File.Delete(Path.Combine(ProfileDir, "DevToolsActivePort"));
         // ブラウザのログをアプリの出力に混ぜない
@@ -260,6 +267,8 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         var url = (string?)target?["webSocketDebuggerUrl"] ?? throw new ToolException("ブラウザのタブに接続できませんでした");
         currentTargetId = (string?)target!["id"];
         session = await CdpSession.ConnectAsync(new Uri(url), cancellationToken);
+        // ダイアログの通知を受け取る
+        await session.SendAsync("Page.enable", null, cancellationToken);
         await session.SendAsync("Page.bringToFront", null, cancellationToken);
         return session;
     }
@@ -318,7 +327,8 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
             (() => {
               const el = document.querySelector('[data-claude-ref="{{reference}}"]');
               if (!el) return null;
-              el.scrollIntoView({ block: 'center', inline: 'center' });
+              // scroll-behavior: smooth のページでも、座標を取る前に動かし終える
+              el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
               const r = el.getBoundingClientRect();
               return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
             })()
@@ -329,10 +339,12 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
 
     static async Task KeyAsync(CdpSession page, string key, int code, string? text, CancellationToken cancellationToken)
     {
-        var down = new JsonObject { ["type"] = text is null ? "rawKeyDown" : "keyDown", ["key"] = key, ["code"] = key, ["windowsVirtualKeyCode"] = code };
+        // DOM の key は空白 1 文字。"Space" のままだとボタンやチェックボックスが反応しない
+        var domKey = key == "Space" ? " " : key;
+        var down = new JsonObject { ["type"] = text is null ? "rawKeyDown" : "keyDown", ["key"] = domKey, ["code"] = key, ["windowsVirtualKeyCode"] = code };
         if (text is not null) down["text"] = text;
         await page.SendAsync("Input.dispatchKeyEvent", down, cancellationToken);
-        await page.SendAsync("Input.dispatchKeyEvent", new JsonObject { ["type"] = "keyUp", ["key"] = key, ["code"] = key, ["windowsVirtualKeyCode"] = code }, cancellationToken);
+        await page.SendAsync("Input.dispatchKeyEvent", new JsonObject { ["type"] = "keyUp", ["key"] = domKey, ["code"] = key, ["windowsVirtualKeyCode"] = code }, cancellationToken);
     }
 
     static readonly Dictionary<string, (int Code, string? Text)> Keys = new(StringComparer.OrdinalIgnoreCase)
@@ -366,6 +378,9 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
             var local = url.StartsWith("localhost") || url.StartsWith("127.") || url.StartsWith("[::1]");
             url = (local ? "http://" : "https://") + url;
         }
+        // file:// を許すと、フォルダ操作の許可範囲を通らずに PC のファイルを読めてしまう
+        var isWeb = Uri.TryCreate(url, UriKind.Absolute, out var parsed) && parsed.Scheme is "http" or "https";
+        if (!isWeb && url != "about:blank") throw new ToolException("開けるのは http と https のページだけです。PC のファイルはフォルダ操作のツールで読んでください");
         var page = await PageAsync(cancellationToken, newTab: (bool?)input["new_tab"] == true);
         var result = await page.SendAsync("Page.navigate", new JsonObject { ["url"] = url }, cancellationToken);
         if ((string?)result["errorText"] is { Length: > 0 } error) throw new ToolException($"{url} を開けませんでした: {error}");
@@ -412,7 +427,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
             (() => {
               const el = document.querySelector('[data-claude-ref="{{reference}}"]');
               if (!el) return 'missing';
-              el.scrollIntoView({ block: 'center' });
+              el.scrollIntoView({ block: 'center', behavior: 'instant' });
               if (el.tagName === 'SELECT') {
                 const wanted = {{JsonSerializer.Serialize(text)}};
                 const option = [...el.options].find(o => o.text.trim() === wanted || o.value === wanted);
@@ -423,6 +438,9 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
                 return 'select';
               }
               el.focus();
+              // フォーカスできない要素だと、前に選んでいた欄へ入力してしまう
+              const active = document.activeElement;
+              if (!(active === el || el.contains(active))) return 'not-editable';
               if (el.isContentEditable) document.execCommand('selectAll');
               else if (typeof el.select === 'function') el.select();
               return 'text';
@@ -432,6 +450,8 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         {
             case "missing":
                 throw new ToolException($"要素 {reference} が見つかりません。snapshot を取り直してください");
+            case "not-editable":
+                throw new ToolException($"要素 {reference} は入力欄ではないため入力できません。snapshot で入力欄の番号を確かめてください");
             case "no-option":
                 throw new ToolException($"要素 {reference} に「{text}」という選択肢はありません");
             case "text":

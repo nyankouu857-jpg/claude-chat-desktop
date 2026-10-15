@@ -12,8 +12,14 @@ public sealed class CdpSession : IAsyncDisposable
     readonly ConcurrentDictionary<int, TaskCompletionSource<JsonObject>> pending = new();
     readonly SemaphoreSlim sendGate = new(1, 1);
     readonly CancellationTokenSource closing = new();
+    // alert や confirm が出たままだと CDP の応答が返らない
+    static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
     int nextId;
     Task? receiveLoop;
+    string? dialogNote;
+
+    // 自動で閉じたダイアログの説明。1 回読むと消える
+    public string? TakeDialogNote() => Interlocked.Exchange(ref dialogNote, null);
 
     public bool IsOpen => socket.State == WebSocketState.Open;
 
@@ -43,8 +49,37 @@ public sealed class CdpSession : IAsyncDisposable
         {
             sendGate.Release();
         }
-        using var registration = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
-        return await completion.Task;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(CommandTimeout);
+        using var registration = timeout.Token.Register(() => completion.TrySetCanceled(timeout.Token));
+        try
+        {
+            return await completion.Task;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new ToolException($"ブラウザが {CommandTimeout.TotalSeconds:0} 秒応答しませんでした");
+        }
+        finally
+        {
+            pending.TryRemove(id, out _);
+        }
+    }
+
+    // 確認ダイアログは承認せずにキャンセルする。削除などをユーザーの知らないところで確定させない
+    async Task HandleDialogAsync(JsonObject parameters)
+    {
+        var type = (string?)parameters["type"];
+        var accept = type is "alert" or "beforeunload";
+        dialogNote = $"{type} ダイアログ「{(string?)parameters["message"]}」を{(accept ? "閉じました" : "キャンセルしました")}";
+        try
+        {
+            await SendAsync("Page.handleJavaScriptDialog", new JsonObject { ["accept"] = accept }, CancellationToken.None);
+        }
+        catch (ToolException)
+        {
+            // 先に閉じられていた
+        }
     }
 
     async Task ReceiveAsync()
@@ -61,6 +96,12 @@ public sealed class CdpSession : IAsyncDisposable
                 if (!result.EndOfMessage) continue;
                 var json = JsonNode.Parse(message.ToArray()) as JsonObject;
                 message.SetLength(0);
+                if ((string?)json?["method"] == "Page.javascriptDialogOpening")
+                {
+                    // 受信ループの中で応答を待つと止まるので、待たずに投げる
+                    _ = HandleDialogAsync(json!["params"] as JsonObject ?? []);
+                    continue;
+                }
                 if ((int?)json?["id"] is not { } id || !pending.TryRemove(id, out var completion)) continue;
                 if (json["error"] is JsonObject error) completion.TrySetException(new ToolException($"ブラウザの操作に失敗しました: {(string?)error["message"]}"));
                 else completion.TrySetResult(json["result"] as JsonObject ?? []);

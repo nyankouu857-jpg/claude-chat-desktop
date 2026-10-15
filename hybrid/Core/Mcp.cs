@@ -18,6 +18,8 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
         public string? Error { get; set; }
         public McpClient? Client { get; set; }
         public List<McpClientTool> Tools { get; set; } = [];
+        // 接続中に止められたら、遅れて繋がったクライアントを捨てるための目印
+        public CancellationTokenSource? Starting { get; set; }
     }
 
     readonly Dictionary<string, ServerState> servers = [];
@@ -28,10 +30,12 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
     [GeneratedRegex("[^A-Za-z0-9_-]")]
     private static partial Regex UnsafeNameChars();
 
+    public static string SafeName(string server) => UnsafeNameChars().Replace(server, "_");
+
     // Claude のツール名は英数字と _ - の 64 文字まで
     static string ApiName(string server, string tool)
     {
-        var name = $"{UnsafeNameChars().Replace(server, "_")}__{UnsafeNameChars().Replace(tool, "_")}";
+        var name = $"{SafeName(server)}__{UnsafeNameChars().Replace(tool, "_")}";
         return name.Length <= 64 ? name : name[..64];
     }
 
@@ -84,6 +88,11 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
 
     async Task StartAsync(ServerState state)
     {
+        // npx の初回ダウンロードや Docker の起動を見込む
+        var starting = new CancellationTokenSource(TimeSpan.FromSeconds(150));
+        state.Starting?.Cancel();
+        state.Starting = starting;
+        McpClient? client = null;
         try
         {
             IClientTransport transport = state.Config.IsRemote
@@ -94,9 +103,7 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
                     AdditionalHeaders = state.Config.Headers,
                 })
                 : new StdioClientTransport(StdioOptions(state));
-            // npx の初回ダウンロードや Docker の起動を見込む
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(150));
-            var client = await McpClient.CreateAsync(
+            client = await McpClient.CreateAsync(
                 transport,
                 new McpClientOptions
                 {
@@ -106,19 +113,44 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
                     // 遅れて discover を処理したサーバーに duplicate initialize で拒否される
                     DiscoverProbeTimeout = TimeSpan.FromSeconds(60),
                 },
-                cancellationToken: timeout.Token);
-            var tools = await client.ListToolsAsync(cancellationToken: timeout.Token);
-            state.Client = client;
-            state.Tools = tools.ToList();
-            state.Status = "running";
-            state.Error = null;
+                cancellationToken: starting.Token);
+            var tools = await client.ListToolsAsync(cancellationToken: starting.Token);
+
+            await gate.WaitAsync();
+            try
+            {
+                // 接続中に削除、再起動、終了されていたら、繋がったプロセスを残さない
+                var current = Snapshot().Contains(state) && state.Starting == starting && !starting.IsCancellationRequested;
+                if (!current)
+                {
+                    await client.DisposeAsync();
+                    return;
+                }
+                state.Client = client;
+                state.Tools = tools.ToList();
+                state.Status = "running";
+                state.Error = null;
+                state.Starting = null;
+            }
+            finally
+            {
+                gate.Release();
+            }
             Log(state.Name, $"接続しました。ツール {state.Tools.Count} 個");
         }
         catch (Exception e)
         {
+            if (client is not null) await client.DisposeAsync();
+            // 止められた場合は止めた側が状態を決める
+            if (state.Starting != starting) return;
+            state.Starting = null;
             state.Status = "error";
             state.Error = e is OperationCanceledException ? "起動がタイムアウトしました" : e.Message;
             Log(state.Name, $"接続に失敗しました: {e}");
+        }
+        finally
+        {
+            starting.Dispose();
         }
         Changed?.Invoke();
     }
@@ -146,6 +178,17 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
 
     static async Task StopAsync(ServerState state)
     {
+        // 接続の途中なら、繋がった時点で捨てさせる
+        var starting = state.Starting;
+        state.Starting = null;
+        try
+        {
+            starting?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // ちょうど接続が終わったところ
+        }
         if (state.Client is { } client)
         {
             try
@@ -217,8 +260,6 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
         schema["type"] ??= "object";
         return schema;
     }
-
-    public bool Owns(string apiName) => Snapshot().Any(s => s.Tools.Any(t => ApiName(s.Name, t.Name) == apiName));
 
     public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {

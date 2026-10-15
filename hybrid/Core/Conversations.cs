@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 
 namespace ClaudeChat.Core;
@@ -82,7 +83,8 @@ public sealed class ConversationSummary
 public sealed class ConversationStore(AppPaths paths)
 {
     readonly SemaphoreSlim gate = new(1, 1);
-    readonly Dictionary<string, Conversation> cache = [];
+    // Create は gate を通らないので、同時に触っても壊れないものにする
+    readonly ConcurrentDictionary<string, Conversation> cache = new();
     // 削除中にファイルを読み直して復活させないため
     readonly HashSet<string> deletedIds = [];
     List<ConversationSummary>? summaries;
@@ -126,7 +128,7 @@ public sealed class ConversationStore(AppPaths paths)
     public Conversation Create()
     {
         var conversation = new Conversation();
-        lock (cache) cache[conversation.Id] = conversation;
+        cache[conversation.Id] = conversation;
         return conversation;
     }
 
@@ -162,7 +164,7 @@ public sealed class ConversationStore(AppPaths paths)
         try
         {
             deletedIds.Add(id);
-            cache.Remove(id);
+            cache.TryRemove(id, out _);
             var index = await LoadIndexAsync();
             index.RemoveAll(s => s.Id == id);
             await Json.WriteAtomicAsync(IndexPath, index);

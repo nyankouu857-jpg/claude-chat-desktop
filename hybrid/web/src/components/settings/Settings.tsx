@@ -6,7 +6,7 @@ import { DEFAULT_LANGUAGE, LANGUAGES } from "../../languages";
 import { EFFORTS, MODELS } from "../../models";
 import { useStore } from "../../store";
 import type { Settings, SettingsTab } from "../../types";
-import { Toggle } from "../ui";
+import { NumberField, Toggle } from "../ui";
 import { Connectors } from "./Connectors";
 import { Computer } from "./Computer";
 import { Files } from "./Files";
@@ -212,8 +212,7 @@ function Api({ settings }: { settings: Settings }) {
             <div>1 回の返答で続けて呼べるツールの上限</div>
             <div className="field-hint">コネクタのツールを使うときに、止まらなくなるのを防ぎます</div>
           </div>
-          <input className="input number" type="number" min={1} max={200} value={chat.maxToolTurns}
-            onChange={(e) => void updateSettings({ chat: { maxToolTurns: Math.max(1, Number(e.target.value) || 1) } })} />
+          <NumberField value={chat.maxToolTurns} min={1} max={200} onCommit={(v) => void updateSettings({ chat: { maxToolTurns: v } })} />
         </div>
         <div className="switch-row">
           <div>

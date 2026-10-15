@@ -134,6 +134,10 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         CancellationToken cancellationToken)
     {
         var partialText = new SortedDictionary<int, string>();
+        // 止めたときに、実行済みのツールの結果を捨てないため
+        var finishedResults = new JsonArray();
+        // 途中で止まったリクエストも課金されるので、届いた分の使用量を覚えておく
+        JsonObject? streamUsage = null;
         try
         {
             for (var turn = 0; turn < options.MaxToolTurns; turn++)
@@ -147,7 +151,15 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 var stream = client.Beta.Messages.CreateStreaming(BuildRequest(conversation, options, toolSpecs), cancellationToken);
                 await foreach (var streamEvent in stream.CollectAsync(aggregator).WithCancellation(cancellationToken))
                 {
-                    if (streamEvent.TryPickContentBlockStart(out var start))
+                    if (streamEvent.TryPickStart(out var messageStart))
+                    {
+                        streamUsage = ToWire(messageStart.Message.Usage);
+                    }
+                    else if (streamEvent.TryPickDelta(out var messageDelta) && streamUsage is not null)
+                    {
+                        foreach (var (key, value) in ToWire(messageDelta.Usage).Where(kv => kv.Value is not null).ToList()) streamUsage[key] = value!.DeepClone();
+                    }
+                    else if (streamEvent.TryPickContentBlockStart(out var start))
                     {
                         var index = (int)start.Index;
                         var block = ToWire(start.ContentBlock);
@@ -166,6 +178,11 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                         {
                             emit(new JsonObject { ["type"] = "delta", ["index"] = index, ["text"] = thinking.Thinking });
                         }
+                        else if (delta.Delta.TryPickCompaction(out var compaction))
+                        {
+                            // 要約は 1 回でまとめて届く。画面で「要約に失敗」と出さないよう流す
+                            if ((string?)ToWire(compaction)["content"] is { } summary) emit(new JsonObject { ["type"] = "delta", ["index"] = index, ["text"] = summary });
+                        }
                         else if (delta.Delta.TryPickInputJson(out var inputJson))
                         {
                             toolInputJson[index] = toolInputJson.GetValueOrDefault(index, "") + inputJson.PartialJson;
@@ -183,7 +200,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 conversation.Append(assistant);
                 partialText.Clear();
                 emit(new JsonObject { ["type"] = "message", ["message"] = assistant.DeepClone() });
-                await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, "chat", message.Usage);
+                streamUsage = null;
+                await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, "chat", ToWire(message.Usage));
 
                 var stopReason = message.StopReason?.Raw();
                 if (stopReason == "pause_turn") continue;
@@ -191,8 +209,9 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 var toolUses = content.OfType<JsonObject>().Where(b => (string?)b["type"] == "tool_use").ToList();
                 if (toolUses.Count > 0)
                 {
+                    finishedResults = new JsonArray();
                     var results = stopReason == "tool_use"
-                        ? await RunToolsAsync(toolUses, options, emit, gate, cancellationToken)
+                        ? await RunToolsAsync(toolUses, options, emit, gate, finishedResults, cancellationToken)
                         // 出力上限で切れたツール入力は信用できないので実行しない
                         : ErrorResults(toolUses, "出力上限で入力が途中までしか届かなかったため、実行しませんでした");
                     var user = new JsonObject { ["role"] = "user", ["content"] = results };
@@ -210,9 +229,10 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         }
         catch (Exception) when (cancellationToken.IsCancellationRequested)
         {
+            await RecordInterruptedUsageAsync(conversation, options.Model, streamUsage);
             // 思考ブロックは署名が揃わないと送り返せないので、出せた本文だけ残す
             var text = string.Concat(partialText.Values);
-            if (!RepairDanglingToolUse(conversation, "ユーザーが中断しました") && text.Length > 0)
+            if (!RepairDanglingToolUse(conversation, "ユーザーが中断しました", finishedResults) && text.Length > 0)
             {
                 conversation.Append(new JsonObject
                 {
@@ -224,19 +244,37 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         }
         catch (Exception error)
         {
-            RepairDanglingToolUse(conversation, "エラーで中断しました");
+            await RecordInterruptedUsageAsync(conversation, options.Model, streamUsage);
+            RepairDanglingToolUse(conversation, "エラーで中断しました", finishedResults);
             return new ChatRunResult(ChatStatus.Failed, Describe(error));
         }
     }
 
-    // tool_use の直後に tool_result が無い履歴は次の送信で 400 になるので、結果を補っておく
-    static bool RepairDanglingToolUse(Conversation conversation, string reason)
+    async Task RecordInterruptedUsageAsync(Conversation conversation, string model, JsonObject? usage)
+    {
+        if (usage is null) return;
+        try
+        {
+            await RecordUsageAsync(conversation, model, "chat", usage);
+        }
+        catch (Exception)
+        {
+            // 記録できなくても、止めた結果を返すほうを優先する
+        }
+    }
+
+    // tool_use の直後に tool_result が無い履歴は次の送信で 400 になるので、結果を補っておく。実行済みの結果はそのまま残す
+    static bool RepairDanglingToolUse(Conversation conversation, string reason, JsonArray finished)
     {
         var last = conversation.LastMessage();
         if (last is null || (string?)last["role"] != "assistant") return false;
         var toolUses = (last["content"] as JsonArray ?? []).OfType<JsonObject>().Where(b => (string?)b["type"] == "tool_use").ToList();
         if (toolUses.Count == 0) return false;
-        conversation.Append(new JsonObject { ["role"] = "user", ["content"] = ErrorResults(toolUses, reason) });
+        var done = finished.OfType<JsonObject>().ToDictionary(r => (string?)r["tool_use_id"] ?? "");
+        var results = new JsonArray(toolUses
+            .Select(t => done.TryGetValue((string?)t["id"] ?? "", out var result) ? result.DeepClone() : ErrorResults([t], reason)[0]!.DeepClone())
+            .ToArray());
+        conversation.Append(new JsonObject { ["role"] = "user", ["content"] = results });
         return true;
     }
 
@@ -270,9 +308,9 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         ChatOptions options,
         Action<JsonObject> emit,
         IApprovalGate gate,
+        JsonArray results,
         CancellationToken cancellationToken)
     {
-        var results = new JsonArray();
         foreach (var toolUse in toolUses)
         {
             var id = (string?)toolUse["id"] ?? "";
@@ -288,7 +326,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             else if (await IsAllowedAsync(spec, id, input, emit, gate, cancellationToken))
             {
                 emit(new JsonObject { ["type"] = "tool-running", ["toolUseId"] = id });
-                outcome = await tools.CallAsync(apiName, input, cancellationToken);
+                outcome = await tools.CallAsync(apiName, input, options.EnabledSources, cancellationToken);
             }
             else
             {
@@ -329,26 +367,25 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         return decision is "once" or "always";
     }
 
-    // 要約やフォールバックの分は iterations にしか載らないので、あればそちらを合算する
-    async Task RecordUsageAsync(Conversation conversation, string model, string kind, BetaUsage usage)
+    // 要約やフォールバックの分は iterations にしか載らないので、あればそちらを使う。
+    // 長い入力の割増はリクエストごとに決まるので、まとめずに 1 回ずつ記録する
+    async Task RecordUsageAsync(Conversation conversation, string model, string kind, JsonObject usage)
     {
-        var wire = ToWire(usage);
-        var iterations = (wire["iterations"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
-        if (iterations.Count == 0) iterations = [wire];
-        var webSearches = usage.ServerToolUse?.WebSearchRequests ?? 0;
-        foreach (var group in iterations.GroupBy(i => (string?)i["model"] ?? model))
+        var iterations = (usage["iterations"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
+        if (iterations.Count == 0) iterations = [usage];
+        var webSearches = (long?)usage["server_tool_use"]?["web_search_requests"] ?? 0;
+        foreach (var iteration in iterations)
         {
-            static long Sum(IEnumerable<JsonObject> items, string key) => items.Sum(i => (long?)i[key] ?? 0);
             var record = await ledger.RecordAsync(new UsageRecord
             {
                 At = DateTimeOffset.UtcNow,
                 ConversationId = conversation.Id,
                 Kind = kind,
-                Model = group.Key,
-                Input = Sum(group, "input_tokens"),
-                Output = Sum(group, "output_tokens"),
-                CacheWrite = Sum(group, "cache_creation_input_tokens"),
-                CacheRead = Sum(group, "cache_read_input_tokens"),
+                Model = (string?)iteration["model"] ?? model,
+                Input = (long?)iteration["input_tokens"] ?? 0,
+                Output = (long?)iteration["output_tokens"] ?? 0,
+                CacheWrite = (long?)iteration["cache_creation_input_tokens"] ?? 0,
+                CacheRead = (long?)iteration["cache_read_input_tokens"] ?? 0,
                 WebSearches = webSearches,
             });
             webSearches = 0;

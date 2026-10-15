@@ -38,8 +38,6 @@ public sealed class ProgramToolProvider(SettingsStore settings) : IToolProvider
         ];
     }
 
-    public bool Owns(string apiName) => apiName.StartsWith(Prefix);
-
     public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
         if (!Enabled) throw new ToolException("アプリの起動は設定で無効になっています");

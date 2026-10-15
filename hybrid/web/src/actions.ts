@@ -125,6 +125,7 @@ function applyChatEvent(id: string, event: ChatEvent) {
         const block = blocks[event.index];
         if (!block) return live;
         if (block.type === "thinking") blocks[event.index] = { ...block, thinking: (block.thinking ?? "") + event.text };
+        else if (block.type === "compaction") blocks[event.index] = { ...block, content: (block.content ?? "") + event.text };
         else blocks[event.index] = { ...block, text: (block.text ?? "") + event.text };
         return { ...live, blocks };
       }, true);
@@ -228,9 +229,11 @@ export async function edit(conversationId: string, messageIndex: number, content
   if (conversation) setState((s) => putConversation(s, conversation));
 }
 
-export function approve(conversationId: string, requestId: string, decision: "once" | "always" | "deny") {
+export async function approve(conversationId: string, requestId: string, decision: "once" | "always" | "deny") {
   updateLive(conversationId, (live) => ({ ...live, approvals: live.approvals.filter((a) => a.requestId !== requestId) }));
-  void guard(() => call("tools.approve", { requestId, decision }));
+  await guard(() => call("tools.approve", { requestId, decision }));
+  // 中身側で権限が書き足されるので、取り消せるように設定を取り直す
+  if (decision === "always") await updateSettings({});
 }
 
 export const renameConversation = (id: string, title: string) => guard(() => call("conversations.rename", { id, title }));

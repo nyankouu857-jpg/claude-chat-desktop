@@ -3,13 +3,16 @@ import { useEffect, useRef, useState } from "react";
 import { openSettings, send, setChoice, stop, toast } from "../actions";
 import { BUILTIN_SOURCES } from "../builtins";
 import { EFFORTS, MODELS, modelLabel } from "../models";
-import { useStore } from "../store";
+import { getState, useStore } from "../store";
 import type { WireBlock } from "../types";
 import { Dropdown, MenuItem, Toggle } from "./ui";
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-// API 側の1枚あたり上限
+// API 側の1枚あたり上限。base64 にした後の長さで判定される
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+// リクエスト全体の上限 32MB。履歴の添付も毎回送るので、それも含めて余裕を見る
+const MAX_REQUEST_ATTACHMENT_CHARS = 30 * 1024 * 1024;
+const base64Length = (bytes: number) => Math.ceil(bytes / 3) * 4;
 // リクエスト全体の上限 32MB を base64 で膨らんでも超えないように
 const MAX_PDF_BYTES = 20 * 1024 * 1024;
 // これ以上はトークンが膨らみすぎる
@@ -38,12 +41,28 @@ function isTextFile(file: File) {
 
 async function readAsText(file: File) {
   const bytes = new Uint8Array(await file.arrayBuffer());
+  // PowerShell 5.1 のリダイレクトなどは BOM 付き UTF-16
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return new TextDecoder("utf-8").decode(bytes.subarray(3));
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
     // 古い Windows のテキストファイル
     return new TextDecoder("shift_jis").decode(bytes);
   }
+}
+
+// 履歴にある画像と PDF。送るたびに全部載る
+function attachedChars(conversationId: string | null) {
+  if (!conversationId) return 0;
+  const messages = getState().conversations[conversationId]?.messages ?? [];
+  let total = 0;
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const b of m.content) if ((b.type === "image" || b.type === "document") && b.source?.type === "base64") total += String(b.source.data ?? "").length;
+  }
+  return total;
 }
 
 function toBlock(a: PendingAttachment): WireBlock {
@@ -214,8 +233,8 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
     const added: PendingAttachment[] = [];
     for (const file of files) {
       if (IMAGE_TYPES.includes(file.type)) {
-        if (file.size > MAX_IMAGE_BYTES) {
-          toast(`${file.name} は 5MB を超えているので添付できません`, "error");
+        if (base64Length(file.size) > MAX_IMAGE_BYTES) {
+          toast(`${file.name} は大きすぎるので添付できません。画像は 3.7MB くらいまでです`, "error");
           continue;
         }
         added.push({ kind: "image", mediaType: file.type, data: await readAsBase64(file), name: file.name });
@@ -241,6 +260,10 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
   async function submit() {
     const trimmed = text.trim();
     if ((!trimmed && attachments.length === 0) || running || sending) return;
+    if (attachedChars(conversationId) + attachments.reduce((sum, a) => sum + a.data.length, 0) > MAX_REQUEST_ATTACHMENT_CHARS) {
+      toast("この会話の添付ファイルの合計が大きすぎて送れません。添付を減らすか、新しいチャットで送ってください", "error");
+      return;
+    }
     // API の推奨どおり添付を本文より前に置く
     const content: string | WireBlock[] = attachments.length === 0
       ? trimmed
@@ -283,7 +306,8 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
         onChange={(e) => setText(e.target.value)}
         onPaste={(e) => {
           const files = [...e.clipboardData.files];
-          if (files.length) {
+          // Excel などは文字と一緒に画像も入れてくるので、文字があれば普通に貼る
+          if (files.length && !e.clipboardData.getData("text/plain")) {
             e.preventDefault();
             void addFiles(files);
           }

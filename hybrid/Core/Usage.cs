@@ -75,11 +75,24 @@ public sealed class UsageLedger(AppPaths paths)
 {
     readonly SemaphoreSlim gate = new(1, 1);
     PricingTable? pricing;
+    // 手で直した pricing.json が壊れていても起動とチャットは止めず、画面で知らせる
+    public string? PricingError { get; private set; }
 
     public async Task<PricingTable> GetPricingAsync()
     {
         if (pricing is not null) return pricing;
-        pricing = await Json.ReadAsync<PricingTable>(paths.PricingFile);
+        try
+        {
+            pricing = await Json.ReadAsync<PricingTable>(paths.PricingFile);
+            PricingError = null;
+        }
+        catch (Exception e) when (e is JsonException or IOException)
+        {
+            // 直してもらうまで書き換えない
+            PricingError = $"pricing.json を読めないため、初期の単価で計算しています: {e.Message}";
+            pricing = PricingTable.Default();
+            return pricing;
+        }
         if (pricing is null)
         {
             pricing = PricingTable.Default();
@@ -191,6 +204,7 @@ public sealed class UsageLedger(AppPaths paths)
             ["monthly"] = monthly,
             ["byModelThisMonth"] = ByModel(thisMonth),
             ["byModelLifetime"] = ByModel(records),
+            ["pricingError"] = PricingError,
         };
     }
 }
