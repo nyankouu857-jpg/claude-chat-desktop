@@ -30,6 +30,8 @@ function BtwDialog({ dialog }: { dialog: Extract<DialogState, { kind: "btw" }> }
   );
 }
 
+const NOT_REWINDABLE = ["message", "task-notification", "idle-notification", "hook-feedback", "compact-summary"];
+
 function RewindDialog({ dialog }: { dialog: Extract<DialogState, { kind: "rewind" }> }) {
   const conversation = useStore((s) => s.conversations[dialog.conversationId]);
   const [selected, setSelected] = useState<number | null>(dialog.messageIndex ?? null);
@@ -41,7 +43,8 @@ function RewindDialog({ dialog }: { dialog: Extract<DialogState, { kind: "rewind
   const humanTurns = (conversation?.messages ?? [])
     .map((m, index) => ({ m, index }))
     .filter(({ m }) => m.role === "user" && !(Array.isArray(m.content) && m.content.every((b) => b.type === "tool_result")))
-    .filter(({ m }) => !parsePeer(textOf(m.content)));
+    // 届いた知らせや要約は戻り先にならない。依頼や予定、コマンドは自分の発言と同じく戻れる
+    .filter(({ m }) => !NOT_REWINDABLE.includes(parsePeer(textOf(m.content))?.tag ?? ""));
   const changesAfter = selected === null ? [] : turnsWithChanges.filter((t) => t >= selected);
   return (
     <Dialog

@@ -1,6 +1,6 @@
 import { ArrowUp, Check, ChevronDown, Circle, CircleDot, Code, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Settings2, SlidersHorizontal, Square, Telescope, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { openSettings, send, setChoice, setMode, stop, toast } from "../actions";
+import { clearPrefill, openSettings, send, setChoice, setMode, stop, toast } from "../actions";
 import { BUILTIN_SOURCES } from "../builtins";
 import { allCommands, runCommand } from "../commands";
 import { EFFORTS, MODELS, modelLabel } from "../models";
@@ -291,6 +291,8 @@ function useSlashItems(query: string | null) {
 export function Composer({ conversationId, autoFocus, prefill }: { conversationId: string | null; autoFocus?: boolean; prefill?: { text: string; nonce: number } }) {
   const running = useStore((s) => (conversationId ? !!s.live[conversationId] : false));
   const research = useStore((s) => s.choice.research);
+  // リサーチの結果が届く前に別の質問を始めると、結果がその応答の後ろに回ってしまう
+  const researching = useStore((s) => !!conversationId && Object.values(s.workflows).some((w) => w.parentId === conversationId && w.name === "research" && w.status === "running"));
   const storedPrefill = useStore((s) => (conversationId ? s.prefill[conversationId] : undefined));
   const [text, setText] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
@@ -312,7 +314,9 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
     if (!next) return;
     setText(next.text);
     textarea.current?.focus();
-  }, [prefill, storedPrefill]);
+    // 一度入れたら消す。残すと会話を開き直すたびに同じ文が戻ってくる
+    if (!prefill && conversationId) clearPrefill(conversationId);
+  }, [prefill, storedPrefill, conversationId]);
 
   useEffect(() => setSlashIndex(0), [slashQuery]);
 
@@ -364,6 +368,10 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
     }
     if (running) {
       if (trimmed.startsWith("/")) toast("応答中に使えるのは /btw だけです。終わってから使ってください", "error");
+      return;
+    }
+    if (researching) {
+      toast("リサーチの途中です。結果が届くまで待つか、止めてから送ってください", "error");
       return;
     }
     if (attachedChars(conversationId) + attachments.reduce((sum, a) => sum + a.data.length, 0) > MAX_REQUEST_ATTACHMENT_CHARS) {
@@ -429,7 +437,9 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
               return;
             }
             // 候補を選んでいる途中の Enter と Tab は補完に使う
-            if ((e.key === "Tab" || e.key === "Enter") && text.slice(1) !== slashItems[slashIndex].name) {
+            // 打った名前がそのままコマンドなら、Enter は補完せずに実行する
+            const typedExactly = slashItems.some((c) => c.name.toLowerCase() === text.slice(1).toLowerCase());
+            if (e.key === "Tab" || (e.key === "Enter" && !typedExactly)) {
               e.preventDefault();
               setText(`/${slashItems[slashIndex].name} `);
               return;

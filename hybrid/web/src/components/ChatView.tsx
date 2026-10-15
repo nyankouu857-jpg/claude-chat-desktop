@@ -1,11 +1,33 @@
-import { ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, GitBranch, ListTree, Pencil, Star, Trash, Workflow } from "lucide-react";
+import { ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, GitBranch, ListTree, LoaderCircle, Pencil, Square, Star, Trash, Workflow } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { compact, deleteConversation, exportConversation, navigate, starConversation } from "../actions";
+import { compact, deleteConversation, exportConversation, navigate, starConversation, stopWorkflow } from "../actions";
 import { setState, useStore } from "../store";
 import { Composer } from "./Composer";
 import { MessageList } from "./Messages";
 import { MoveDialog, RenameDialog, STATUS_LABELS, StatusDot } from "./Sidebar";
 import { Dropdown, MenuItem, tokens, usd } from "./ui";
+
+// リサーチのように、会話の外で動いているワークフローの進み具合
+function RunningWorkflows({ conversationId }: { conversationId: string }) {
+  const workflows = useStore((s) => s.workflows);
+  const runs = Object.values(workflows).filter((w) => w.parentId === conversationId && w.status === "running");
+  if (runs.length === 0) return null;
+  return (
+    <div className="running-workflows">
+      {runs.map((w) => {
+        const done = w.agents.filter((a) => a.status === "done").length;
+        return (
+          <div key={w.id} className="running-workflow">
+            <LoaderCircle size={14} className="spin" />
+            <span className="running-workflow-title">{w.title}</span>
+            <span className="field-hint">{w.phase ?? ""}{w.agents.length > 0 ? ` ・ エージェント ${done}/${w.agents.length}` : ""}</span>
+            <button type="button" className="button small" onClick={() => void stopWorkflow(w.id)}><Square size={11} /> 止める</button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export function ChatView({ id }: { id: string }) {
   const conversation = useStore((s) => s.conversations[id]);
@@ -93,6 +115,7 @@ export function ChatView({ id }: { id: string }) {
         <MessageList conversationId={id} />
       </div>
       <div className="composer-dock">
+        <RunningWorkflows conversationId={id} />
         <Composer conversationId={id} autoFocus={!live} />
       </div>
       {renaming && conversation && <RenameDialog summary={conversation} onClose={() => setRenaming(false)} />}

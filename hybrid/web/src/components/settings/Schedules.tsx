@@ -1,6 +1,6 @@
 import { Plus, Trash } from "lucide-react";
 import { useEffect, useState } from "react";
-import { deleteSchedule, listSchedules, saveSchedule, toast } from "../../actions";
+import { deleteSchedule, listSchedules, saveSchedule, setScheduleEnabled, toast } from "../../actions";
 import { on } from "../../bridge";
 import { useStore } from "../../store";
 import type { Schedule } from "../../types";
@@ -52,7 +52,7 @@ export function Schedules() {
                     <span>{s.title}</span>
                     <span className="field-hint">{describe(s)} ・ {target}</span>
                   </span>
-                  <Toggle checked={s.enabled} label="有効" onChange={async (v) => setSchedules((await saveSchedule({ ...s, enabled: v })) ?? schedules)} />
+                  <Toggle checked={s.enabled} label="有効" onChange={async (v) => setSchedules((await setScheduleEnabled(s.id, v)) ?? schedules)} />
                   <button type="button" className="icon-button small" title="消す" onClick={async () => setSchedules((await deleteSchedule(s.id)) ?? schedules)}><Trash size={14} /></button>
                 </div>
               );

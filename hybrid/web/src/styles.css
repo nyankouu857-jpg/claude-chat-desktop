@@ -958,3 +958,7 @@ code { font-family: var(--font-mono); }
 .schedule-row { gap: 12px; }
 .schedule-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .peer-turn.attached { width: 100%; margin: 6px 0 0; }
+.running-workflows { max-width: 768px; margin: 0 auto 8px; display: grid; gap: 6px; }
+.running-workflow { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 0.5px solid var(--border); border-radius: 10px; background: var(--bg-000); font-size: 13px; }
+.running-workflow-title { font-weight: 600; color: var(--text-100); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.running-workflow .button { margin-left: auto; }

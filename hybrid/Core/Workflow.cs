@@ -11,6 +11,10 @@ public sealed class WorkflowRun
     public string Id { get; } = "wf_" + Guid.NewGuid().ToString("N")[..10];
     public required string ParentId { get; init; }
     public required string Title { get; init; }
+    // 同梱の台本の名前。research のときは画面が送信を待たせる
+    public string? Name { get; init; }
+    // 始めた時点の往復の回数。結果を親に返すときに引き継ぐ
+    public int Hops { get; init; }
     public string Status { get; set; } = "running";
     public string? Phase { get; set; }
     public List<string> Logs { get; } = [];
@@ -31,6 +35,7 @@ public sealed class WorkflowRun
         ["id"] = Id,
         ["parentId"] = ParentId,
         ["title"] = Title,
+        ["name"] = Name,
         ["status"] = Status,
         ["phase"] = Phase,
         ["logs"] = LogsView(),
@@ -119,7 +124,7 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
         };
         // Claude Code の書き方の先頭の export const meta をそのまま受け付ける
         source = ExportMeta().Replace(source, "const meta");
-        var run = new WorkflowRun { ParentId = parent.Id, Title = title };
+        var run = new WorkflowRun { ParentId = parent.Id, Title = title, Name = name, Hops = hub.RunHopsOf(parent.Id) };
         runs[run.Id] = run;
         Changed(run);
         var thread = new Thread(() => Execute(run, parent, source, args)) { IsBackground = true, Name = $"workflow {run.Id}" };
@@ -220,6 +225,8 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
                     }, background: false, token);
                     run.Agents.TryRemove(placeholder, out _);
                     run.Agents[child.Id] = (label, phase, "running");
+                    // 止めたのと入れ違いに始まった子も止める
+                    if (token.IsCancellationRequested) hub.Stop(child.Id);
                     Changed(run);
                     var result = await hub.WaitAsync(child.Id, token);
                     var text = ChatHub.FinalText(child);
@@ -253,7 +260,11 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
                 catch (Exception e)
                 {
                     run.Agents.TryRemove(placeholder, out _);
-                    if (child is not null) run.Agents[child.Id] = (label, phase, "failed");
+                    if (child is not null)
+                    {
+                        hub.Stop(child.Id);
+                        run.Agents[child.Id] = (label, phase, "failed");
+                    }
                     Changed(run);
                     Post(() => reject(JsValue.FromObject(engine, e.Message)));
                 }
@@ -300,6 +311,6 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
         };
         // 長すぎると親の会話を圧迫する
         if (body.Length > 60_000) body = body[..60_000] + "\n... (長いので省略)";
-        await hub.DeliverAsync(parent, $"<task-notification workflow=\"{run.Title.Replace("\"", "'")}\" id=\"{run.Id}\" status=\"{run.Status}\" agents=\"{run.AgentCount}\">\n{body}\n</task-notification>", hops: 0);
+        await hub.DeliverAsync(parent, $"<task-notification workflow=\"{run.Title.Replace("\"", "'")}\" id=\"{run.Id}\" status=\"{run.Status}\" agents=\"{run.AgentCount}\">\n{body}\n</task-notification>", run.Hops);
     }
 }

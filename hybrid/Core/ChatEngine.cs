@@ -126,6 +126,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         List<ApiEnum<string, AnthropicBeta>> betas = ["compact-2026-01-12", "thinking-binding-controls-2026-08-01"];
         if (options.CodeExecution && options.OfficeSkills)
         {
+            // コンテナでスキルを使うにはコード実行のベータも要る。スキル側の印は古い API のために残す
+            betas.Add("code-execution-2025-08-25");
             betas.Add("skills-2025-10-02");
             parameters = parameters with
             {
@@ -177,8 +179,15 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         var containerRetried = false;
         try
         {
+            var mode = conversation.PermissionMode;
             for (var turn = 0; turn < options.MaxToolTurns; turn++)
             {
+                // 計画モードを抜けたのに「計画モード中」と言い続けないよう、指示を作り直す
+                if (conversation.PermissionMode != mode && options.RebuildSystemPrompt is { } rebuild)
+                {
+                    mode = conversation.PermissionMode;
+                    options = options with { SystemPrompt = rebuild() };
+                }
                 var toolSpecs = tools.GetTools(options.EnabledSources);
                 var aggregator = new BetaMessageContentAggregator();
                 var toolInputJson = new Dictionary<int, string>();
@@ -280,7 +289,10 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 return new ChatRunResult(ChatStatus.Done);
             }
             Notice(emit, $"ツールの呼び出しが {options.MaxToolTurns} 回に達したので止めました。続けるには続きをお願いしてください");
-            return new ChatRunResult(ChatStatus.Done);
+            // 子が途中で止まったのを、親やワークフローが成功と取り違えないように
+            return ToolContext.Current is { Depth: > 0 }
+                ? new ChatRunResult(ChatStatus.Failed, $"ツールの呼び出しが {options.MaxToolTurns} 回に達し、作業が途中で止まりました")
+                : new ChatRunResult(ChatStatus.Done);
         }
         catch (Exception) when (cancellationToken.IsCancellationRequested)
         {
@@ -421,16 +433,18 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
     async Task<string?> DenialAsync(Conversation conversation, ToolSpec spec, string toolUseId, JsonObject input, IApprovalGate gate, CancellationToken cancellationToken)
     {
         var current = await settings.GetAsync();
+        var readOnlyCall = spec.ReadOnlyCall?.Invoke(input) == true;
         switch (conversation.PermissionMode)
         {
-            case "plan" when !spec.ReadOnly:
+            case "plan" when !spec.ReadOnly && !readOnlyCall:
                 return $"計画モード中なので {spec.ApiName} は使えません。調べるだけにとどめ、計画ができたら {PlanToolProvider.ExitPlanMode} でユーザーに見せてください";
             case "bypass" when current.Features.AllowBypassMode:
                 return null;
-            case "acceptEdits" when spec.Source == FileToolProvider.Source:
+            // ワークツリーは git を動かすので、編集の自動許可には含めない
+            case "acceptEdits" when spec.Source == FileToolProvider.Source && spec.Name is not ("create_worktree" or "exit_worktree"):
                 return null;
         }
-        if (spec.AutoApprove || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return null;
+        if (spec.AutoApprove || readOnlyCall || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return null;
 
         var decision = await gate.RequestAsync(new JsonObject
         {

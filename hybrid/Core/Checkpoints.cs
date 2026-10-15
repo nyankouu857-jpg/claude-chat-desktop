@@ -107,6 +107,15 @@ public sealed class Checkpoints(AppPaths paths, IPlatform platform)
         return new JsonObject { ["restored"] = restored, ["skipped"] = skipped };
     }
 
+    // 巻き戻しや編集で捨てた発言の控え。残すと、後で同じ番号に来た発言の控えとして誤って使われる
+    public void ForgetFrom(string conversationId, int fromTurn)
+    {
+        lock (sync)
+        {
+            foreach (var turn in Turns(conversationId).Where(t => t >= fromTurn)) Directory.Delete(TurnDir(conversationId, turn), recursive: true);
+        }
+    }
+
     public void Forget(string conversationId)
     {
         var dir = Path.Combine(paths.CheckpointsDir, conversationId);

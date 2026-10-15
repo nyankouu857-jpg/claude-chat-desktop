@@ -18,6 +18,7 @@ public sealed record ChatOptions
     public int CompactThreshold { get; init; } = 150_000;
     // ワークフローのエージェントに決まった形の JSON で答えさせる
     public JsonObject? OutputSchema { get; init; }
+    public Func<string>? RebuildSystemPrompt { get; init; }
 }
 
 // 実行中のツールが、どの会話の何のためのものかを知る手段。引数で回すと全ツールの口が変わるため

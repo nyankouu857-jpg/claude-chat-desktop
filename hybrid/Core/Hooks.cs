@@ -29,7 +29,8 @@ public sealed class Hooks(SettingsStore settings, AppPaths paths)
 
     static bool Matches(string? matcher, string? toolName)
     {
-        if (string.IsNullOrWhiteSpace(matcher) || toolName is null) return true;
+        // Claude Code の設定例は「すべて」を * と書く
+        if (string.IsNullOrWhiteSpace(matcher) || matcher.Trim() == "*" || toolName is null) return true;
         try
         {
             return Regex.IsMatch(toolName, $"^(?:{matcher})$", RegexOptions.None, TimeSpan.FromSeconds(1));
@@ -42,16 +43,29 @@ public sealed class Hooks(SettingsStore settings, AppPaths paths)
 
     async Task<HookOutcome> RunAllAsync(string name, string? toolName, JsonObject payload)
     {
+        var notes = new List<string>();
         foreach (var entry in await EntriesAsync(name, toolName))
         {
             payload["hook_event_name"] = name;
             var (exitCode, stdout, stderr) = await RunAsync(entry, payload.ToJsonString());
-            if (exitCode == 2) return new HookOutcome(true, stderr.Trim().Length > 0 ? stderr.Trim() : $"{name} フックが止めました");
-            // 標準出力で {"decision":"block","reason":"..."} を返してもよい
-            if (TryParse(stdout) is { } json && (string?)json["decision"] == "block") return new HookOutcome(true, (string?)json["reason"] ?? $"{name} フックが止めました");
-            if (exitCode == 0 && stdout.Trim().Length > 0 && TryParse(stdout) is null) return new HookOutcome(false, stdout.Trim());
+            var blockedMessage = stderr.Trim().Length > 0 ? stderr.Trim() : $"{name} フックが止めました";
+            if (exitCode == 2) return new HookOutcome(true, blockedMessage);
+            if (exitCode != 0) continue;
+            // Claude Code と同じ JSON の返し方も受け付ける
+            if (TryParse(stdout) is { } json)
+            {
+                var specific = json["hookSpecificOutput"] as JsonObject;
+                if ((string?)json["decision"] == "block") return new HookOutcome(true, (string?)json["reason"] ?? blockedMessage);
+                if ((string?)specific?["permissionDecision"] == "deny") return new HookOutcome(true, (string?)specific["permissionDecisionReason"] ?? blockedMessage);
+                if ((string?)specific?["additionalContext"] is { Length: > 0 } context) notes.Add(context);
+                if ((string?)json["reason"] is { Length: > 0 } reason && name == PostToolUse) notes.Add(reason);
+            }
+            else if (stdout.Trim().Length > 0)
+            {
+                notes.Add(stdout.Trim());
+            }
         }
-        return new HookOutcome(false, null);
+        return new HookOutcome(false, notes.Count > 0 ? string.Join("\n", notes) : null);
     }
 
     static JsonObject? TryParse(string text)
@@ -96,11 +110,19 @@ public sealed class Hooks(SettingsStore settings, AppPaths paths)
             using var process = Process.Start(info) ?? throw new InvalidOperationException("フックを起動できませんでした");
             var stdout = process.StandardOutput.ReadToEndAsync();
             var stderr = process.StandardError.ReadToEndAsync();
-            await process.StandardInput.WriteAsync(input);
-            process.StandardInput.Close();
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Clamp(entry.TimeoutSeconds, 1, 600)));
             try
             {
+                // 標準入力を読まないフックでも、書き込みで固まらないよう時間を区切る
+                try
+                {
+                    await process.StandardInput.WriteAsync(input.AsMemory(), timeout.Token);
+                    process.StandardInput.Close();
+                }
+                catch (IOException)
+                {
+                    // 読まずに終わったフック。終了コードはそのまま使う
+                }
                 await process.WaitForExitAsync(timeout.Token);
             }
             catch (OperationCanceledException)
@@ -119,11 +141,13 @@ public sealed class Hooks(SettingsStore settings, AppPaths paths)
 
     static string Limit(string s) => s.Length > MaxOutputChars ? s[..MaxOutputChars] : s;
 
-    static JsonObject Base(Conversation conversation) => new()
+    JsonObject Base(Conversation conversation) => new()
     {
         ["session_id"] = conversation.Id,
         ["chat_title"] = conversation.Title,
         ["folder_id"] = conversation.FolderId,
+        ["cwd"] = conversation.WorktreePath ?? settings.Current?.Files.Folders.FirstOrDefault()?.Path ?? paths.Root,
+        ["permission_mode"] = conversation.PermissionMode,
     };
 
     public Task<HookOutcome> RunPreToolUseAsync(Conversation conversation, string toolName, JsonObject input)
@@ -150,9 +174,11 @@ public sealed class Hooks(SettingsStore settings, AppPaths paths)
         return RunAllAsync(UserPromptSubmit, null, payload);
     }
 
-    public Task<HookOutcome> RunStopAsync(Conversation conversation, ChatRunResult result)
+    public Task<HookOutcome> RunStopAsync(Conversation conversation, ChatRunResult result, bool continuing)
     {
         var payload = Base(conversation);
+        // Claude Code と同じく、フックに続けさせた後の Stop かどうかを渡す
+        payload["stop_hook_active"] = continuing;
         payload["status"] = result.Status.ToString().ToLowerInvariant();
         payload["last_message"] = ChatHub.FinalText(conversation);
         return RunAllAsync(Stop, null, payload);

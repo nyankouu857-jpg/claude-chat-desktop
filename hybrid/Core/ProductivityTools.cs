@@ -143,8 +143,9 @@ public sealed class MemoryToolProvider(AppPaths paths, SettingsStore settings) :
         if (settings.Current?.Features.Memory != true || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
         return
         [
+            // 書き込みは全部の会話に残り続けるので、読むとき以外は確認する
             new("memory", Source, "memory", "メモリ", "Persistent memory across chats.", new JsonObject(),
-                AutoApprove: true, ReadOnly: true, Native: new JsonObject { ["type"] = "memory_20250818", ["name"] = "memory" }),
+                Native: new JsonObject { ["type"] = "memory_20250818", ["name"] = "memory" }, ReadOnlyCall: input => (string?)input["command"] == "view"),
         ];
     }
 
@@ -296,7 +297,8 @@ public sealed class ScheduleToolProvider(Scheduler scheduler) : IToolProvider
 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
-        if (enabledSources is not null && !enabledSources.Contains(Source)) return [];
+        // 子が予定から新しい会話を立ち上げると、子は子を作れないという決まりを抜けられる
+        if (ToolContext.Current is { Depth: > 0 } || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
         return
         [
             new(Prefix + "create", Source, "create", "予定を登録",
@@ -304,7 +306,7 @@ public sealed class ScheduleToolProvider(Scheduler scheduler) : IToolProvider
                 Schema(("title", "string", "Short name", true), ("prompt", "string", "What to do each time", true), ("interval_minutes", "integer", "Run every N minutes (at least 5)", false), ("daily_time", "string", "Run every day at HH:mm", false), ("target", "string", "this_chat or new_chat", false)),
                 AllowAlways: true),
             new(Prefix + "list", Source, "list", "予定の一覧", "List scheduled prompts.", Schema(), AutoApprove: true, ReadOnly: true),
-            new(Prefix + "delete", Source, "delete", "予定を消す", "Delete a scheduled prompt by id.", Schema(("id", "string", "Schedule id", true)), AutoApprove: true),
+            new(Prefix + "delete", Source, "delete", "予定を消す", "Delete a scheduled prompt by id.", Schema(("id", "string", "Schedule id", true))),
         ];
     }
 
@@ -322,6 +324,8 @@ public sealed class ScheduleToolProvider(Scheduler scheduler) : IToolProvider
                     DailyTime = (string?)input["daily_time"],
                     ConversationId = (string?)input["target"] == "new_chat" ? null : conversation?.Id,
                     FolderId = conversation?.FolderId,
+                    // 新しい会話で動くときも、頼んだ会話と同じ道具立てにする
+                    Options = conversation?.Options?.DeepClone() as JsonObject,
                     ExpiresAt = DateTimeOffset.UtcNow.Add(Scheduler.LoopLifetime).ToUnixTimeMilliseconds(),
                 };
                 var saved = await scheduler.SaveAsync(schedule);

@@ -28,16 +28,23 @@ public sealed class ChatHub(
         public int Hops { get; } = hops;
     }
 
+    // Stop フックに続けさせるのは、止まらなくなるのを防ぐため 1 回の送信につき 3 回まで
+    const int MaxStopContinuations = 3;
+
     readonly ConcurrentDictionary<string, CancellationTokenSource> running = new();
+    // 終わった後も残しておき、終わった直後に待ち始めた呼び出しにも結果を返す
     readonly ConcurrentDictionary<string, TaskCompletionSource<ChatRunResult>> completions = new();
     readonly ConcurrentDictionary<string, (string ConversationId, JsonObject Request, TaskCompletionSource<string> Decision)> approvals = new();
-    readonly ConcurrentDictionary<string, ConcurrentQueue<Inbound>> inboxes = new();
+    // 先頭に戻す操作があるので ConcurrentQueue ではなくロックで守る
+    readonly Lock inboxLock = new();
+    readonly Dictionary<string, List<Inbound>> inboxes = [];
     // 待機中になったら知らせてほしい、という登録。相手 -> 知らせる先
     readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> idleWatchers = new();
     // 待たずに走らせた子。終わったら親に知らせる
     readonly ConcurrentDictionary<string, byte> backgroundChildren = new();
     readonly ConcurrentDictionary<string, int> runHops = new();
-    readonly ConcurrentDictionary<string, int> stopContinuations = new();
+    // 枠が空くのを待っている子。メッセージが溜まっている
+    readonly ConcurrentDictionary<string, byte> waitingForSlot = new();
     // 実行中のエージェントの数。上限の確認と登録を同時にするためロックで守る
     readonly Lock agentLock = new();
     readonly HashSet<string> runningAgents = [];
@@ -51,6 +58,9 @@ public sealed class ChatHub(
     public const string Idle = "idle";
     public const string Failed = "failed";
     public const string Stopped = "stopped";
+
+    // 0 はユーザーのチャット、1 はサブエージェントやワークフローの子
+    public static int DepthOf(Conversation conversation) => conversation.Kind == "chat" ? 0 : 1;
 
     public bool IsRunning(string id) => running.ContainsKey(id);
 
@@ -68,7 +78,8 @@ public sealed class ChatHub(
         };
     }
 
-    public JsonArray RunningView() => new(running.Keys.Select(id => (JsonNode)new JsonObject
+    // 画面を読み直したときに応答中として出す分。要約や巻き戻しの間は done が来ないので含めない
+    public JsonArray RunningView() => new(running.Keys.Where(id => completions.TryGetValue(id, out var c) && !c.Task.IsCompleted).Select(id => (JsonNode)new JsonObject
     {
         ["conversationId"] = id,
         ["approvals"] = new JsonArray(approvals.Values
@@ -100,16 +111,27 @@ public sealed class ChatHub(
 
     // Options
 
-    public async Task<ChatOptions> OptionsForAsync(Conversation conversation, JsonObject? request = null, int depth = 0)
+    public async Task<ChatOptions> OptionsForAsync(Conversation conversation, JsonObject? request = null)
     {
         var current = await settings.GetAsync();
         var defaults = current.Chat;
+        var depth = DepthOf(conversation);
         // 画面からの指定が無いとき (ほかのチャットからの通信など) は、その会話の直近の設定で動かす
         var source = request ?? conversation.Options ?? [];
         var enabled = source["enabledSources"] is JsonArray list ? list.Select(n => (string?)n).OfType<string>().ToHashSet() : null;
         // サブエージェントはさらに子を作ったり、ほかのチャットを動かしたりしない
         if (depth > 0) enabled = (enabled ?? Tools.SourceNames().ToHashSet()).Where(s => s != AgentToolProvider.Source).ToHashSet();
         var folder = await folders.GetAsync(conversation.FolderId);
+        string BuildPrompt() => SystemPrompt.Build(current, new PromptContext
+        {
+            FilesEnabled = enabled is null || enabled.Contains(FileToolProvider.Source),
+            AgentsEnabled = depth == 0 && current.Agents.Enabled && (enabled is null || enabled.Contains(AgentToolProvider.Source)),
+            Folder = folder,
+            Conversation = conversation,
+            Skills = enabled is null || enabled.Contains(SkillToolProvider.Source) ? extensions.ListSkills() : [],
+            OutputStyle = extensions.OutputStyleText(defaults.OutputStyle),
+            IsAgent = depth > 0,
+        }, DateTime.Now);
         return new ChatOptions
         {
             Model = (string?)source["model"] ?? conversation.Model ?? defaults.Model,
@@ -121,16 +143,9 @@ public sealed class ChatHub(
             CodeExecution = (bool?)source["codeExecution"] ?? defaults.CodeExecution,
             OfficeSkills = defaults.OfficeSkills,
             EnabledSources = enabled,
-            SystemPrompt = SystemPrompt.Build(current, new PromptContext
-            {
-                FilesEnabled = enabled is null || enabled.Contains(FileToolProvider.Source),
-                AgentsEnabled = depth == 0 && current.Agents.Enabled && (enabled is null || enabled.Contains(AgentToolProvider.Source)),
-                Folder = folder,
-                Conversation = conversation,
-                Skills = extensions.ListSkills(),
-                OutputStyle = extensions.OutputStyleText(defaults.OutputStyle),
-                IsAgent = depth > 0,
-            }, DateTime.Now),
+            SystemPrompt = BuildPrompt(),
+            // 計画モードを抜けたときなど、応答の途中で指示が変わったら作り直す
+            RebuildSystemPrompt = BuildPrompt,
             MaxToolTurns = Math.Max(1, defaults.MaxToolTurns),
             CompactThreshold = defaults.CompactThreshold,
         };
@@ -170,12 +185,16 @@ public sealed class ChatHub(
         {
             Release(conversation.Id, cancellation);
             EmitStatus(conversation);
+            // 枠を取っている間に届いたメッセージを流す
+            _ = FlushQuietlyAsync(conversation);
         }
     }
 
     // 会話を書き換えてから走らせる。書き換えの前に枠を取るので、連打で 2 本走らない
-    public async Task StartAsync(Conversation conversation, Func<Task> prepare, ChatOptions options, int depth = 0, int hops = 0)
+    public async Task StartAsync(Conversation conversation, Func<Task> prepare, ChatOptions options, int hops = 0)
     {
+        // 削除された会話を、手元に残っていた参照から動かし直さない
+        if (await conversations.GetAsync(conversation.Id) is null) throw new InvalidOperationException("この会話は削除されています");
         var cancellation = Reserve(conversation.Id);
         try
         {
@@ -191,25 +210,24 @@ public sealed class ChatHub(
         var completion = new TaskCompletionSource<ChatRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         completions[conversation.Id] = completion;
         runHops[conversation.Id] = hops;
-        events.Emit("chat.event", new JsonObject { ["conversationId"] = conversation.Id, ["event"] = new JsonObject { ["type"] = "started" } });
+        EmitChatEvent(conversation.Id, new JsonObject { ["type"] = "started" });
         EmitStatus(conversation);
-        _ = RunAsync(conversation, options, cancellation, completion, depth, hops);
+        _ = RunAsync(conversation, options, cancellation, completion, hops);
     }
 
-    async Task RunAsync(Conversation conversation, ChatOptions options, CancellationTokenSource cancellation, TaskCompletionSource<ChatRunResult> completion, int depth, int hops)
+    async Task RunAsync(Conversation conversation, ChatOptions options, CancellationTokenSource cancellation, TaskCompletionSource<ChatRunResult> completion, int hops)
     {
         var id = conversation.Id;
-        ToolContext.Current = new ToolContext { Conversation = conversation, Options = options, Depth = depth, Hops = hops };
+        ToolContext.Current = new ToolContext { Conversation = conversation, Options = options, Depth = DepthOf(conversation), Hops = hops };
         // 途中経過を順番どおりに保存する。落ちてもそこまでの会話は残る
         var saveChain = Task.CompletedTask;
         void EmitChat(JsonObject e)
         {
             if ((string?)e["type"] == "message") saveChain = saveChain.ContinueWith(_ => conversations.SaveAsync(conversation, touch: false)).Unwrap();
-            events.Emit("chat.event", new JsonObject { ["conversationId"] = id, ["event"] = e });
+            EmitChatEvent(id, e);
         }
 
         var result = new ChatRunResult(ChatStatus.Failed, "不明なエラー");
-        string? stopFeedback = null;
         try
         {
             var apiKey = await secrets.GetAsync(SecretStore.ApiKey);
@@ -222,7 +240,23 @@ public sealed class ChatHub(
             {
                 conversation.Model = options.Model;
                 engine = new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths);
-                result = await engine.RunAsync(conversation, options, EmitChat, new ApprovalGate(this, conversation), cancellation.Token);
+                var gate = new ApprovalGate(this, conversation);
+                result = await engine.RunAsync(conversation, options, EmitChat, gate, cancellation.Token);
+                // Stop フックが続けるよう求めたら、同じ枠のまま理由を渡して続けさせる。
+                // 枠を手放してからだと、待っている親や知らせの先に、フックが退けた答えが渡ってしまう
+                for (var continuation = 0; ; continuation++)
+                {
+                    var stop = await hooks.RunStopAsync(conversation, result, continuation > 0);
+                    if (result.Status != ChatStatus.Done || !stop.Blocked || continuation >= MaxStopContinuations) break;
+                    var feedback = new JsonObject
+                    {
+                        ["role"] = "user",
+                        ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = $"<hook-feedback event=\"Stop\">\n{stop.Message}\n</hook-feedback>" }),
+                    };
+                    conversation.Append(feedback);
+                    EmitChat(new JsonObject { ["type"] = "inbound", ["message"] = feedback.DeepClone() });
+                    result = await engine.RunAsync(conversation, options, EmitChat, gate, cancellation.Token);
+                }
             }
             conversation.LastRunStatus = result.Status.ToString().ToLowerInvariant();
 
@@ -241,7 +275,6 @@ public sealed class ChatHub(
             });
             events.Emit("conversations.changed", null);
             EmitStatus(conversation);
-            stopFeedback = (await hooks.RunStopAsync(conversation, result)) is { Blocked: true } stop ? stop.Message : null;
 
             if (engine is not null && result.Status == ChatStatus.Done && conversation.Title == Conversation.DefaultTitle)
             {
@@ -271,41 +304,32 @@ public sealed class ChatHub(
         finally
         {
             Release(id, cancellation);
-            lock (agentLock) runningAgents.Remove(id);
-            completions.TryRemove(new KeyValuePair<string, TaskCompletionSource<ChatRunResult>>(id, completion));
+            ReleaseSlot(id);
             completion.TrySetResult(result);
             EmitStatus(conversation);
         }
-        await AfterRunAsync(conversation, result, stopFeedback);
+        await AfterRunAsync(conversation, result);
     }
 
     // 終わった会話に溜まったメッセージを流し、待っていた相手や親に知らせる
-    async Task AfterRunAsync(Conversation conversation, ChatRunResult result, string? stopFeedback)
+    async Task AfterRunAsync(Conversation conversation, ChatRunResult result)
     {
         try
         {
-            // Stop フックが続けるよう求めたら、理由を渡してもう一度動かす。止まらなくなるのを防ぐため 3 回まで
-            if (stopFeedback is not null && result.Status == ChatStatus.Done)
-            {
-                var count = stopContinuations.AddOrUpdate(conversation.Id, 1, (_, n) => n + 1);
-                if (count <= 3) await DeliverAsync(conversation, $"<hook-feedback event=\"Stop\">\n{stopFeedback}\n</hook-feedback>", RunHopsOf(conversation.Id));
-            }
-            else
-            {
-                stopContinuations.TryRemove(conversation.Id, out _);
-            }
+            // 往復の回数は引き継ぐ。知らせのたびに 0 に戻すと、知らせ合いが止まらなくなる
+            var hops = RunHopsOf(conversation.Id);
             if (backgroundChildren.TryRemove(conversation.Id, out _) && conversation.ParentId is { } parentId && await conversations.GetAsync(parentId) is { } parent)
             {
                 var status = result.Status == ChatStatus.Done ? "completed" : result.Status == ChatStatus.Aborted ? "stopped" : "failed";
                 var body = result.Status == ChatStatus.Done ? FinalText(conversation) : result.Error ?? "";
-                await DeliverAsync(parent, $"<task-notification agent=\"{Escape(conversation.Title)}\" chat_id=\"{conversation.Id}\" status=\"{status}\">\n{body}\n</task-notification>", hops: 0);
+                await DeliverAsync(parent, $"<task-notification agent=\"{Escape(conversation.Title)}\" chat_id=\"{conversation.Id}\" status=\"{status}\">\n{body}\n</task-notification>", hops);
             }
             if (idleWatchers.TryRemove(conversation.Id, out var watchers))
             {
                 foreach (var watcherId in watchers.Keys)
                 {
                     if (await conversations.GetAsync(watcherId) is not { } watcher) continue;
-                    await DeliverAsync(watcher, $"<idle-notification chat=\"{Escape(conversation.Title)}\" chat_id=\"{conversation.Id}\" status=\"{StatusOf(conversation)}\">\n{Shorten(FinalText(conversation), 4000)}\n</idle-notification>", hops: 0);
+                    await DeliverAsync(watcher, $"<idle-notification chat=\"{Escape(conversation.Title)}\" chat_id=\"{conversation.Id}\" status=\"{StatusOf(conversation)}\">\n{Shorten(FinalText(conversation), 4000)}\n</idle-notification>", hops + 1);
                 }
             }
             await FlushInboxAsync(conversation);
@@ -338,8 +362,20 @@ public sealed class ChatHub(
 
     public async Task<ChatRunResult> WaitAsync(string conversationId, CancellationToken cancellationToken)
     {
-        if (!completions.TryGetValue(conversationId, out var completion)) return new ChatRunResult(ChatStatus.Done);
+        if (!completions.TryGetValue(conversationId, out var completion)) return new ChatRunResult(ChatStatus.Failed, "この会話は動いていません");
         return await completion.Task.WaitAsync(cancellationToken);
+    }
+
+    // 削除した会話の、残った待ち合わせや知らせの登録を消す
+    public void Forget(string conversationId)
+    {
+        lock (inboxLock) inboxes.Remove(conversationId);
+        idleWatchers.TryRemove(conversationId, out _);
+        foreach (var watchers in idleWatchers.Values) watchers.TryRemove(conversationId, out _);
+        backgroundChildren.TryRemove(conversationId, out _);
+        waitingForSlot.TryRemove(conversationId, out _);
+        runHops.TryRemove(conversationId, out _);
+        completions.TryRemove(conversationId, out _);
     }
 
     // Messaging
@@ -347,18 +383,57 @@ public sealed class ChatHub(
     // 待機中ならすぐ動かし、応答中なら終わってから届ける
     public async Task DeliverAsync(Conversation target, string text, int hops)
     {
-        inboxes.GetOrAdd(target.Id, _ => new()).Enqueue(new Inbound(text, hops));
+        lock (inboxLock)
+        {
+            if (!inboxes.TryGetValue(target.Id, out var list)) inboxes[target.Id] = list = [];
+            list.Add(new Inbound(text, hops));
+        }
         if (!running.ContainsKey(target.Id)) await FlushInboxAsync(target);
+    }
+
+    async Task FlushQuietlyAsync(Conversation target)
+    {
+        try
+        {
+            await FlushInboxAsync(target);
+        }
+        catch (Exception)
+        {
+            // 流せなかった分は受け箱に残っていて、次の機会に流れる
+        }
     }
 
     async Task FlushInboxAsync(Conversation target)
     {
-        if (!inboxes.TryGetValue(target.Id, out var queue) || queue.IsEmpty || running.ContainsKey(target.Id)) return;
-        var items = new List<Inbound>();
-        while (queue.TryDequeue(out var item)) items.Add(item);
-        if (items.Count == 0) return;
-        var depth = target.Kind == "chat" ? 0 : 1;
-        var options = await OptionsForAsync(target, depth: depth);
+        lock (inboxLock)
+        {
+            if (!inboxes.TryGetValue(target.Id, out var pending) || pending.Count == 0) return;
+        }
+        if (running.ContainsKey(target.Id)) return;
+        if (await conversations.GetAsync(target.Id) is null)
+        {
+            Forget(target.Id);
+            return;
+        }
+        var options = await OptionsForAsync(target);
+        var isAgent = DepthOf(target) > 0;
+        // 子は通信で動き出すときもエージェントの数に数える
+        if (isAgent && !TryTakeSlot(target.Id, await AgentLimitAsync()))
+        {
+            waitingForSlot[target.Id] = 0;
+            return;
+        }
+        waitingForSlot.TryRemove(target.Id, out _);
+        List<Inbound> items;
+        lock (inboxLock)
+        {
+            items = inboxes.Remove(target.Id, out var taken) ? taken : [];
+        }
+        if (items.Count == 0)
+        {
+            if (isAgent) ReleaseSlot(target.Id);
+            return;
+        }
         try
         {
             await StartAsync(target, () =>
@@ -366,14 +441,21 @@ public sealed class ChatHub(
                 var content = new JsonArray(items.Select(i => (JsonNode)new JsonObject { ["type"] = "text", ["text"] = i.Text }).ToArray());
                 var message = new JsonObject { ["role"] = "user", ["content"] = content };
                 target.Append(message);
-                events.Emit("chat.event", new JsonObject { ["conversationId"] = target.Id, ["event"] = new JsonObject { ["type"] = "inbound", ["message"] = message.DeepClone() } });
+                EmitChatEvent(target.Id, new JsonObject { ["type"] = "inbound", ["message"] = message.DeepClone() });
                 return Task.CompletedTask;
-            }, options, depth: depth, hops: items.Max(i => i.Hops));
+            }, options, hops: items.Max(i => i.Hops));
         }
-        catch (InvalidOperationException)
+        catch (Exception e)
         {
-            // ちょうど別の応答が始まった。その応答が終わったときにもう一度流す
-            foreach (var item in items) queue.Enqueue(item);
+            if (isAgent) ReleaseSlot(target.Id);
+            // 先に届いたものが先に読まれるよう、受け箱の先頭に戻す
+            lock (inboxLock)
+            {
+                if (inboxes.TryGetValue(target.Id, out var later)) items.AddRange(later);
+                inboxes[target.Id] = items;
+            }
+            // ちょうど別の応答が始まったときは、その応答が終わったときにもう一度流す
+            if (e is not InvalidOperationException) throw;
         }
     }
 
@@ -386,12 +468,15 @@ public sealed class ChatHub(
         if (from.Id == to.Id) return false;
         // 親子の間はフォルダに関係なく通じる
         if (to.ParentId == from.Id || from.ParentId == to.Id) return true;
-        var folder = await folders.GetAsync(from.FolderId);
-        if (folder is null) return false;
-        return folder.MessagingScope switch
+        // ほかの会話の子には、その親を通さずに話しかけない
+        if (to.Kind != "chat" || from.Kind != "chat") return false;
+        // 送る側と受ける側の両方のフォルダが許していること。片方だけだと「通信しない」フォルダにも届いてしまう
+        return Allows(await folders.GetAsync(from.FolderId), to) && Allows(await folders.GetAsync(to.FolderId), from);
+
+        static bool Allows(Folder? folder, Conversation other) => folder?.MessagingScope switch
         {
             "all" => true,
-            "folder" => to.FolderId == from.FolderId,
+            "folder" => other.FolderId == folder.Id,
             _ => false,
         };
     }
@@ -403,21 +488,44 @@ public sealed class ChatHub(
         lock (agentLock) return runningAgents.Count;
     }
 
+    async Task<int> AgentLimitAsync() => Math.Max(1, (await settings.GetAsync()).Agents.MaxConcurrent);
+
+    bool TryTakeSlot(string conversationId, int limit)
+    {
+        lock (agentLock)
+        {
+            if (runningAgents.Contains(conversationId)) return true;
+            if (runningAgents.Count >= limit) return false;
+            runningAgents.Add(conversationId);
+            return true;
+        }
+    }
+
+    void ReleaseSlot(string conversationId)
+    {
+        bool released;
+        lock (agentLock) released = runningAgents.Remove(conversationId);
+        if (!released) return;
+        // 空いた枠で、メッセージを溜めて待っていた子を動かす
+        foreach (var waitingId in waitingForSlot.Keys)
+        {
+            _ = Task.Run(async () =>
+            {
+                if (await conversations.GetAsync(waitingId) is { } waiting) await FlushQuietlyAsync(waiting);
+            });
+        }
+    }
+
     // ワークフローは空きが出るまで待ち、単発の呼び出しは待たずに断る
     public async Task<Conversation> SpawnAsync(Conversation parent, string prompt, string title, string kind, string? workflowId, Func<ChatOptions, ChatOptions>? customize, bool background, CancellationToken cancellationToken = default)
     {
-        var limit = Math.Max(1, (await settings.GetAsync()).Agents.MaxConcurrent);
+        var limit = await AgentLimitAsync();
         var child = conversations.Create();
         while (true)
         {
-            lock (agentLock)
-            {
-                if (runningAgents.Count < limit)
-                {
-                    runningAgents.Add(child.Id);
-                    break;
-                }
-            }
+            // 止めたワークフローから、空きがあるからと新しい子を作らない
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryTakeSlot(child.Id, limit)) break;
             if (workflowId is null) throw new ToolException($"同時に動かせるエージェントは {limit} 個までです。終わるのを待ってから呼んでください");
             await Task.Delay(500, cancellationToken);
         }
@@ -432,7 +540,7 @@ public sealed class ChatHub(
         child.Options = parent.Options?.DeepClone() as JsonObject;
         try
         {
-            var baseOptions = await OptionsForAsync(child, depth: 1);
+            var baseOptions = await OptionsForAsync(child);
             var options = customize?.Invoke(baseOptions) ?? baseOptions;
             if (background) backgroundChildren[child.Id] = 0;
             await StartAsync(child, () =>
@@ -443,11 +551,11 @@ public sealed class ChatHub(
                     ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = $"<task from_chat=\"{Escape(parent.Title)}\" chat_id=\"{parent.Id}\">\n{prompt}\n</task>" }),
                 });
                 return Task.CompletedTask;
-            }, options, depth: 1);
+            }, options, hops: RunHopsOf(parent.Id));
         }
         catch
         {
-            lock (agentLock) runningAgents.Remove(child.Id);
+            ReleaseSlot(child.Id);
             backgroundChildren.TryRemove(child.Id, out _);
             throw;
         }
@@ -467,8 +575,9 @@ public sealed class ChatHub(
             hub.approvals[requestId] = (conversation.Id, (JsonObject)request.DeepClone(), decision);
             hub.EmitChatEvent(conversation.Id, request);
             hub.EmitStatus(conversation);
-            await hub.NotifyAsync(conversation, $"{request["title"] ?? request["tool"]} の確認待ち");
             using var registration = cancellationToken.Register(() => decision.TrySetCanceled(cancellationToken));
+            // 通知のフックが遅くても、確認と停止は待たせない
+            _ = hub.NotifyAsync(conversation, $"{request["title"] ?? request["tool"]} の確認待ち");
             try
             {
                 return await decision.Task;

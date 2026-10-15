@@ -38,7 +38,8 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
             new(Prefix + "send_message", Source, "send_message", "ほかのチャットに送る",
                 "Send a message to another Claude chat by id or exact title. An idle chat starts a new turn to answer; a running chat receives it when its current turn ends. Set notify_when_idle to get an <idle-notification> with its latest reply when it next goes idle.",
                 Schema(("to", "string", "Chat id or exact title", true), ("message", "string", "The message", true), ("notify_when_idle", "boolean", "Notify me when that chat goes idle", false)),
-                AutoApprove: true, ReadOnly: true),
+                // 相手に動いてもらうものなので、計画モードでは使わない
+                AutoApprove: true),
         ];
     }
 
@@ -170,7 +171,7 @@ public sealed class ChatSearchToolProvider(ConversationStore conversations, Sett
         return
         [
             new(Prefix + "search", Source, "search", "過去のチャットを探す",
-                "Search the user's past chats in this app by keywords. Use it when the user refers to something discussed before. Returns matching chats with snippets.",
+                "Search the user's past chats by keywords. Only chats in the same folder as this chat are searched (chats outside any folder see only other chats outside folders). Use it when the user refers to something discussed before. Returns matching chats with snippets.",
                 Schema(("query", "string", "Keywords. Several words must all appear", true)), AutoApprove: true, ReadOnly: true),
             new(Prefix + "read", Source, "read", "過去のチャットを読む",
                 "Read the text of a past chat by id, from search results.",
@@ -183,12 +184,17 @@ public sealed class ChatSearchToolProvider(ConversationStore conversations, Sett
         .Select(m => $"[{((string?)m["role"] == "user" ? "user" : "assistant")}] {WireText.Of(m["content"])}")
         .Where(t => t.Length > 13));
 
+    // claude.ai と同じく、プロジェクト (フォルダ) の中の会話はその中からだけ探せる。ほかの会話の子は対象にしない
+    static bool Visible(Conversation c, Conversation? me) =>
+        c.Id != me?.Id && c.FolderId == me?.FolderId && (c.Kind == "chat" || c.ParentId == me?.Id);
+
     public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
-        var me = ToolContext.Current?.Conversation.Id;
+        var me = ToolContext.Current?.Conversation;
         if (apiName == Prefix + "read")
         {
-            var c = await conversations.GetAsync(Required(input, "id")) ?? throw new ToolException("そのチャットはありません");
+            var c = await conversations.GetAsync(Required(input, "id"));
+            if (c is null || !Visible(c, me)) throw new ToolException("そのチャットはありません");
             var text = TextOf(c);
             var offset = Math.Clamp((int?)input["offset"] ?? 0, 0, text.Length);
             var chunk = text[offset..Math.Min(text.Length, offset + MaxReadChars)];
@@ -199,9 +205,9 @@ public sealed class ChatSearchToolProvider(ConversationStore conversations, Sett
         var hits = new List<string>();
         foreach (var summary in await conversations.ListAsync())
         {
-            if (summary.Id == me || hits.Count >= MaxHits) continue;
+            if (summary.FolderId != me?.FolderId || hits.Count >= MaxHits) continue;
             cancellationToken.ThrowIfCancellationRequested();
-            if (await conversations.GetAsync(summary.Id) is not { } c) continue;
+            if (await conversations.GetAsync(summary.Id) is not { } c || !Visible(c, me)) continue;
             var text = $"{c.Title}\n{TextOf(c)}";
             if (!words.All(w => text.Contains(w, StringComparison.OrdinalIgnoreCase))) continue;
             var at = text.IndexOf(words[0], StringComparison.OrdinalIgnoreCase);

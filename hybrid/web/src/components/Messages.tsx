@@ -70,7 +70,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
         if (link && /^https?:/.test(link.href)) {
           e.preventDefault();
           // WebView2 側で既定のブラウザに回す
-          window.open(link.href, "_blank");
+          window.open(link.href, "_blank", "noopener,noreferrer");
         }
       }}
     />

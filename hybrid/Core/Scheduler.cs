@@ -14,6 +14,8 @@ public sealed class Schedule
     // null なら毎回新しいチャットを作る
     public string? ConversationId { get; set; }
     public string? FolderId { get; set; }
+    // 新しい会話で動かすときの道具立て。null なら設定の既定
+    public JsonObject? Options { get; set; }
     public bool Enabled { get; set; } = true;
     public long? NextRunAt { get; set; }
     public long? LastRunAt { get; set; }
@@ -136,6 +138,7 @@ public sealed class Scheduler(AppPaths paths, ChatHub hub, ConversationStore con
                     s.NextRunAt = NextRun(s, now);
                 }
                 if (due.Count > 0 || expired > 0) await Json.WriteAtomicAsync(paths.SchedulesFile, list);
+                if (expired > 0) events.Emit("schedules.changed", null);
                 due = due.Select(Clone).ToList();
             }
             finally
@@ -172,6 +175,7 @@ public sealed class Scheduler(AppPaths paths, ChatHub hub, ConversationStore con
         var conversation = conversations.Create();
         conversation.Title = schedule.Title;
         conversation.FolderId = schedule.FolderId;
+        conversation.Options = schedule.Options;
         var options = await hub.OptionsForAsync(conversation);
         await hub.StartAsync(conversation, () =>
         {
@@ -180,20 +184,24 @@ public sealed class Scheduler(AppPaths paths, ChatHub hub, ConversationStore con
         }, options);
     }
 
-    async Task SetEnabledAsync(string id, bool enabled)
+    // 画面の古い写しで上書きしないよう、オンオフだけを変える
+    public async Task SetEnabledAsync(string id, bool enabled)
     {
         await gate.WaitAsync();
         try
         {
             var list = await LoadAsync();
-            if (list.FirstOrDefault(s => s.Id == id) is not { } schedule) return;
+            var schedule = list.FirstOrDefault(s => s.Id == id) ?? throw new ToolException($"{id} という予定はありません");
             schedule.Enabled = enabled;
+            // 止めている間に過ぎた分をまとめて動かさない
+            if (enabled) schedule.NextRunAt = NextRun(schedule, DateTimeOffset.Now);
             await Json.WriteAtomicAsync(paths.SchedulesFile, list);
         }
         finally
         {
             gate.Release();
         }
+        events.Emit("schedules.changed", null);
     }
 
     static Schedule Clone(Schedule s) => new()
@@ -205,6 +213,7 @@ public sealed class Scheduler(AppPaths paths, ChatHub hub, ConversationStore con
         DailyTime = s.DailyTime,
         ConversationId = s.ConversationId,
         FolderId = s.FolderId,
+        Options = s.Options?.DeepClone() as JsonObject,
         Enabled = s.Enabled,
         NextRunAt = s.NextRunAt,
         LastRunAt = s.LastRunAt,

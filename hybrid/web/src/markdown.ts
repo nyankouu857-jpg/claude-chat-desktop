@@ -20,10 +20,21 @@ marked.use({
   },
 });
 
+// 外部の画像は表示した瞬間に URL へアクセスが飛ぶ。注入された指示で会話の中身を URL に埋めて送られないよう、リンクに置き換える
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  if (node.tagName !== "IMG") return;
+  const src = node.getAttribute("src") ?? "";
+  if (/^(data|blob):/i.test(src)) return;
+  const link = document.createElement("a");
+  link.href = src;
+  link.textContent = `[画像: ${node.getAttribute("alt") || src}]`;
+  node.replaceWith(link);
+});
+
 export function renderMarkdown(text: string): string {
   // 回答の中のフォームから別のページへ送られないように
   return DOMPurify.sanitize(marked.parse(text, { async: false }) as string, {
     ADD_ATTR: ["data-copy", "target"],
-    FORBID_TAGS: ["form", "iframe", "object", "embed"],
+    FORBID_TAGS: ["form", "iframe", "object", "embed", "video", "audio", "source", "picture"],
   });
 }

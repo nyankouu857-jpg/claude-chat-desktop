@@ -89,6 +89,7 @@ export interface WorkflowAgent {
 
 export interface WorkflowRun {
   id: string;
+  name?: string | null;
   parentId: string;
   title: string;
   status: "running" | "completed" | "failed" | "stopped";

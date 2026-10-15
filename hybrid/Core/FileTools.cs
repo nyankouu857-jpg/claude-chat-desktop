@@ -150,6 +150,11 @@ public sealed class FileToolProvider : IToolProvider
         var folder = FolderOf(full, access);
         if (folder.Root is null) throw new ToolException($"{full} は許可されたフォルダの外です。list_allowed_folders で確認してください");
         if (forWrite && folder.ReadOnly) throw new ToolException($"{folder.Root} は読み取り専用です");
+        // .git のフックや設定を書き換えられると、次の git 操作で確認なしにコードが動く
+        if (forWrite && full[folder.Root.Length..].Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(part => part.Equals(".git", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new ToolException(".git の中は書き換えられません");
+        }
 
         for (var current = full; current.Length > folder.Root.Length; current = Path.GetDirectoryName(current)!)
         {
@@ -488,7 +493,9 @@ public sealed class FileToolProvider : IToolProvider
         var original = settings.Current?.Files.Folders.FirstOrDefault()?.Path ?? throw new ToolException("許可フォルダがありません");
         var repo = Git(original, "rev-parse", "--show-toplevel").Trim();
         var root = Normalize(repo);
-        if (FolderOf(root, access).Root is null) throw new ToolException("リポジトリの場所が許可フォルダの外です");
+        var repoFolder = FolderOf(root, access);
+        if (repoFolder.Root is null) throw new ToolException("リポジトリの場所が許可フォルダの外です");
+        if (repoFolder.ReadOnly) throw new ToolException("読み取り専用フォルダではワークツリーを作れません");
         var path = Path.Combine(root, ".claude", "worktrees", name);
         if (Directory.Exists(path)) throw new ToolException($"{path} はすでにあります");
         Git(root, "worktree", "add", "-b", $"claude/{name}", path);
@@ -521,7 +528,10 @@ public sealed class FileToolProvider : IToolProvider
             RedirectStandardError = true,
             CreateNoWindow = true,
         };
-        foreach (var arg in args) info.ArgumentList.Add(arg);
+        // リポジトリ側のフックや fsmonitor は Claude が仕込めた可能性があるので動かさない
+        var noHooks = Path.Combine(Path.GetTempPath(), "claudechat-no-git-hooks");
+        Directory.CreateDirectory(noHooks);
+        foreach (var arg in new[] { "-c", $"core.hooksPath={noHooks}", "-c", "core.fsmonitor=false" }.Concat(args)) info.ArgumentList.Add(arg);
         try
         {
             using var process = System.Diagnostics.Process.Start(info) ?? throw new ToolException("git を起動できませんでした");

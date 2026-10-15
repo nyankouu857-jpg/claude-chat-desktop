@@ -58,6 +58,13 @@ function putConversation(s: AppState, conversation: Conversation): AppState {
 }
 
 export async function init() {
+  // 初期化の応答を待つ間に届いた通知も取りこぼさないよう、先に受け口を作る
+  on("chat.event", ({ conversationId, event }) => applyChatEvent(conversationId, event));
+  on("conversations.changed", () => void refreshSummaries());
+  on("mcp.changed", (mcp) => setState((s) => ({ ...s, mcp })));
+  on("chats.status", ({ id, status }) => setState((s) => ({ ...s, statuses: { ...s.statuses, [id]: status } })));
+  on("workflow.changed", (run: WorkflowRun) => setState((s) => ({ ...s, workflows: { ...s.workflows, [run.id]: run } })));
+  on("folders.changed", () => void refreshFolders());
   const data = await call("app.init");
   setState((s) => ({
     ...s,
@@ -72,9 +79,12 @@ export async function init() {
     statuses: data.statuses,
     workflows: Object.fromEntries((data.workflows as WorkflowRun[]).map((w) => [w.id, w])),
     extensions: data.extensions,
-    live: Object.fromEntries(
-      (data.running as { conversationId: string; approvals: Approval[] }[]).map((r) => [r.conversationId, { ...emptyLive(), approvals: r.approvals }]),
-    ),
+    live: {
+      ...Object.fromEntries(
+        (data.running as { conversationId: string; approvals: Approval[] }[]).map((r) => [r.conversationId, { ...emptyLive(), approvals: r.approvals }]),
+      ),
+      ...s.live,
+    },
     choice: {
       model: data.settings.chat.model,
       effort: data.settings.chat.effort,
@@ -87,13 +97,6 @@ export async function init() {
     },
   }));
   if (!data.secrets.hasApiKey) navigate({ name: "settings", tab: "api" });
-
-  on("chat.event", ({ conversationId, event }) => applyChatEvent(conversationId, event));
-  on("conversations.changed", () => void refreshSummaries());
-  on("mcp.changed", (mcp) => setState((s) => ({ ...s, mcp })));
-  on("chats.status", ({ id, status }) => setState((s) => ({ ...s, statuses: { ...s.statuses, [id]: status } })));
-  on("workflow.changed", (run: WorkflowRun) => setState((s) => ({ ...s, workflows: { ...s.workflows, [run.id]: run } })));
-  on("folders.changed", () => void refreshFolders());
 }
 
 async function refreshFolders() {
@@ -263,6 +266,8 @@ export async function send(conversationId: string | null, content: WireMessage["
     ...chatOptions(),
   }));
   if (result && research) setChoice({ research: false });
+  // 権限モードは始めた会話に移したので、次の新しいチャットは毎回確認から始める
+  if (result && !conversationId && choice.permissionMode !== "default") setChoice({ permissionMode: "default" });
   if (!result) return false;
   if (!conversationId) navigate({ name: "chat", id: result.conversationId });
   else {
@@ -309,7 +314,15 @@ export async function deleteConversation(id: string) {
 
 export async function updateSettings(patch: Partial<{ [K in keyof Settings]: Partial<Settings[K]> }>) {
   const settings = await guard(() => call<Settings>("settings.update", patch));
-  if (settings) setState((s) => ({ ...s, settings }));
+  if (!settings) return settings;
+  setState((s) => ({ ...s, settings }));
+  // 既定を変えたら、入力欄の選択にもすぐ反映する
+  const chat = patch.chat ?? {};
+  const choice: Partial<AppState["choice"]> = {};
+  for (const key of ["model", "effort", "webSearch", "webFetch", "codeExecution"] as const) {
+    if (chat[key] !== undefined) (choice as Record<string, unknown>)[key] = chat[key];
+  }
+  if (Object.keys(choice).length > 0) setChoice(choice);
   return settings;
 }
 
@@ -393,7 +406,7 @@ export async function exportConversation(conversationId: string) {
 
 export async function rewind(conversationId: string, messageIndex: number, restoreFiles: boolean) {
   const conversation = getState().conversations[conversationId];
-  const text = conversation ? textOf(conversation.messages[messageIndex]?.content ?? "") : "";
+  const text = conversation ? humanText(conversation.messages[messageIndex]?.content ?? "") : "";
   const result = await guard(() => call<{ conversation: Conversation; files: { restored: string[]; skipped: string[] } | null }>("chat.rewind", { conversationId, messageIndex, restoreFiles }));
   if (!result) return;
   setState((s) => ({ ...putConversation(s, result.conversation), prefill: { ...s.prefill, [conversationId]: { text, nonce: Date.now() } } }));
@@ -422,6 +435,7 @@ export const expandCommand = (name: string, args: string) => guard(() => call<st
 export const listSchedules = () => guard(() => call<Schedule[]>("schedules.list"));
 export const saveSchedule = (schedule: Partial<Schedule>, loop = false) => guard(() => call<Schedule[]>("schedules.save", { schedule, loop }));
 export const deleteSchedule = (id: string) => guard(() => call<Schedule[]>("schedules.delete", { id }));
+export const setScheduleEnabled = (id: string, enabled: boolean) => guard(() => call<Schedule[]>("schedules.setEnabled", { id, enabled }));
 
 // Memory
 
@@ -445,6 +459,22 @@ export async function orgUsage(range: string) {
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+// フックの補足など、アプリが添えた部分を除いた本人の文
+const ADDED_TAG = /^<(hook-feedback)[\s>]/;
+
+export function humanText(content: WireMessage["content"]): string {
+  if (typeof content === "string") return content;
+  const own = content.filter((b: WireBlock) => b.type === "text" && !ADDED_TAG.test(b.text ?? "")).map((b) => b.text).join("\n");
+  return own || textOf(content);
+}
+
+export function clearPrefill(conversationId: string) {
+  setState((s) => {
+    const { [conversationId]: _, ...prefill } = s.prefill;
+    return { ...s, prefill };
+  });
 }
 
 export function textOf(content: WireMessage["content"]): string {

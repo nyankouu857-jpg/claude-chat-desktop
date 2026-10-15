@@ -147,6 +147,7 @@ public sealed class AppHost : IAsyncDisposable
         "schedules.list" => ListSchedulesAsync(),
         "schedules.save" => SaveScheduleAsync(p),
         "schedules.delete" => DeleteScheduleAsync(Str(p, "id")),
+        "schedules.setEnabled" => SetScheduleEnabledAsync(Str(p, "id"), (bool?)p["enabled"] == true),
         "memory.list" => Task.FromResult<JsonNode?>(ListMemory()),
         "memory.read" => Task.FromResult<JsonNode?>(File.ReadAllText(MemoryPath(Str(p, "path")))),
         "memory.write" => WriteMemoryAsync(Str(p, "path"), (string?)p["content"] ?? ""),
@@ -250,7 +251,6 @@ public sealed class AppHost : IAsyncDisposable
             }
         }
         var hookPatch = patch["hooks"]?.Deserialize<Dictionary<string, List<HookEntry>>>(Json.Wire);
-        if (hookPatch?.Keys.FirstOrDefault(k => !HookEvents.Contains(k)) is { } unknown) throw new InvalidOperationException($"{unknown} というフックはありません");
         var updated = await settings.UpdateAsync(s =>
         {
             if (patch["profile"] is JsonObject profile) s.Profile = Merge(s.Profile, profile);
@@ -262,7 +262,13 @@ public sealed class AppHost : IAsyncDisposable
             if (patch["browser"] is JsonObject browserPatch) s.Browser = Merge(s.Browser, browserPatch);
             if (patch["agents"] is JsonObject agents) s.Agents = Merge(s.Agents, agents);
             if (patch["features"] is JsonObject features) s.Features = Merge(s.Features, features);
-            if (hookPatch is not null) s.Hooks = hookPatch;
+            if (hookPatch is not null)
+            {
+                // 画面が扱うのは決まった 5 つだけ。settings.json に手で書いたほかの項目は消さずに残す
+                s.Hooks = s.Hooks.Where(h => !HookEvents.Contains(h.Key))
+                    .Concat(hookPatch.Where(h => HookEvents.Contains(h.Key)))
+                    .ToDictionary(h => h.Key, h => h.Value);
+            }
         });
         return SettingsView(updated);
     }
@@ -352,8 +358,12 @@ public sealed class AppHost : IAsyncDisposable
 
     async Task<JsonNode?> DeleteConversationAsync(string id)
     {
+        // 子やワークフローが、消えた親のために動き続けないように
+        foreach (var run in workflows.ForParent(id)) workflows.Stop(run.Id);
+        foreach (var child in await DescendantsAsync(id)) hub.Stop(child.Id);
         hub.Stop(id);
         await conversations.DeleteAsync(id);
+        hub.Forget(id);
         checkpoints.Forget(id);
         Emit("conversations.changed", null);
         return null;
@@ -498,6 +508,7 @@ public sealed class AppHost : IAsyncDisposable
         var options = await OptionsAsync(conversation, p);
         await hub.StartAsync(conversation, () =>
         {
+            checkpoints.ForgetFrom(conversation.Id, index);
             conversation.TruncateFrom(index);
             conversation.Append(new JsonObject { ["role"] = "user", ["content"] = content });
             return Task.CompletedTask;
@@ -555,6 +566,8 @@ public sealed class AppHost : IAsyncDisposable
     async Task<JsonNode?> BtwAsync(string conversationId, string question)
     {
         var conversation = await RequireConversationAsync(conversationId);
+        var outcome = await hooks.RunUserPromptSubmitAsync(conversation, question);
+        if (outcome.Blocked) throw new InvalidOperationException($"UserPromptSubmit フックが止めました: {outcome.Message}");
         var engine = await hub.EngineAsync();
         var options = await hub.OptionsForAsync(conversation);
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
@@ -600,6 +613,7 @@ public sealed class AppHost : IAsyncDisposable
         var restored = await hub.ExclusiveAsync(conversation, async _ =>
         {
             var result = restoreFiles ? checkpoints.Restore(conversation.Id, messageIndex) : null;
+            checkpoints.ForgetFrom(conversation.Id, messageIndex);
             conversation.TruncateFrom(messageIndex);
             await conversations.SaveAsync(conversation);
             return result;
@@ -631,11 +645,19 @@ public sealed class AppHost : IAsyncDisposable
         return new JsonObject { ["path"] = path };
     }
 
+    static readonly string[] ExecutableExtensions =
+    [
+        ".exe", ".com", ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".url",
+        ".scr", ".msi", ".msp", ".msc", ".cpl", ".jar", ".reg", ".appref-ms", ".application", ".pif", ".scf", ".inf", ".chm",
+    ];
+
     // 会話が覚えている場所だけ開く。画面から任意のパスを開かせない
     async Task<JsonNode?> OpenFileAsync(string conversationId, string fileId, bool reveal)
     {
         var conversation = await RequireConversationAsync(conversationId);
         if (!conversation.Files.TryGetValue(fileId, out var path) || !File.Exists(path)) throw new InvalidOperationException("ファイルが見つかりません");
+        // コード実行で作られた実行ファイルを、ボタン 1 つで動かさない
+        if (ExecutableExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase)) reveal = true;
         platform.OpenPath(reveal ? Path.GetDirectoryName(path)! : path);
         return null;
     }
@@ -654,12 +676,17 @@ public sealed class AppHost : IAsyncDisposable
         var body = command.Body.Contains("$ARGUMENTS")
             ? command.Body.Replace("$ARGUMENTS", args)
             : args.Length > 0 ? $"{command.Body}\n\nARGUMENTS: {args}" : command.Body;
+        if (command.Kind == "skill" && extensions.GetSkill(command.Name) is { } skill && SkillToolProvider.FilesOf(skill.Info) is { Count: > 0 } files)
+        {
+            body += $"\n\nFiles in this skill (read them with skills__read_file, name \"{command.Name}\"):\n{string.Join("\n", files)}";
+        }
         return Task.FromResult<JsonNode?>($"<command name=\"/{command.Name}\">\n{body}\n</command>");
     }
 
     // アーティファクトは iframe で別のページとして出す。アプリの画面の CSP ではインラインのスクリプトが動かないため。
-    // iframe は sandbox で別オリジン扱いにし、ここで外への通信も絞る
-    public const string ArtifactCsp = "default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com; img-src data: blob: https:; font-src data: https://cdnjs.cloudflare.com; media-src data: blob: https:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
+    // 画像の読み込みだけでも中身を外へ送り出せるので、外への通信は cdnjs だけにする。
+    // CSP の sandbox は、このページが直接開かれたときもアプリと別オリジンにするため
+    public const string ArtifactCsp = "default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com; img-src data: blob: https://cdnjs.cloudflare.com; font-src data: https://cdnjs.cloudflare.com; media-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; sandbox allow-scripts allow-popups allow-modals";
 
     public static bool IsArtifactPath(string path) => path.StartsWith("artifact/", StringComparison.Ordinal);
 
@@ -699,6 +726,19 @@ public sealed class AppHost : IAsyncDisposable
         try
         {
             await scheduler.SaveAsync(schedule);
+        }
+        catch (ToolException e)
+        {
+            throw new InvalidOperationException(e.Message);
+        }
+        return await ListSchedulesAsync();
+    }
+
+    async Task<JsonNode?> SetScheduleEnabledAsync(string id, bool enabled)
+    {
+        try
+        {
+            await scheduler.SetEnabledAsync(id, enabled);
         }
         catch (ToolException e)
         {

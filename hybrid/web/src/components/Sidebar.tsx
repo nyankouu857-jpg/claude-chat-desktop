@@ -142,7 +142,9 @@ function ConversationTree({ summary, depth, activeId, childrenOf }: { summary: C
 
 function FolderSection({ folder, chats, activeId, childrenOf }: { folder: Folder; chats: ConversationSummary[]; activeId: string | null; childrenOf: Map<string, ConversationSummary[]> }) {
   const view = useStore((s) => s.view);
-  const containsActive = chats.some((c) => c.id === activeId) || (view.name === "new" && view.folderId === folder.id);
+  // 子の会話を開いているときも、親のいるフォルダは開いたままにする
+  const containsActive = chats.some((c) => c.id === activeId || (childrenOf.get(c.id) ?? []).some((k) => k.id === activeId))
+    || (view.name === "new" && view.folderId === folder.id);
   const [expanded, setExpanded] = useState<boolean | null>(null);
   const open = expanded ?? containsActive;
   return (

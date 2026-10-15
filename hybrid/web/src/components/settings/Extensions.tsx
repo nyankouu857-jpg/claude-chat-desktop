@@ -75,7 +75,7 @@ export function Extensions({ settings }: { settings: Settings }) {
         <div className="settings-actions">
           <button type="button" className="button primary" disabled={!dirty} onClick={async () => {
             // 空のコマンドは保存しない
-            const cleaned = Object.fromEntries(Object.entries(hooks).map(([k, list]) => [k, list.filter((e) => e.command.trim())]).filter(([, list]) => list.length > 0));
+            const cleaned = Object.fromEntries(HOOK_EVENTS.map((e) => [e.id, (hooks[e.id] ?? []).filter((h) => h.command.trim())]).filter(([, list]) => list.length > 0));
             if (await saveHooks(cleaned)) toast("保存しました");
           }}>フックを保存</button>
         </div>

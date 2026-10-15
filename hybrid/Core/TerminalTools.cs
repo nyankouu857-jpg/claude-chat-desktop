@@ -20,9 +20,11 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
     const int MaxTimeoutSeconds = 600;
     static readonly TimeSpan OutputGrace = TimeSpan.FromSeconds(2);
 
-    sealed class BackgroundCommand(int id, string command, Process process)
+    sealed class BackgroundCommand(int id, string command, Process process, string? ownerId)
     {
         public int Id { get; } = id;
+        // 始めた会話。ほかの会話から出力を読んだり止めたりさせない
+        public string? OwnerId { get; } = ownerId;
         public string Command { get; } = command;
         public Process Process { get; } = process;
         public DateTime StartedAt { get; } = DateTime.Now;
@@ -235,7 +237,7 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
         var command = Required(input, "command");
         var directory = WorkingDirectory(input);
         var process = CreateProcess(command, directory);
-        var job = new BackgroundCommand(Interlocked.Increment(ref nextId), command, process);
+        var job = new BackgroundCommand(Interlocked.Increment(ref nextId), command, process, ToolContext.Current?.Conversation.Id);
         Capture(process, job.Output);
         process.OutputDataReceived += (_, _) => Trim(job);
         process.ErrorDataReceived += (_, _) => Trim(job);
@@ -262,8 +264,9 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
     {
         if (input["id"] is null)
         {
-            if (background.IsEmpty) return Text("バックグラウンドのコマンドはありません");
-            return Text(string.Join("\n", background.Values.OrderBy(j => j.Id).Select(j => $"id {j.Id}: {Status(j)}  $ {j.Command}")));
+            var mine = background.Values.Where(IsMine).OrderBy(j => j.Id).ToList();
+            if (mine.Count == 0) return Text("バックグラウンドのコマンドはありません");
+            return Text(string.Join("\n", mine.Select(j => $"id {j.Id}: {Status(j)}  $ {j.Command}")));
         }
         var job = Find(input);
         string fresh;
@@ -285,8 +288,10 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
         return Text($"id {job.Id} を止めました");
     }
 
+    static bool IsMine(BackgroundCommand job) => job.OwnerId == ToolContext.Current?.Conversation.Id;
+
     BackgroundCommand Find(JsonObject input) =>
-        (int?)input["id"] is { } id && background.TryGetValue(id, out var job) ? job : throw new ToolException("その id のバックグラウンドコマンドはありません");
+        (int?)input["id"] is { } id && background.TryGetValue(id, out var job) && IsMine(job) ? job : throw new ToolException("その id のバックグラウンドコマンドはありません");
 
     // アプリを閉じたら、起動したサーバーなどを残さない
     public void Dispose()

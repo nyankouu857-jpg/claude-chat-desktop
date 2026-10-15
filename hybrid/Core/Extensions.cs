@@ -125,30 +125,36 @@ public sealed class SkillToolProvider(Extensions extensions) : IToolProvider
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
         if (enabledSources is not null && !enabledSources.Contains(Source)) return [];
-        if (!extensions.ListSkills().Any(s => !s.UserOnly)) return [];
-        return
-        [
-            new(Prefix + "use", Source, "use", "スキルを読み込む",
+        var skills = extensions.ListSkills();
+        if (skills.Count == 0) return [];
+        var tools = new List<ToolSpec>();
+        if (skills.Any(s => !s.UserOnly))
+        {
+            tools.Add(new(Prefix + "use", Source, "use", "スキルを読み込む",
                 "Load a skill's full instructions (SKILL.md) by name. The available skills are listed in the system prompt. Load a skill before doing a task it covers, then follow it.",
-                Schema(("name", "string", "Skill name", true)), AutoApprove: true, ReadOnly: true),
-            new(Prefix + "read_file", Source, "read_file", "スキルの資料を読む",
+                Schema(("name", "string", "Skill name", true)), AutoApprove: true, ReadOnly: true));
+        }
+        // ユーザーが /名前 で呼んだ専用のスキルも、資料は読めるようにする
+        tools.Add(new(Prefix + "read_file", Source, "read_file", "スキルの資料を読む",
                 "Read a supporting file that a skill's instructions refer to, by a path relative to the skill folder.",
-                Schema(("name", "string", "Skill name", true), ("path", "string", "Path inside the skill folder", true)), AutoApprove: true, ReadOnly: true),
-        ];
+                Schema(("name", "string", "Skill name", true), ("path", "string", "Path inside the skill folder", true)), AutoApprove: true, ReadOnly: true));
+        return tools;
     }
+
+    public static List<string> FilesOf(SkillInfo skill) => Directory.EnumerateFiles(skill.Directory, "*", SearchOption.AllDirectories)
+        .Select(f => Path.GetRelativePath(skill.Directory, f).Replace('\\', '/'))
+        .Where(f => f != "SKILL.md")
+        .Take(100)
+        .ToList();
 
     public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
         var name = Required(input, "name");
         var skill = extensions.GetSkill(name) ?? throw new ToolException($"{name} というスキルはありません");
-        if (skill.Info.UserOnly) throw new ToolException($"{name} はユーザーが /{name} で呼ぶ専用のスキルです");
         if (apiName == Prefix + "use")
         {
-            var files = Directory.EnumerateFiles(skill.Info.Directory, "*", SearchOption.AllDirectories)
-                .Select(f => Path.GetRelativePath(skill.Info.Directory, f).Replace('\\', '/'))
-                .Where(f => f != "SKILL.md")
-                .Take(100)
-                .ToList();
+            if (skill.Info.UserOnly) throw new ToolException($"{name} はユーザーが /{name} で呼ぶ専用のスキルです");
+            var files = FilesOf(skill.Info);
             var listing = files.Count > 0 ? $"\n\n## Files in this skill\n{string.Join("\n", files)}" : "";
             return Task.FromResult(Text($"# Skill: {skill.Info.Name}\n\n{skill.Body}{listing}"));
         }

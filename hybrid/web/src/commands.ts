@@ -77,6 +77,9 @@ function parseInterval(token: string) {
 
 // Claude Code の /loop は間隔を省くと 10 分ごと
 const DEFAULT_LOOP_MINUTES = 10;
+// 予定の側の上限と同じ
+const MIN_LOOP_MINUTES = 5;
+const MAX_LOOP_MINUTES = 7 * 24 * 60;
 
 // null はコマンドではないので普通に送る。keep は失敗したので入力を残す
 export type CommandOutcome = "done" | "keep" | null;
@@ -85,7 +88,8 @@ export async function runCommand(text: string, conversationId: string | null): P
   const parsed = parseCommand(text);
   if (!parsed) return null;
   const { name, args } = parsed;
-  const command = allCommands().find((c) => c.name === name);
+  // 自作コマンドの名前は大文字も使える
+  const command = allCommands().find((c) => c.name.toLowerCase() === name);
   if (!command) return null;
   if (command.needsChat && !conversationId) {
     toast(`/${name} はチャットの中で使ってください`, "error");
@@ -158,17 +162,30 @@ export async function runCommand(text: string, conversationId: string | null): P
     case "loop": {
       const [first, ...rest] = args.split(/\s+/);
       const interval = first ? parseInterval(first) : null;
-      const prompt = (interval === null ? args : rest.join(" ")).trim();
+      let prompt = (interval === null ? args : rest.join(" ")).trim();
       if (!prompt) {
         toast("/loop 10m <繰り返し頼むこと> の形で書いてください", "error");
         return "keep";
+      }
+      const minutes = interval ?? DEFAULT_LOOP_MINUTES;
+      // 1 回目だけ送られて予定の登録で断られる、とならないよう先に確かめる
+      if (minutes < MIN_LOOP_MINUTES || minutes > MAX_LOOP_MINUTES) {
+        toast(`間隔は ${MIN_LOOP_MINUTES} 分から 7 日の間にしてください`, "error");
+        return "keep";
+      }
+      // /loop 10m /自作コマンド のように、繰り返す中身がコマンドでもよい
+      const typed = prompt;
+      const inner = parseCommand(prompt);
+      if (inner && !BUILTIN_COMMANDS.some((b) => b.name === inner.name)) {
+        const expanded = await expandCommand(inner.name, inner.args);
+        if (expanded === undefined) return "keep";
+        prompt = expanded;
       }
       if (!(await send(conversationId, prompt))) return "keep";
       const view = getState().view;
       const targetId = conversationId ?? (view.name === "chat" ? view.id : null);
       if (!targetId) return "done";
-      const minutes = interval ?? DEFAULT_LOOP_MINUTES;
-      const schedules = await saveSchedule({ title: prompt.slice(0, 30), prompt, intervalMinutes: minutes, conversationId: targetId }, true);
+      const schedules = await saveSchedule({ title: typed.slice(0, 30), prompt, intervalMinutes: minutes, conversationId: targetId }, true);
       if (schedules) toast(`${minutes} 分ごとに繰り返します。7 日たつか、設定の予定から消すと止まります`);
       return "done";
     }
@@ -207,7 +224,7 @@ export async function runCommand(text: string, conversationId: string | null): P
   }
 
   // 自作コマンドと Skills は本文に展開して送る
-  const expanded = await expandCommand(name, args);
+  const expanded = await expandCommand(command.name, args);
   if (expanded === undefined) return "keep";
   return (await send(conversationId, expanded)) ? "done" : "keep";
 }
