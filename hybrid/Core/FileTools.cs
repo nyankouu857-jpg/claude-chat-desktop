@@ -35,6 +35,7 @@ public sealed class FileToolProvider : IToolProvider
 
     readonly SettingsStore settings;
     readonly IPlatform platform;
+    readonly Checkpoints checkpoints;
     readonly List<FileTool> fileTools;
 
     static FileToolProvider()
@@ -43,10 +44,11 @@ public sealed class FileToolProvider : IToolProvider
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
     }
 
-    public FileToolProvider(SettingsStore settings, IPlatform platform)
+    public FileToolProvider(SettingsStore settings, IPlatform platform, Checkpoints checkpoints)
     {
         this.settings = settings;
         this.platform = platform;
+        this.checkpoints = checkpoints;
         fileTools =
         [
             new("list_allowed_folders", "許可フォルダの確認", "操作を許可されているフォルダの一覧と、読み取り専用かどうかを返す。",
@@ -71,13 +73,30 @@ public sealed class FileToolProvider : IToolProvider
                 false, Schema(("source", "string", "コピー元", true), ("destination", "string", "コピー先", true)), CopyFile),
             new("delete_path", "削除 (ごみ箱へ)", "ファイルやフォルダをごみ箱へ移す。",
                 false, Schema(("path", "string", "削除するパス", true)), DeletePath),
+            new("create_worktree", "ワークツリーを作る", "最初の許可フォルダが git リポジトリのとき、別のブランチの作業用コピー (git worktree) を .claude/worktrees/<name> に作り、このチャットの作業場所をそこへ切り替える。本体を汚さずに試したいときに使う。",
+                false, Schema(("name", "string", "ワークツリーの名前 (英数字と - _)", true)), CreateWorktree),
+            new("exit_worktree", "ワークツリーを抜ける", "このチャットの作業場所を元のフォルダに戻す。remove を true にすると、変更が無い場合に限りワークツリーを消す。",
+                false, Schema(("remove", "boolean", "ワークツリーを消すか", false)), ExitWorktree),
         ];
     }
 
+    // ワークツリーにいるチャットは、そこを最初の (相対パスの基準の) フォルダとして扱う
     FileAccessSettings? ActiveAccess()
     {
         var access = settings.Current?.Files;
-        return access is { Enabled: true } && access.Folders.Count > 0 ? access : null;
+        if (access is not { Enabled: true } || access.Folders.Count == 0) return null;
+        return WithWorktree(access, ToolContext.Current?.Conversation.WorktreePath);
+    }
+
+    static FileAccessSettings WithWorktree(FileAccessSettings access, string? worktree)
+    {
+        if (string.IsNullOrEmpty(worktree) || !Directory.Exists(worktree)) return access;
+        return new FileAccessSettings
+        {
+            Enabled = access.Enabled,
+            AutoApproveReads = access.AutoApproveReads,
+            Folders = [new FolderAccess { Path = worktree }, .. access.Folders],
+        };
     }
 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
@@ -85,7 +104,7 @@ public sealed class FileToolProvider : IToolProvider
         var access = ActiveAccess();
         if (access is null || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
         return fileTools
-            .Select(t => new ToolSpec(Prefix + t.Name, Source, t.Name, t.Title, t.Description, t.Schema, t.ReadOnly && access.AutoApproveReads))
+            .Select(t => new ToolSpec(Prefix + t.Name, Source, t.Name, t.Title, t.Description, t.Schema, t.ReadOnly && access.AutoApproveReads, ReadOnly: t.ReadOnly))
             .ToList();
     }
 
@@ -345,7 +364,7 @@ public sealed class FileToolProvider : IToolProvider
         return Text($"{path}\n種類: {kind}\n作成: {info.CreationTime:yyyy-MM-dd HH:mm:ss}\n更新: {info.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
     }
 
-    static ToolCallResult WriteFile(JsonObject input, FileAccessSettings access)
+    ToolCallResult WriteFile(JsonObject input, FileAccessSettings access)
     {
         var path = Resolve(Required(input, "path"), access, forWrite: true);
         var content = (string?)input["content"] ?? throw new ToolException("content を指定してください");
@@ -353,11 +372,12 @@ public sealed class FileToolProvider : IToolProvider
         var existed = File.Exists(path);
         var encoding = existed ? DetectEncoding(File.ReadAllBytes(path)) : new UTF8Encoding(false);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        checkpoints.Record(path);
         WriteText(path, content, encoding);
         return Text($"{Display(path, access)} を{(existed ? "上書き" : "作成")}しました ({EncodingName(encoding)}、{content.Split('\n').Length} 行)");
     }
 
-    static ToolCallResult EditFile(JsonObject input, FileAccessSettings access)
+    ToolCallResult EditFile(JsonObject input, FileAccessSettings access)
     {
         var path = Resolve(Required(input, "path"), access, forWrite: true);
         if (!File.Exists(path)) throw new ToolException($"{path} というファイルはありません");
@@ -377,6 +397,7 @@ public sealed class FileToolProvider : IToolProvider
         if (count > 1 && !replaceAll) throw new ToolException($"old_text が {count} 箇所に一致しました。前後の行を含めて一意にするか、replace_all を true にしてください");
 
         var edited = replaceAll ? text.Replace(oldText, newText) : ReplaceFirst(text, oldText, newText);
+        checkpoints.Record(path);
         WriteText(path, edited, encoding);
         return Text($"{Display(path, access)} の {count} 箇所を書き換えました");
     }
@@ -403,10 +424,11 @@ public sealed class FileToolProvider : IToolProvider
         return string.Concat(text.AsSpan(0, at), newText, text.AsSpan(at + oldText.Length));
     }
 
-    static ToolCallResult CreateDirectory(JsonObject input, FileAccessSettings access)
+    ToolCallResult CreateDirectory(JsonObject input, FileAccessSettings access)
     {
         var path = Resolve(Required(input, "path"), access, forWrite: true);
         var existed = Directory.Exists(path);
+        if (!existed) checkpoints.Record(path);
         Directory.CreateDirectory(path);
         return Text(existed ? $"{Display(path, access)} は既にあります" : $"{Display(path, access)} を作成しました");
     }
@@ -417,26 +439,29 @@ public sealed class FileToolProvider : IToolProvider
         if (access.Folders.Any(f => IsInside(Normalize(f.Path), path))) throw new ToolException("許可フォルダそのものや、許可フォルダを含むフォルダは移動や削除ができません");
     }
 
-    static ToolCallResult MovePath(JsonObject input, FileAccessSettings access)
+    ToolCallResult MovePath(JsonObject input, FileAccessSettings access)
     {
         var source = Resolve(Required(input, "source"), access, forWrite: true);
         var destination = Resolve(Required(input, "destination"), access, forWrite: true);
         RejectAllowedRoot(source, access);
         if (File.Exists(destination) || Directory.Exists(destination)) throw new ToolException($"{destination} は既にあります");
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        checkpoints.Record(source);
+        checkpoints.Record(destination);
         if (Directory.Exists(source)) Directory.Move(source, destination);
         else if (File.Exists(source)) File.Move(source, destination);
         else throw new ToolException($"{source} はありません");
         return Text($"{Display(source, access)} を {Display(destination, access)} に移動しました");
     }
 
-    static ToolCallResult CopyFile(JsonObject input, FileAccessSettings access)
+    ToolCallResult CopyFile(JsonObject input, FileAccessSettings access)
     {
         var source = Resolve(Required(input, "source"), access, forWrite: false);
         var destination = Resolve(Required(input, "destination"), access, forWrite: true);
         if (!File.Exists(source)) throw new ToolException($"{source} というファイルはありません");
         if (File.Exists(destination) || Directory.Exists(destination)) throw new ToolException($"{destination} は既にあります");
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        checkpoints.Record(destination);
         File.Copy(source, destination);
         return Text($"{Display(source, access)} を {Display(destination, access)} にコピーしました");
     }
@@ -446,13 +471,81 @@ public sealed class FileToolProvider : IToolProvider
         var path = Resolve(Required(input, "path"), access, forWrite: true);
         RejectAllowedRoot(path, access);
         if (!File.Exists(path) && !Directory.Exists(path)) throw new ToolException($"{path} はありません");
+        checkpoints.Record(path);
         platform.MoveToTrash(path);
         return Text($"{Display(path, access)} をごみ箱へ移しました");
     }
 
-    public static string? DescribeForPrompt(FileAccessSettings access)
+    // ワークツリーの名前に使える文字
+    static readonly System.Text.RegularExpressions.Regex WorktreeName = new("^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$");
+
+    ToolCallResult CreateWorktree(JsonObject input, FileAccessSettings access)
+    {
+        var conversation = ToolContext.Current?.Conversation ?? throw new ToolException("チャットの外からは使えません");
+        if (conversation.WorktreePath is not null) throw new ToolException($"すでにワークツリー {conversation.WorktreePath} にいます。exit_worktree で抜けてから作ってください");
+        var name = Required(input, "name");
+        if (!WorktreeName.IsMatch(name)) throw new ToolException("名前は英数字と - _ だけで、40 文字までにしてください");
+        var original = settings.Current?.Files.Folders.FirstOrDefault()?.Path ?? throw new ToolException("許可フォルダがありません");
+        var repo = Git(original, "rev-parse", "--show-toplevel").Trim();
+        var root = Normalize(repo);
+        if (FolderOf(root, access).Root is null) throw new ToolException("リポジトリの場所が許可フォルダの外です");
+        var path = Path.Combine(root, ".claude", "worktrees", name);
+        if (Directory.Exists(path)) throw new ToolException($"{path} はすでにあります");
+        Git(root, "worktree", "add", "-b", $"claude/{name}", path);
+        conversation.WorktreePath = path;
+        return Text($"ワークツリーを {path} に作り、ブランチ claude/{name} に切り替えました。このチャットのファイル操作とコマンドは、ここが基準になります");
+    }
+
+    ToolCallResult ExitWorktree(JsonObject input, FileAccessSettings access)
+    {
+        var conversation = ToolContext.Current?.Conversation ?? throw new ToolException("チャットの外からは使えません");
+        var path = conversation.WorktreePath ?? throw new ToolException("ワークツリーにはいません");
+        var note = "";
+        if ((bool?)input["remove"] == true)
+        {
+            // 変更が残っていると git が断るので、消えてほしくない作業は守られる
+            Git(path, "worktree", "remove", path);
+            note = "。ワークツリーを消しました (ブランチは残っています)";
+        }
+        conversation.WorktreePath = null;
+        return Text($"元のフォルダに戻りました{note}");
+    }
+
+    static string Git(string directory, params string[] args)
+    {
+        var info = new System.Diagnostics.ProcessStartInfo("git")
+        {
+            WorkingDirectory = directory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        foreach (var arg in args) info.ArgumentList.Add(arg);
+        try
+        {
+            using var process = System.Diagnostics.Process.Start(info) ?? throw new ToolException("git を起動できませんでした");
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            // 大きなリポジトリでも作業用コピーは 1 分あれば作れる
+            if (!process.WaitForExit(60_000))
+            {
+                process.Kill(entireProcessTree: true);
+                throw new ToolException("git が時間内に終わりませんでした");
+            }
+            if (process.ExitCode != 0) throw new ToolException($"git が失敗しました: {stderr.Result.Trim()}");
+            return stdout.Result;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            throw new ToolException("git が見つかりません。Git for Windows を入れてください");
+        }
+    }
+
+    public static string? DescribeForPrompt(FileAccessSettings access, string? worktree = null)
     {
         if (!access.Enabled || access.Folders.Count == 0) return null;
+        access = WithWorktree(access, worktree);
         var folders = string.Join("\n", access.Folders.Select(f => $"- {Normalize(f.Path)}{(f.ReadOnly ? " (read-only)" : "")}"));
         return $"<file_access>\nYou can read and write files on the user's PC with the tools whose names start with files__, but only inside the folders below. Relative paths resolve against the first folder. Deleted files go to the recycle bin.\n{folders}\n</file_access>";
     }

@@ -1,8 +1,8 @@
-import { BookOpen, Code, Coffee, PenLine, Sparkles } from "lucide-react";
+import { BookOpen, Code, Coffee, Folder as FolderIcon, PenLine, Settings2, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { openSettings, updateSettings } from "../actions";
 import { LANGUAGES } from "../languages";
-import { useStore } from "../store";
+import { setState, useStore } from "../store";
 import { Composer } from "./Composer";
 import { Spark } from "./ui";
 
@@ -43,6 +43,7 @@ export function NewChat() {
   const profile = useStore((s) => s.settings?.profile);
   const name = profile?.nickname || profile?.fullName;
   const [prefill, setPrefill] = useState<{ text: string; nonce: number }>();
+  const folder = useStore((s) => (s.view.name === "new" && s.view.folderId ? s.folders.find((f) => f.id === (s.view as { folderId?: string }).folderId) : undefined));
   return (
     <div className="new-chat-view">
       <div className="new-chat-center">
@@ -51,6 +52,13 @@ export function NewChat() {
           {greeting()}{name ? `、${name}さん` : ""}
         </h1>
         {profile && profile.language == null && <LanguagePicker />}
+        {folder && (
+          <div className="folder-banner">
+            <FolderIcon size={15} />
+            <span>フォルダ「{folder.name}」の中にチャットを作ります</span>
+            <button type="button" className="icon-button tiny" title="フォルダの設定" onClick={() => setState((s) => ({ ...s, dialog: { kind: "folder", folderId: folder.id } }))}><Settings2 size={14} /></button>
+          </div>
+        )}
         <Composer conversationId={null} autoFocus prefill={prefill} />
         <div className="suggestions">
           {SUGGESTIONS.map((s) => (

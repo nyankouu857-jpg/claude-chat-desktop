@@ -32,6 +32,40 @@ public sealed class ChatDefaults
     public string SystemPrompt { get; set; } = "";
     // オフで日付・呼び名・フォルダ一覧を付けない
     public bool AppendAppContext { get; set; } = true;
+    // 1 回のリクエストで検索や取得ができる回数
+    public int WebSearchMaxUses { get; set; } = 5;
+    public bool WebFetch { get; set; } = true;
+    public int WebFetchMaxUses { get; set; } = 10;
+    public bool CodeExecution { get; set; }
+    // コード実行で Word / Excel / PowerPoint / PDF を作るときの公式スキル
+    public bool OfficeSkills { get; set; } = true;
+    public string OutputStyle { get; set; } = "default";
+}
+
+public sealed class AgentSettings
+{
+    public bool Enabled { get; set; } = true;
+    // 料金と暴走の歯止め
+    public int MaxConcurrent { get; set; } = 4;
+    public int MaxWorkflowAgents { get; set; } = 10;
+    public int MaxMessageHops { get; set; } = 10;
+}
+
+public sealed class FeatureSettings
+{
+    public bool Memory { get; set; } = true;
+    public bool Artifacts { get; set; } = true;
+    public bool ChatSearch { get; set; } = true;
+    // 確認なしモードは誤操作が怖いので、ここでオンにしたときだけ選べる
+    public bool AllowBypassMode { get; set; }
+}
+
+public sealed class HookEntry
+{
+    // ツール名に対する正規表現。空ならすべて
+    public string? Matcher { get; set; }
+    public string Command { get; set; } = "";
+    public int TimeoutSeconds { get; set; } = 60;
 }
 
 public sealed class FolderAccess
@@ -90,6 +124,10 @@ public sealed class AppSettings
     public TerminalSettings Terminal { get; set; } = new();
     public ProgramSettings Programs { get; set; } = new();
     public BrowserSettings Browser { get; set; } = new();
+    public AgentSettings Agents { get; set; } = new();
+    public FeatureSettings Features { get; set; } = new();
+    // PreToolUse / PostToolUse / UserPromptSubmit / Stop / Notification
+    public Dictionary<string, List<HookEntry>> Hooks { get; set; } = [];
     public Dictionary<string, McpServerConfig> McpServers { get; set; } = [];
     // ツールの API 名 -> "always"。毎回確認を出さないツールを覚えておく
     public Dictionary<string, string> ToolPermissions { get; set; } = [];

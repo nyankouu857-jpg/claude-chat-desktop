@@ -1,13 +1,18 @@
 import { useSyncExternalStore } from "react";
 import type {
+  ChatStatus,
   Conversation,
   ConversationSummary,
   Effort,
+  Extensions,
+  Folder,
   LiveReply,
   McpServerStatus,
+  PermissionMode,
   SecretsView,
   Settings,
   View,
+  WorkflowRun,
 } from "./types";
 
 export interface Toast {
@@ -20,9 +25,21 @@ export interface ComposerChoice {
   model: string;
   effort: Effort;
   webSearch: boolean;
+  webFetch: boolean;
+  codeExecution: boolean;
+  research: boolean;
+  // 新しいチャットの権限モード。既存のチャットは会話の側に持つ
+  permissionMode: PermissionMode;
   // 使わないコネクタ。空ならすべて使う
   disabledSources: string[];
 }
+
+export type DialogState =
+  | { kind: "btw"; conversationId: string; question: string; answer?: string; error?: string }
+  | { kind: "rewind"; conversationId: string; messageIndex?: number }
+  | { kind: "tasks"; conversationId: string }
+  | { kind: "help" }
+  | { kind: "folder"; folderId?: string };
 
 export interface AppState {
   ready: boolean;
@@ -35,6 +52,14 @@ export interface AppState {
   live: Record<string, LiveReply>;
   errors: Record<string, string>;
   mcp: McpServerStatus[];
+  folders: Folder[];
+  statuses: Record<string, ChatStatus>;
+  workflows: Record<string, WorkflowRun>;
+  extensions: Extensions;
+  // 巻き戻しで入力欄に戻す文
+  prefill: Record<string, { text: string; nonce: number }>;
+  artifact: { conversationId: string; id: string } | null;
+  dialog: DialogState | null;
   view: View;
   sidebarOpen: boolean;
   choice: ComposerChoice;
@@ -52,9 +77,16 @@ let state: AppState = {
   live: {},
   errors: {},
   mcp: [],
+  folders: [],
+  statuses: {},
+  workflows: {},
+  extensions: { commands: [], outputStyles: [] },
+  prefill: {},
+  artifact: null,
+  dialog: null,
   view: { name: "new" },
   sidebarOpen: true,
-  choice: { model: "claude-opus-5-5", effort: "medium", webSearch: false, disabledSources: [] },
+  choice: { model: "claude-opus-5-5", effort: "medium", webSearch: false, webFetch: true, codeExecution: false, research: false, permissionMode: "default", disabledSources: [] },
   toasts: [],
 };
 

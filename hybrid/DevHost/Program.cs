@@ -88,6 +88,16 @@ async Task HandleAsync(HttpListenerContext context)
     }
 
     var relative = Uri.UnescapeDataString(context.Request.Url?.AbsolutePath.TrimStart('/') ?? "");
+    if (AppHost.IsArtifactPath(relative))
+    {
+        var html = await host.RenderArtifactAsync(relative);
+        context.Response.StatusCode = html is null ? 404 : 200;
+        context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Headers["Content-Security-Policy"] = AppHost.ArtifactCsp;
+        await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(html ?? ""));
+        context.Response.Close();
+        return;
+    }
     var file = Path.GetFullPath(Path.Combine(webRoot, relative.Length == 0 ? "index.html" : relative));
     if (!file.StartsWith(webRoot) || !File.Exists(file)) file = Path.Combine(webRoot, "index.html");
     context.Response.ContentType = ContentTypes.Of(file);

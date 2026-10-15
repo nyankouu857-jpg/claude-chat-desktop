@@ -1,10 +1,11 @@
-import { ArrowUp, ChevronDown, FileText, Globe, MonitorCog, Paperclip, Plug, Plus, SlidersHorizontal, Square, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { openSettings, send, setChoice, stop, toast } from "../actions";
+import { ArrowUp, Check, ChevronDown, Circle, CircleDot, Code, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Settings2, SlidersHorizontal, Square, Telescope, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { openSettings, send, setChoice, setMode, stop, toast } from "../actions";
 import { BUILTIN_SOURCES } from "../builtins";
+import { allCommands, runCommand } from "../commands";
 import { EFFORTS, MODELS, modelLabel } from "../models";
 import { getState, useStore } from "../store";
-import type { WireBlock } from "../types";
+import type { PermissionMode, Todo, WireBlock } from "../types";
 import { Dropdown, MenuItem, Toggle } from "./ui";
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -138,64 +139,64 @@ function ModelMenu() {
   );
 }
 
-function ToolsMenu() {
+// 新しいチャットでは入力欄が画面の中ほどにあり、上に開くと項目が画面からはみ出す
+function ToolsMenu({ direction }: { direction: "up" | "down" }) {
   const choice = useStore((s) => s.choice);
   const mcp = useStore((s) => s.mcp);
   const settings = useStore((s) => s.settings);
   const builtins = settings ? BUILTIN_SOURCES.filter((b) => b.isAvailable(settings)) : [];
-  const builtinsOn = builtins.filter((b) => !choice.disabledSources.includes(b.id)).length;
-  const activeConnectors = mcp.filter((m) => m.status === "running" && !choice.disabledSources.includes(m.name)).length + builtinsOn;
+  const pcTools = builtins.filter((b) => b.group === "pc");
+  const claudeTools = builtins.filter((b) => b.group === "claude");
+  const builtinsOn = pcTools.filter((b) => !choice.disabledSources.includes(b.id)).length;
+  const serverTools = [choice.webSearch, choice.webFetch, choice.codeExecution].filter(Boolean).length;
+  const activeCount = mcp.filter((m) => m.status === "running" && !choice.disabledSources.includes(m.name)).length + builtinsOn + serverTools;
   const toggleSource = (name: string, enabled: boolean) =>
     setChoice({
       disabledSources: enabled ? choice.disabledSources.filter((n) => n !== name) : [...choice.disabledSources, name],
     });
+  const row = (key: string, icon: ReactNode, label: string, hint: string | null, checked: boolean, onChange: (v: boolean) => void) => (
+    <div className="menu-row" key={key}>
+      {icon}
+      <span className="menu-label">
+        {label}
+        {hint && <span className="menu-hint">{hint}</span>}
+      </span>
+      <Toggle checked={checked} onChange={onChange} label={label} />
+    </div>
+  );
   return (
     <Dropdown
-      direction="up"
+      direction={direction}
       className="tools-menu"
       trigger={(open, toggle) => (
-        <button type="button" className={`icon-button composer-tool${open ? " open" : ""}${choice.webSearch || activeConnectors ? " active" : ""}`} aria-label="検索とツール" title="検索とツール" onClick={toggle}>
+        <button type="button" className={`icon-button composer-tool${open ? " open" : ""}${activeCount ? " active" : ""}`} aria-label="検索とツール" title="検索とツール" onClick={toggle}>
           <SlidersHorizontal size={17} />
-          {(choice.webSearch || activeConnectors > 0) && <span className="tool-count">{(choice.webSearch ? 1 : 0) + activeConnectors}</span>}
+          {activeCount > 0 && <span className="tool-count">{activeCount}</span>}
         </button>
       )}
     >
       {(close) => (
         <>
-          <div className="menu-row">
-            <Globe size={16} />
-            <span className="menu-label">Web 検索</span>
-            <Toggle checked={choice.webSearch} onChange={(v) => setChoice({ webSearch: v })} label="Web 検索" />
-          </div>
-          {builtins.map((b) => (
-            <div className="menu-row" key={b.id}>
-              <b.icon size={16} />
-              <span className="menu-label">
-                {b.label}
-                <span className="menu-hint">{b.hint(settings!)}</span>
-              </span>
-              <Toggle checked={!choice.disabledSources.includes(b.id)} onChange={(v) => toggleSource(b.id, v)} label={b.label} />
-            </div>
-          ))}
+          {row("research", <Telescope size={16} />, "リサーチ", "複数のエージェントで深く調べる", choice.research, (v) => setChoice({ research: v }))}
+          {row("web", <Globe size={16} />, "Web 検索", `1 回の返答で ${settings?.chat.webSearchMaxUses ?? 5} 回まで`, choice.webSearch, (v) => setChoice({ webSearch: v }))}
+          {row("fetch", <Link size={16} />, "Web ページの取得", "URL の中身を読む", choice.webFetch, (v) => setChoice({ webFetch: v }))}
+          {row("code", <Code size={16} />, "コード実行", "計算、グラフ、ファイル作成", choice.codeExecution, (v) => setChoice({ codeExecution: v }))}
+          {pcTools.length > 0 && <div className="menu-separator" />}
+          {pcTools.map((b) => row(b.id, <b.icon size={16} />, b.label, b.hint(settings!), !choice.disabledSources.includes(b.id), (v) => toggleSource(b.id, v)))}
+          {claudeTools.length > 0 && <div className="menu-separator" />}
+          {claudeTools.map((b) => row(b.id, <b.icon size={16} />, b.label, b.hint(settings!), !choice.disabledSources.includes(b.id), (v) => toggleSource(b.id, v)))}
           {mcp.length > 0 && <div className="menu-separator" />}
-          {mcp.map((server) => (
-            <div className="menu-row" key={server.name}>
-              <Plug size={16} />
-              <span className="menu-label">
-                {server.name}
-                <span className="menu-hint">
-                  {server.status === "running" ? `ツール ${server.tools.length} 個` : server.status === "starting" ? "接続中..." : server.status === "disabled" ? "無効" : "接続できません"}
-                </span>
-              </span>
-              <Toggle
-                checked={server.status === "running" && !choice.disabledSources.includes(server.name)}
-                onChange={(v) => toggleSource(server.name, v)}
-                label={server.name}
-              />
-            </div>
+          {mcp.map((server) => row(
+            server.name,
+            <Plug size={16} />,
+            server.name,
+            server.status === "running" ? `ツール ${server.tools.length} 個` : server.status === "starting" ? "接続中..." : server.status === "disabled" ? "無効" : "接続できません",
+            server.status === "running" && !choice.disabledSources.includes(server.name),
+            (v) => toggleSource(server.name, v),
           ))}
           <div className="menu-separator" />
-          {builtins.length < BUILTIN_SOURCES.length && <MenuItem icon={<MonitorCog size={16} />} onClick={() => { close(); openSettings(builtins.some((b) => b.id === "files") ? "computer" : "files"); }}>PC 操作を設定</MenuItem>}
+          {pcTools.length < BUILTIN_SOURCES.filter((b) => b.group === "pc").length && <MenuItem icon={<MonitorCog size={16} />} onClick={() => { close(); openSettings(pcTools.some((b) => b.id === "files") ? "computer" : "files"); }}>PC 操作を設定</MenuItem>}
+          <MenuItem icon={<Settings2 size={16} />} onClick={() => { close(); openSettings("features"); }}>機能を設定</MenuItem>
           <MenuItem icon={<Plug size={16} />} onClick={() => { close(); openSettings("connectors"); }}>コネクタを管理</MenuItem>
         </>
       )}
@@ -203,9 +204,99 @@ function ToolsMenu() {
   );
 }
 
+export const MODE_LABELS: Record<PermissionMode, { label: string; hint: string }> = {
+  default: { label: "毎回確認", hint: "変更する操作は毎回確認する" },
+  acceptEdits: { label: "編集は自動で許可", hint: "フォルダ内のファイル操作は確認しない" },
+  plan: { label: "計画モード", hint: "調べて計画を出すだけ。変更はしない" },
+  bypass: { label: "確認なし", hint: "すべての操作を確認せずに実行する" },
+};
+
+function ModeMenu({ conversationId }: { conversationId: string | null }) {
+  const mode = useStore((s) => (conversationId ? s.conversations[conversationId]?.permissionMode : s.choice.permissionMode) ?? "default");
+  const allowBypass = useStore((s) => s.settings?.features.allowBypassMode ?? false);
+  const modes = (Object.keys(MODE_LABELS) as PermissionMode[]).filter((m) => m !== "bypass" || allowBypass || mode === "bypass");
+  return (
+    <Dropdown
+      direction="up"
+      trigger={(open, toggle) => (
+        <button type="button" className={`mode-button mode-${mode}${open ? " open" : ""}`} title="権限モード" onClick={toggle}>
+          {MODE_LABELS[mode].label}
+          <ChevronDown size={13} />
+        </button>
+      )}
+    >
+      {(close) => modes.map((m) => (
+        <MenuItem key={m} checked={mode === m} hint={MODE_LABELS[m].hint} onClick={() => { close(); void setMode(conversationId, m); }}>{MODE_LABELS[m].label}</MenuItem>
+      ))}
+    </Dropdown>
+  );
+}
+
+const NO_TODOS: Todo[] = [];
+
+function TodoList({ conversationId }: { conversationId: string | null }) {
+  const todos = useStore((s) => (conversationId ? s.conversations[conversationId]?.todos ?? NO_TODOS : NO_TODOS));
+  const [open, setOpen] = useState(true);
+  if (todos.length === 0) return null;
+  const done = todos.filter((t) => t.status === "completed").length;
+  // 全部終わったら畳んで邪魔しない
+  if (done === todos.length && !open) return null;
+  return (
+    <div className="todo-panel">
+      <button type="button" className="todo-header" onClick={() => setOpen((o) => !o)}>
+        <span>タスク {done}/{todos.length}</span>
+        <ChevronDown size={14} className={open ? "" : "rotated"} />
+      </button>
+      {open && (
+        <ul className="todo-list">
+          {todos.map((t, i) => (
+            <li key={i} className={`todo ${t.status}`}>
+              {t.status === "completed" ? <Check size={14} /> : t.status === "in_progress" ? <CircleDot size={14} /> : <Circle size={14} />}
+              <span>{t.content}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function SlashMenu({ query, selected, onPick }: { query: string; selected: number; onPick: (name: string) => void }) {
+  const items = useSlashItems(query);
+  if (items.length === 0) return null;
+  return (
+    <div className="slash-menu" role="listbox">
+      {items.map((c, i) => (
+        <button key={c.name} type="button" role="option" aria-selected={i === selected} className={`slash-item${i === selected ? " selected" : ""}`}
+          onMouseDown={(e) => { e.preventDefault(); onPick(c.name); }}>
+          <span className="slash-name">/{c.name}{c.args && <span className="slash-args"> {c.args}</span>}</span>
+          <span className="slash-desc">{c.kind !== "builtin" && <span className="slash-kind">{c.kind === "skill" ? "Skill" : "自作"}</span>}{c.description}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function useSlashItems(query: string | null) {
+  const extensions = useStore((s) => s.extensions);
+  return useMemo(() => {
+    if (query === null) return [];
+    const q = query.toLowerCase();
+    return allCommands().filter((c) => c.name.toLowerCase().startsWith(q)).slice(0, 12);
+    // extensions が変わったら作り直す
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, extensions]);
+}
+
 export function Composer({ conversationId, autoFocus, prefill }: { conversationId: string | null; autoFocus?: boolean; prefill?: { text: string; nonce: number } }) {
   const running = useStore((s) => (conversationId ? !!s.live[conversationId] : false));
+  const research = useStore((s) => s.choice.research);
+  const storedPrefill = useStore((s) => (conversationId ? s.prefill[conversationId] : undefined));
   const [text, setText] = useState("");
+  const [slashIndex, setSlashIndex] = useState(0);
+  // 「/」で始まり、まだ空白を打っていない間だけ候補を出す
+  const slashQuery = /^\/[A-Za-z0-9_-]*$/.test(text) ? text.slice(1) : null;
+  const slashItems = useSlashItems(slashQuery);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [dragging, setDragging] = useState(false);
   const [sending, setSending] = useState(false);
@@ -217,10 +308,13 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
   }, [autoFocus, conversationId]);
 
   useEffect(() => {
-    if (!prefill) return;
-    setText(prefill.text);
+    const next = prefill ?? storedPrefill;
+    if (!next) return;
+    setText(next.text);
     textarea.current?.focus();
-  }, [prefill]);
+  }, [prefill, storedPrefill]);
+
+  useEffect(() => setSlashIndex(0), [slashQuery]);
 
   useEffect(() => {
     const el = textarea.current;
@@ -259,7 +353,19 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
 
   async function submit() {
     const trimmed = text.trim();
-    if ((!trimmed && attachments.length === 0) || running || sending) return;
+    if ((!trimmed && attachments.length === 0) || sending) return;
+    // /btw だけは応答中にも使える
+    if (attachments.length === 0 && trimmed.startsWith("/") && (!running || trimmed.startsWith("/btw"))) {
+      setSending(true);
+      const outcome = await runCommand(trimmed, conversationId);
+      setSending(false);
+      if (outcome === "done") setText("");
+      if (outcome !== null) return;
+    }
+    if (running) {
+      if (trimmed.startsWith("/")) toast("応答中に使えるのは /btw だけです。終わってから使ってください", "error");
+      return;
+    }
     if (attachedChars(conversationId) + attachments.reduce((sum, a) => sum + a.data.length, 0) > MAX_REQUEST_ATTACHMENT_CHARS) {
       toast("この会話の添付ファイルの合計が大きすぎて送れません。添付を減らすか、新しいチャットで送ってください", "error");
       return;
@@ -281,11 +387,13 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
 
   return (
     <div
-      className={`composer${dragging ? " dragging" : ""}`}
+      className={`composer${dragging ? " dragging" : ""}${research ? " research" : ""}`}
       onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
       onDragLeave={() => setDragging(false)}
       onDrop={(e) => { e.preventDefault(); setDragging(false); void addFiles([...e.dataTransfer.files]); }}
     >
+      <TodoList conversationId={conversationId} />
+      {slashQuery !== null && <SlashMenu query={slashQuery} selected={slashIndex} onPick={(name) => { setText(`/${name} `); textarea.current?.focus(); }} />}
       {attachments.length > 0 && (
         <div className="attachments">
           {attachments.map((a, i) => (
@@ -302,7 +410,7 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
         ref={textarea}
         rows={1}
         value={text}
-        placeholder={conversationId ? "Claude に返信..." : "今日はどんなお手伝いをしましょうか?"}
+        placeholder={research ? "何を調べますか?" : conversationId ? "Claude に返信... (/ でコマンド)" : "今日はどんなお手伝いをしましょうか?"}
         onChange={(e) => setText(e.target.value)}
         onPaste={(e) => {
           const files = [...e.clipboardData.files];
@@ -313,6 +421,20 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
           }
         }}
         onKeyDown={(e) => {
+          if (slashItems.length > 0 && !e.nativeEvent.isComposing) {
+            if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+              e.preventDefault();
+              const step = e.key === "ArrowDown" ? 1 : -1;
+              setSlashIndex((i) => (i + step + slashItems.length) % slashItems.length);
+              return;
+            }
+            // 候補を選んでいる途中の Enter と Tab は補完に使う
+            if ((e.key === "Tab" || e.key === "Enter") && text.slice(1) !== slashItems[slashIndex].name) {
+              e.preventDefault();
+              setText(`/${slashItems[slashIndex].name} `);
+              return;
+            }
+          }
           // IME 変換確定の Enter で送信しない
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault();
@@ -333,7 +455,13 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
             <MenuItem icon={<Paperclip size={16} />} hint="画像、PDF、テキスト" onClick={() => { close(); fileInput.current?.click(); }}>ファイルを追加</MenuItem>
           )}
         </Dropdown>
-        <ToolsMenu />
+        <ToolsMenu direction={conversationId ? "up" : "down"} />
+        {research && (
+          <button type="button" className="research-chip" title="リサーチをやめる" onClick={() => setChoice({ research: false })}>
+            <Telescope size={14} /> リサーチ <X size={12} />
+          </button>
+        )}
+        <ModeMenu conversationId={conversationId} />
         <span className="spacer" />
         <ModelMenu />
         {running ? (

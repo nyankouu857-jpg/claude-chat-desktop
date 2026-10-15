@@ -89,6 +89,8 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
 
     string DefaultDirectory()
     {
+        // ワークツリーに入っている間はそこで動かす。元のリポジトリを触らないため
+        if (ToolContext.Current?.Conversation.WorktreePath is { } worktree && Directory.Exists(worktree)) return worktree;
         // フォルダ操作の基準フォルダがあればそこで動かす
         var files = settings.Current?.Files;
         if (files is { Enabled: true, Folders.Count: > 0 } && Directory.Exists(files.Folders[0].Path)) return files.Folders[0].Path;

@@ -10,8 +10,6 @@ using NonBeta = Anthropic.Models.Messages;
 
 namespace ClaudeChat.Core;
 
-public sealed record ChatOptions(string Model, string Effort, bool WebSearch, ISet<string>? EnabledSources, string? SystemPrompt, int MaxToolTurns, int CompactThreshold);
-
 public enum ChatStatus
 {
     Done,
@@ -27,7 +25,7 @@ public interface IApprovalGate
     Task<string> RequestAsync(JsonObject request, CancellationToken cancellationToken);
 }
 
-public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, UsageLedger ledger, SettingsStore settings)
+public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, UsageLedger ledger, SettingsStore settings, Hooks hooks, AppPaths paths)
 {
     const string TitleModel = "claude-haiku-5-5";
     // API の下限
@@ -36,6 +34,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
     const string CompactInstructions = "Summarize the transcript inside <summary></summary> tags. Include everything needed to continue the conversation in the next context window: the user's goals and preferences, decisions made, facts and numbers established, file paths and commands used, and anything still pending. Write the summary in the language of the conversation. Do not call any tools while writing this summary; respond with text only.";
 
     static bool IsHaiku(string model) => model.StartsWith("claude-haiku");
+    // コード実行のコンテナで Word / Excel / PowerPoint / PDF を作るための公式スキル
+    static readonly string[] OfficeSkillIds = ["docx", "xlsx", "pptx", "pdf"];
 
     static Effort ParseEffort(string effort) => effort switch
     {
@@ -53,6 +53,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
     static BetaToolUnion ToTool(ToolSpec spec)
     {
+        if (spec.Native is { } native) return FromJson<BetaToolUnion>(native);
         var json = new JsonObject
         {
             ["type"] = "custom",
@@ -62,23 +63,47 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             // 大きな入力も生成と同時に流れてくるようにする
             ["eager_input_streaming"] = true,
         };
-        return JsonSerializer.Deserialize<BetaToolUnion>(json.ToJsonString())!;
+        return FromJson<BetaToolUnion>(json);
     }
 
-    static MessageCreateParams BuildRequest(Conversation conversation, ChatOptions options, IReadOnlyList<ToolSpec> toolSpecs)
+    static T FromJson<T>(JsonObject json) => JsonSerializer.Deserialize<T>(json.ToJsonString())!;
+
+    // 動的フィルタ版の検索と取得は内部でコード実行を使うので、コード実行と一緒に宣言すると 400 になる
+    static IEnumerable<BetaToolUnion> ServerTools(ChatOptions options)
+    {
+        var basic = IsHaiku(options.Model) || options.CodeExecution;
+        if (options.WebSearch)
+        {
+            yield return FromJson<BetaToolUnion>(new JsonObject { ["type"] = basic ? "web_search_20250305" : "web_search_20260209", ["name"] = "web_search", ["max_uses"] = options.WebSearchMaxUses });
+        }
+        if (options.WebFetch)
+        {
+            yield return FromJson<BetaToolUnion>(new JsonObject { ["type"] = basic ? "web_fetch_20250910" : "web_fetch_20260209", ["name"] = "web_fetch", ["max_uses"] = options.WebFetchMaxUses });
+        }
+        if (options.CodeExecution)
+        {
+            yield return FromJson<BetaToolUnion>(new JsonObject { ["type"] = "code_execution_20260521", ["name"] = "code_execution" });
+        }
+    }
+
+    static MessageCreateParams BuildRequest(Conversation conversation, ChatOptions options, IReadOnlyList<ToolSpec> toolSpecs, List<JsonObject>? messages = null)
     {
         var parameters = new MessageCreateParams
         {
             Model = options.Model,
             MaxTokens = 64000,
-            Messages = conversation.CopyMessages().Select(ToParam).ToList(),
+            Messages = (messages ?? conversation.CopyApiMessages()).Select(ToParam).ToList(),
             Thinking = new BetaThinkingConfigAdaptive
             {
                 Display = Display.Summarized,
                 // 日付入りのシステムプロンプトやツールの増減で前の思考ブロックが無効になっても 400 にしない
                 BlockBinding = new BetaThinkingBlockBinding { PrefixMismatchBehavior = BetaThinkingPrefixMismatchBehavior.DropBlock },
             },
-            OutputConfig = new BetaOutputConfig { Effort = ParseEffort(options.Effort) },
+            OutputConfig = new BetaOutputConfig
+            {
+                Effort = ParseEffort(options.Effort),
+                Format = options.OutputSchema is { } schema ? FromJson<BetaJsonOutputFormat>(new JsonObject { ["type"] = "json_schema", ["schema"] = schema.DeepClone() }) : null,
+            },
             CacheControl = new BetaCacheControlEphemeral(),
             ContextManagement = new BetaContextManagementConfig
             {
@@ -94,18 +119,28 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         };
         if (!string.IsNullOrWhiteSpace(options.SystemPrompt)) parameters = parameters with { System = options.SystemPrompt };
 
-        var toolList = new List<BetaToolUnion>();
-        if (options.WebSearch)
-        {
-            // Haiku は動的フィルタ版の web_search に非対応
-            toolList.Add(IsHaiku(options.Model)
-                ? new BetaWebSearchTool20250305 { MaxUses = 5 }
-                : new BetaWebSearchTool20260209 { MaxUses = 5 });
-        }
+        var toolList = ServerTools(options).ToList();
         toolList.AddRange(toolSpecs.Select(ToTool));
         if (toolList.Count > 0) parameters = parameters with { Tools = toolList };
 
         List<ApiEnum<string, AnthropicBeta>> betas = ["compact-2026-01-12", "thinking-binding-controls-2026-08-01"];
+        if (options.CodeExecution && options.OfficeSkills)
+        {
+            betas.Add("skills-2025-10-02");
+            parameters = parameters with
+            {
+                Container = new BetaContainerParams
+                {
+                    ID = conversation.ContainerId,
+                    Skills = OfficeSkillIds.Select(id => new BetaSkillParams { Type = BetaSkillParamsType.Anthropic, SkillID = id, Version = "latest" }).ToList(),
+                },
+            };
+        }
+        else if (conversation.ContainerId is { } containerId)
+        {
+            // 同じコンテナを使い続けると、前に作ったファイルや変数が残っている
+            parameters = parameters with { Container = containerId };
+        }
         // Haiku 5.5 にはサーバー側フォールバックが無い
         if (!IsHaiku(options.Model))
         {
@@ -138,6 +173,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         var finishedResults = new JsonArray();
         // 途中で止まったリクエストも課金されるので、届いた分の使用量を覚えておく
         JsonObject? streamUsage = null;
+        // コンテナは時間が経つと消えるので、断られたら 1 度だけ新しく作り直す
+        var containerRetried = false;
         try
         {
             for (var turn = 0; turn < options.MaxToolTurns; turn++)
@@ -149,8 +186,23 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 emit(new JsonObject { ["type"] = "message-start" });
 
                 var stream = client.Beta.Messages.CreateStreaming(BuildRequest(conversation, options, toolSpecs), cancellationToken);
-                await foreach (var streamEvent in stream.CollectAsync(aggregator).WithCancellation(cancellationToken))
+                IAsyncEnumerator<BetaRawMessageStreamEvent> events;
+                try
                 {
+                    events = stream.CollectAsync(aggregator).GetAsyncEnumerator(cancellationToken);
+                    if (!await events.MoveNextAsync()) throw new InvalidOperationException("API から空の応答が返りました");
+                }
+                catch (AnthropicBadRequestException e) when (!containerRetried && conversation.ContainerId is not null && e.Message.Contains("container", StringComparison.OrdinalIgnoreCase))
+                {
+                    containerRetried = true;
+                    conversation.ContainerId = null;
+                    turn--;
+                    continue;
+                }
+                await using var _ = events;
+                do
+                {
+                    var streamEvent = events.Current;
                     if (streamEvent.TryPickStart(out var messageStart))
                     {
                         streamUsage = ToWire(messageStart.Message.Usage);
@@ -193,6 +245,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                         emit(new JsonObject { ["type"] = "block-stop", ["index"] = (int)stop.Index, ["input"] = TryParse(json) });
                     }
                 }
+                while (await events.MoveNextAsync());
 
                 var message = aggregator.Message();
                 var content = new JsonArray(message.Content.Select(b => (JsonNode)ToWire(b)).ToArray());
@@ -202,6 +255,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 emit(new JsonObject { ["type"] = "message", ["message"] = assistant.DeepClone() });
                 streamUsage = null;
                 await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, "chat", ToWire(message.Usage));
+                if (message.Container?.ID is { } container) conversation.ContainerId = container;
+                await DownloadFilesAsync(conversation, content, emit, cancellationToken);
 
                 var stopReason = message.StopReason?.Raw();
                 if (stopReason == "pause_turn") continue;
@@ -211,7 +266,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 {
                     finishedResults = new JsonArray();
                     var results = stopReason == "tool_use"
-                        ? await RunToolsAsync(toolUses, options, emit, gate, finishedResults, cancellationToken)
+                        ? await RunToolsAsync(conversation, toolUses, options, emit, gate, finishedResults, cancellationToken)
                         // 出力上限で切れたツール入力は信用できないので実行しない
                         : ErrorResults(toolUses, "出力上限で入力が途中までしか届かなかったため、実行しませんでした");
                     var user = new JsonObject { ["role"] = "user", ["content"] = results };
@@ -304,6 +359,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         emit(new JsonObject { ["type"] = "notice", ["text"] = text });
 
     async Task<JsonArray> RunToolsAsync(
+        Conversation conversation,
         List<JsonObject> toolUses,
         ChatOptions options,
         Action<JsonObject> emit,
@@ -323,14 +379,25 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             {
                 outcome = ToolRegistry.Error($"ツール {apiName} は現在使えません");
             }
-            else if (await IsAllowedAsync(spec, id, input, emit, gate, cancellationToken))
+            else if (await hooks.RunPreToolUseAsync(conversation, apiName, input) is { Blocked: true } blocked)
             {
-                emit(new JsonObject { ["type"] = "tool-running", ["toolUseId"] = id });
-                outcome = await tools.CallAsync(apiName, input, options.EnabledSources, cancellationToken);
+                outcome = ToolRegistry.Error($"PreToolUse フックが止めました: {blocked.Message}");
+            }
+            else if (await DenialAsync(conversation, spec, id, input, gate, cancellationToken) is { } denial)
+            {
+                outcome = ToolRegistry.Error(denial);
             }
             else
             {
-                outcome = ToolRegistry.Error("ユーザーがこのツールの実行を許可しませんでした。別の方法を考えるか、ユーザーに確認してください");
+                emit(new JsonObject { ["type"] = "tool-running", ["toolUseId"] = id });
+                outcome = await tools.CallAsync(apiName, input, options.EnabledSources, cancellationToken);
+                var resultView = new JsonObject { ["content"] = outcome.Content.DeepClone(), ["is_error"] = outcome.IsError };
+                if (await hooks.RunPostToolUseAsync(conversation, apiName, input, resultView) is { Message: { } feedback })
+                {
+                    var content = (JsonArray)outcome.Content.DeepClone();
+                    content.Add(new JsonObject { ["type"] = "text", ["text"] = $"<hook-feedback event=\"PostToolUse\">\n{feedback}\n</hook-feedback>" });
+                    outcome = outcome with { Content = content };
+                }
             }
 
             var result = new JsonObject
@@ -341,15 +408,29 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             };
             if (outcome.IsError) result["is_error"] = true;
             emit(new JsonObject { ["type"] = "tool-result", ["toolUseId"] = id, ["result"] = result.DeepClone() });
+            if (spec?.Source is TodoToolProvider.Source or ArtifactToolProvider.Source or PlanToolProvider.Source)
+            {
+                emit(new JsonObject { ["type"] = "state", ["state"] = conversation.StateView() });
+            }
             results.Add(result);
         }
         return results;
     }
 
-    async Task<bool> IsAllowedAsync(ToolSpec spec, string toolUseId, JsonObject input, Action<JsonObject> emit, IApprovalGate gate, CancellationToken cancellationToken)
+    // 実行してよければ null、だめなら Claude に返す理由
+    async Task<string?> DenialAsync(Conversation conversation, ToolSpec spec, string toolUseId, JsonObject input, IApprovalGate gate, CancellationToken cancellationToken)
     {
         var current = await settings.GetAsync();
-        if (spec.AutoApprove || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return true;
+        switch (conversation.PermissionMode)
+        {
+            case "plan" when !spec.ReadOnly:
+                return $"計画モード中なので {spec.ApiName} は使えません。調べるだけにとどめ、計画ができたら {PlanToolProvider.ExitPlanMode} でユーザーに見せてください";
+            case "bypass" when current.Features.AllowBypassMode:
+                return null;
+            case "acceptEdits" when spec.Source == FileToolProvider.Source:
+                return null;
+        }
+        if (spec.AutoApprove || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return null;
 
         var decision = await gate.RequestAsync(new JsonObject
         {
@@ -364,7 +445,76 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         }, cancellationToken);
 
         if (decision == "always" && spec.AllowAlways) await settings.UpdateAsync(s => s.ToolPermissions[spec.ApiName] = "always");
-        return decision is "once" or "always";
+        if (decision is "once" or "always") return null;
+        return spec.ApiName == PlanToolProvider.ExitPlanMode
+            ? "ユーザーは計画を承認しませんでした。計画モードのまま、どこを変えればよいかユーザーに確認してください"
+            : "ユーザーがこのツールの実行を許可しませんでした。別の方法を考えるか、ユーザーに確認してください";
+    }
+
+    // コード実行で作られたファイルは API 側にしか無いので、届いたらすぐ手元へ落としておく
+    async Task DownloadFilesAsync(Conversation conversation, JsonArray content, Action<JsonObject> emit, CancellationToken cancellationToken)
+    {
+        var fileIds = content.OfType<JsonObject>()
+            .Where(b => ((string?)b["type"])?.EndsWith("_tool_result") == true)
+            .SelectMany(b => FileIdsIn(b))
+            .Distinct()
+            .Where(id => !conversation.HasFile(id))
+            .ToList();
+        foreach (var fileId in fileIds)
+        {
+            try
+            {
+                var metadata = await client.Beta.Files.RetrieveMetadata(fileId, cancellationToken: cancellationToken);
+                var dir = Path.Combine(paths.FilesDir, conversation.Id);
+                Directory.CreateDirectory(dir);
+                var path = UniquePath(dir, SafeFileName(metadata.Filename));
+                using (var response = await client.Beta.Files.Download(fileId, cancellationToken: cancellationToken))
+                await using (var source = await response.ReadAsStream(cancellationToken))
+                await using (var target = File.Create(path))
+                {
+                    await source.CopyToAsync(target, cancellationToken);
+                }
+                conversation.AddFile(fileId, path);
+                emit(new JsonObject { ["type"] = "file", ["fileId"] = fileId, ["name"] = Path.GetFileName(path), ["path"] = path });
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                Notice(emit, $"作成されたファイル {fileId} を保存できませんでした: {Describe(e)}");
+            }
+        }
+    }
+
+    static IEnumerable<string> FileIdsIn(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                if ((string?)obj["file_id"] is { Length: > 0 } id) yield return id;
+                foreach (var (_, value) in obj)
+                {
+                    foreach (var nested in FileIdsIn(value)) yield return nested;
+                }
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                {
+                    foreach (var nested in FileIdsIn(item)) yield return nested;
+                }
+                break;
+        }
+    }
+
+    static string SafeFileName(string name)
+    {
+        var cleaned = string.Concat(Path.GetFileName(name).Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)).Trim().TrimEnd('.');
+        return cleaned.Length == 0 ? "file" : cleaned;
+    }
+
+    static string UniquePath(string dir, string name)
+    {
+        var path = Path.Combine(dir, name);
+        for (var n = 2; File.Exists(path); n++) path = Path.Combine(dir, $"{Path.GetFileNameWithoutExtension(name)} ({n}){Path.GetExtension(name)}");
+        return path;
     }
 
     // 要約やフォールバックの分は iterations にしか載らないので、あればそちらを使う。
@@ -395,6 +545,28 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             conversation.Usage.CacheWrite += record.CacheWrite;
             conversation.Usage.CostUsd += record.CostUsd ?? 0;
         }
+    }
+
+    // /btw と /compact 用。履歴には何も足さず、答えだけ返す
+    public async Task<string> AskAsideAsync(Conversation conversation, ChatOptions options, string prompt, string kind, CancellationToken cancellationToken)
+    {
+        var messages = conversation.CopyApiMessages();
+        // 応答中だと結果の届いていない tool_use が末尾にあり、そのままでは 400 になる
+        while (messages.Count > 0 && (string?)messages[^1]["role"] == "assistant" && (messages[^1]["content"] as JsonArray ?? []).OfType<JsonObject>().Any(b => (string?)b["type"] == "tool_use"))
+        {
+            messages.RemoveAt(messages.Count - 1);
+        }
+        messages.Add(new JsonObject { ["role"] = "user", ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = prompt }) });
+        var request = BuildRequest(conversation, options, tools.GetTools(options.EnabledSources), messages) with
+        {
+            // 要約や脇道の質問は長くならない
+            MaxTokens = 16000,
+            ToolChoice = FromJson<BetaToolChoice>(new JsonObject { ["type"] = "none" }),
+        };
+        var message = await client.Beta.Messages.Create(request, cancellationToken);
+        await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, kind, ToWire(message.Usage));
+        var text = string.Concat(message.Content.Select(b => ToWire(b)).Where(b => (string?)b["type"] == "text").Select(b => (string?)b["text"])).Trim();
+        return text.Length > 0 ? text : throw new InvalidOperationException("答えが空でした");
     }
 
     public async Task<string?> GenerateTitleAsync(Conversation conversation)

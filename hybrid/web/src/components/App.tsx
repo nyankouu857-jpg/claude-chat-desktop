@@ -1,7 +1,9 @@
 import { LoaderCircle } from "lucide-react";
 import { useEffect } from "react";
 import { useStore } from "../store";
+import { ArtifactPanel } from "./ArtifactPanel";
 import { ChatView } from "./ChatView";
+import { GlobalDialog } from "./Dialogs";
 import { NewChat } from "./NewChat";
 import { Recents } from "./Recents";
 import { SettingsPage } from "./settings/Settings";
@@ -29,6 +31,8 @@ export function App() {
   const ready = useStore((s) => s.ready);
   const view = useStore((s) => s.view);
   const toasts = useStore((s) => s.toasts);
+  // 開いているチャットのアーティファクトだけ横に出す
+  const showArtifact = useStore((s) => !!s.artifact && s.view.name === "chat" && s.view.id === s.artifact.conversationId);
   useTheme();
 
   if (!ready) {
@@ -44,6 +48,8 @@ export function App() {
         {view.name === "recents" && <Recents />}
         {view.name === "settings" && <SettingsPage tab={view.tab} />}
       </main>
+      {showArtifact && <ArtifactPanel />}
+      <GlobalDialog />
       <div className="toasts">
         {toasts.map((t) => <div key={t.id} className={`toast ${t.kind}`}>{t.text}</div>)}
       </div>

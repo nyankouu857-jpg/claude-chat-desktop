@@ -3,8 +3,9 @@ using System.Text.Json.Nodes;
 namespace ClaudeChat.Core;
 
 // ApiName は Claude に見せる名前。ツールの持ち主ごとに重ならないよう接頭辞を付ける
-// AllowAlways が false のツールは「常に許可」を出さない。中身次第で何でもできるもの用
-public sealed record ToolSpec(string ApiName, string Source, string Name, string? Title, string Description, JsonObject InputSchema, bool AutoApprove = false, bool AllowAlways = true);
+// AllowAlways が false のツールは「常に許可」を出さない。中身次第で何でもできるもの用。
+// ReadOnly は計画モードでも使えるもの。Native は API 定義のツール (memory など) を独自の形で送るときの定義
+public sealed record ToolSpec(string ApiName, string Source, string Name, string? Title, string Description, JsonObject InputSchema, bool AutoApprove = false, bool AllowAlways = true, bool ReadOnly = false, JsonObject? Native = null);
 
 public sealed class ToolException(string message) : Exception(message);
 
@@ -23,6 +24,8 @@ public sealed class ToolRegistry(IEnumerable<IToolProvider> providers)
     // 同じ名前は API が 400 にするので、先に登録した組み込みを優先して 1 つにする
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources) =>
         providers.SelectMany(p => p.GetTools(enabledSources)).DistinctBy(t => t.ApiName).ToList();
+
+    public IEnumerable<string> SourceNames() => GetTools(null).Select(t => t.Source).Distinct();
 
     public ToolSpec? Find(string apiName, ISet<string>? enabledSources) =>
         GetTools(enabledSources).FirstOrDefault(t => t.ApiName == apiName);

@@ -3,11 +3,13 @@ import { useState } from "react";
 import { navigate } from "../actions";
 import { useStore } from "../store";
 import type { ConversationSummary } from "../types";
-import { ConversationMenu, RenameDialog } from "./Sidebar";
+import { ConversationMenu, MoveDialog, RenameDialog } from "./Sidebar";
 import { relativeTime } from "./ui";
 
 function Row({ summary }: { summary: ConversationSummary }) {
   const [renaming, setRenaming] = useState(false);
+  const [moving, setMoving] = useState(false);
+  const folder = useStore((s) => s.folders.find((f) => f.id === summary.folderId));
   return (
     <>
       <div className="recent-row" onClick={() => navigate({ name: "chat", id: summary.id })}>
@@ -16,11 +18,12 @@ function Row({ summary }: { summary: ConversationSummary }) {
             {summary.starred && <Star size={13} className="star-filled" />}
             {summary.title}
           </div>
-          <div className="recent-meta">最終更新 {relativeTime(summary.updatedAt)}</div>
+          <div className="recent-meta">{folder ? `${folder.name} ・ ` : ""}最終更新 {relativeTime(summary.updatedAt)}</div>
         </div>
-        <ConversationMenu summary={summary} onRename={() => setRenaming(true)} />
+        <ConversationMenu summary={summary} onRename={() => setRenaming(true)} onMove={() => setMoving(true)} />
       </div>
       {renaming && <RenameDialog summary={summary} onClose={() => setRenaming(false)} />}
+      {moving && <MoveDialog summary={summary} onClose={() => setMoving(false)} />}
     </>
   );
 }

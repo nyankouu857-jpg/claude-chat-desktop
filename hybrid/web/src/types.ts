@@ -18,6 +18,25 @@ export interface ConversationUsage {
   costUsd: number;
 }
 
+export type ChatKind = "chat" | "agent" | "workflow";
+export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypass";
+export type ChatStatus = "running" | "waiting" | "idle" | "failed" | "stopped";
+
+export interface Todo {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+export interface Artifact {
+  id: string;
+  title: string;
+  type: "html" | "markdown" | "svg" | "mermaid" | "code";
+  language?: string | null;
+  content: string;
+  version: number;
+  updatedAt: number;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -27,6 +46,17 @@ export interface Conversation {
   updatedAt: number;
   messages: WireMessage[];
   usage: ConversationUsage;
+  folderId?: string | null;
+  parentId?: string | null;
+  kind: ChatKind;
+  workflowId?: string | null;
+  permissionMode: PermissionMode;
+  apiStart: number;
+  todos?: Todo[] | null;
+  artifacts: Artifact[];
+  worktreePath?: string | null;
+  lastRunStatus?: string | null;
+  files: Record<string, string>;
 }
 
 export interface ConversationSummary {
@@ -35,6 +65,76 @@ export interface ConversationSummary {
   starred: boolean;
   updatedAt: number;
   preview: string;
+  folderId?: string | null;
+  parentId?: string | null;
+  kind: ChatKind;
+  lastRunStatus?: string | null;
+}
+
+export interface Folder {
+  id: string;
+  name: string;
+  instructions: string;
+  messagingScope: "folder" | "all" | "none";
+  createdAt: number;
+}
+
+export interface WorkflowAgent {
+  // 起動前は pending_ で始まる仮の値
+  chatId: string;
+  label: string;
+  phase: string;
+  status: string;
+}
+
+export interface WorkflowRun {
+  id: string;
+  parentId: string;
+  title: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  phase?: string | null;
+  logs: string[];
+  agents: WorkflowAgent[];
+  error?: string | null;
+  startedAt: number;
+}
+
+export interface CommandInfo {
+  name: string;
+  description: string;
+  kind: "skill" | "command";
+}
+
+export interface Extensions {
+  commands: CommandInfo[];
+  outputStyles: { id: string; label: string; builtin: boolean }[];
+}
+
+export interface Schedule {
+  id: string;
+  title: string;
+  prompt: string;
+  intervalMinutes?: number | null;
+  dailyTime?: string | null;
+  conversationId?: string | null;
+  folderId?: string | null;
+  enabled: boolean;
+  nextRunAt?: number | null;
+  lastRunAt?: number | null;
+  expiresAt?: number | null;
+  createdAt: number;
+}
+
+export interface HookEntry {
+  matcher?: string | null;
+  command: string;
+  timeoutSeconds: number;
+}
+
+export interface MemoryFile {
+  path: string;
+  size: number;
+  updatedAt: number;
 }
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -53,11 +153,29 @@ export interface McpServerConfig {
 export interface Settings {
   profile: { fullName: string; nickname: string; preferences: string; language?: string | null };
   appearance: { theme: "light" | "dark" | "system"; chatFont: "default" | "sans" | "large" };
-  chat: { model: string; effort: Effort; webSearch: boolean; showThinking: boolean; maxToolTurns: number; compactThreshold: number; systemPrompt: string; appendAppContext: boolean };
+  chat: {
+    model: string;
+    effort: Effort;
+    webSearch: boolean;
+    showThinking: boolean;
+    maxToolTurns: number;
+    compactThreshold: number;
+    systemPrompt: string;
+    appendAppContext: boolean;
+    webSearchMaxUses: number;
+    webFetch: boolean;
+    webFetchMaxUses: number;
+    codeExecution: boolean;
+    officeSkills: boolean;
+    outputStyle: string;
+  };
   files: FileAccess;
   terminal: { enabled: boolean; timeoutSeconds: number };
   programs: { enabled: boolean };
   browser: { enabled: boolean; executablePath?: string | null };
+  agents: { enabled: boolean; maxConcurrent: number; maxWorkflowAgents: number; maxMessageHops: number };
+  features: { memory: boolean; artifacts: boolean; chatSearch: boolean; allowBypassMode: boolean };
+  hooks: Record<string, HookEntry[]>;
   mcpServers: Record<string, McpServerConfig>;
   toolPermissions: Record<string, string>;
 }
@@ -128,12 +246,15 @@ export type ChatEvent =
   | { type: "tool-running"; toolUseId: string }
   | { type: "tool-result"; toolUseId: string; result: WireBlock }
   | { type: "notice"; text: string }
+  | { type: "inbound"; message: WireMessage }
+  | { type: "state"; state: Pick<Conversation, "permissionMode" | "todos" | "artifacts"> }
+  | { type: "file"; fileId: string; name: string; path: string }
   | { type: "done"; status: "done" | "aborted" | "failed"; error?: string; conversation: Conversation };
 
 export type View =
-  | { name: "new" }
+  | { name: "new"; folderId?: string }
   | { name: "chat"; id: string }
   | { name: "recents" }
   | { name: "settings"; tab: SettingsTab };
 
-export type SettingsTab = "general" | "appearance" | "api" | "files" | "computer" | "connectors" | "permissions" | "usage" | "data";
+export type SettingsTab = "general" | "appearance" | "api" | "features" | "files" | "computer" | "agents" | "extensions" | "schedules" | "connectors" | "permissions" | "usage" | "data";

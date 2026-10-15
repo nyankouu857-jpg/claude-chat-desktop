@@ -1,6 +1,7 @@
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -84,7 +85,28 @@ public partial class MainWindow : Window
         core.Settings.IsPasswordAutosaveEnabled = false;
 
         core.AddWebResourceRequestedFilter($"{AppOrigin}/*", CoreWebView2WebResourceContext.All);
-        core.WebResourceRequested += (_, e) => e.Response = Serve(core, e.Request.Uri);
+        core.WebResourceRequested += async (_, e) =>
+        {
+            var path = Uri.UnescapeDataString(new Uri(e.Request.Uri).AbsolutePath.TrimStart('/'));
+            if (!AppHost.IsArtifactPath(path) || host is not { } current)
+            {
+                e.Response = Serve(core, e.Request.Uri);
+                return;
+            }
+            // 会話の読み込みを待つ間、応答を保留する
+            var deferral = e.GetDeferral();
+            try
+            {
+                var html = await current.RenderArtifactAsync(path);
+                e.Response = html is null
+                    ? core.Environment.CreateWebResourceResponse(null, 404, "Not Found", "")
+                    : core.Environment.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), 200, "OK", $"Content-Type: text/html; charset=utf-8\r\nContent-Security-Policy: {AppHost.ArtifactCsp}");
+            }
+            finally
+            {
+                deferral.Complete();
+            }
+        };
 
         // 回答中のリンクはアプリ内で開かず、既定のブラウザに渡す
         core.NewWindowRequested += (_, e) =>

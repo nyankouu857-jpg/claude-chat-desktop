@@ -7,17 +7,25 @@ import { EFFORTS, MODELS } from "../../models";
 import { useStore } from "../../store";
 import type { Settings, SettingsTab } from "../../types";
 import { NumberField, Toggle } from "../ui";
+import { Agents } from "./Agents";
 import { Connectors } from "./Connectors";
 import { Computer } from "./Computer";
+import { Extensions } from "./Extensions";
+import { Features } from "./Features";
 import { Files } from "./Files";
+import { Schedules } from "./Schedules";
 import { Usage } from "./Usage";
 
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "general", label: "一般" },
   { id: "appearance", label: "外観" },
   { id: "api", label: "API とモデル" },
+  { id: "features", label: "機能とメモリ" },
   { id: "files", label: "フォルダ" },
   { id: "computer", label: "PC 操作" },
+  { id: "agents", label: "エージェント" },
+  { id: "extensions", label: "Skills とフック" },
+  { id: "schedules", label: "予定" },
   { id: "connectors", label: "コネクタ" },
   { id: "permissions", label: "ツールの権限" },
   { id: "usage", label: "使用量と料金" },
@@ -195,13 +203,6 @@ function Api({ settings }: { settings: Settings }) {
       <Section title="動作">
         <div className="switch-row">
           <div>
-            <div>Web 検索を最初からオンにする</div>
-            <div className="field-hint">検索にはトークンとは別に料金がかかります</div>
-          </div>
-          <Toggle checked={chat.webSearch} onChange={(v) => void updateSettings({ chat: { webSearch: v } })} />
-        </div>
-        <div className="switch-row">
-          <div>
             <div>思考プロセスを表示する</div>
             <div className="field-hint">オフにすると、考え中の表示だけになります</div>
           </div>
@@ -251,7 +252,7 @@ function SystemPrompt({ chat }: { chat: Settings["chat"] }) {
       <div className="switch-row">
         <div>
           <div>アプリの基本の指示を付ける</div>
-          <div className="field-hint">日付、知識の期限の扱い、口調と書式、呼び名、フォルダの一覧です。オフにすると Claude は今日の日付が分からなくなります。言語と個人設定はオンオフに関係なく付きます</div>
+          <div className="field-hint">日付、知識の期限の扱い、口調と書式、呼び名、操作できるフォルダの一覧です。オフにすると Claude は今日の日付が分からなくなります。言語と個人設定はオンオフに関係なく付きます</div>
         </div>
         <Toggle checked={chat.appendAppContext} onChange={(v) => void updateSettings({ chat: { appendAppContext: v } })} />
       </div>
@@ -351,8 +352,12 @@ export function SettingsPage({ tab }: { tab: SettingsTab }) {
             {tab === "general" && <General settings={settings} />}
             {tab === "appearance" && <Appearance settings={settings} />}
             {tab === "api" && <Api settings={settings} />}
+            {tab === "features" && <Features settings={settings} />}
             {tab === "files" && <Files settings={settings} />}
             {tab === "computer" && <Computer settings={settings} />}
+            {tab === "agents" && <Agents settings={settings} />}
+            {tab === "extensions" && <Extensions settings={settings} />}
+            {tab === "schedules" && <Schedules />}
             {tab === "connectors" && <Connectors settings={settings} />}
             {tab === "permissions" && <Permissions settings={settings} />}
             {tab === "usage" && <Usage />}

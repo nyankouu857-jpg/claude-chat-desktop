@@ -16,12 +16,21 @@ public sealed class AppPaths
     public string PricingFile => Path.Combine(ConfigDir, "pricing.json");
     public string ConversationsDir => Path.Combine(DataDir, "conversations");
     public string UsageDir => Path.Combine(DataDir, "usage");
+    public string FoldersFile => Path.Combine(DataDir, "folders.json");
+    public string MemoryDir => Path.Combine(DataDir, "memory");
+    public string FilesDir => Path.Combine(DataDir, "files");
+    public string CheckpointsDir => Path.Combine(DataDir, "checkpoints");
+    public string ExportsDir => Path.Combine(DataDir, "exports");
+    public string SkillsDir => Path.Combine(ConfigDir, "skills");
+    public string CommandsDir => Path.Combine(ConfigDir, "commands");
+    public string OutputStylesDir => Path.Combine(ConfigDir, "output-styles");
+    public string SchedulesFile => Path.Combine(ConfigDir, "schedules.json");
 
     AppPaths(string root, bool isFallback)
     {
         Root = root;
         IsFallback = isFallback;
-        foreach (var dir in new[] { ConfigDir, DataDir, LogsDir, CacheDir, ConversationsDir, UsageDir }) Directory.CreateDirectory(dir);
+        foreach (var dir in new[] { ConfigDir, DataDir, LogsDir, CacheDir, ConversationsDir, UsageDir, MemoryDir, FilesDir, CheckpointsDir, SkillsDir, CommandsDir, OutputStylesDir }) Directory.CreateDirectory(dir);
     }
 
     public static AppPaths Resolve(string? root = null)

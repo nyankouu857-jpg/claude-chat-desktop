@@ -4,20 +4,26 @@ import type {
   Approval,
   ChatEvent,
   Conversation,
+  Folder,
+  HookEntry,
   LiveReply,
   McpServerConfig,
+  MemoryFile,
+  PermissionMode,
+  Schedule,
   SecretsView,
   Settings,
   SettingsTab,
   View,
   WireBlock,
   WireMessage,
+  WorkflowRun,
 } from "./types";
 
 // C# 側の FileToolProvider.Source と同じ
 export const FILES_SOURCE = "files";
 // 組み込みツールの持ち主。サーバー側の Source と同じ名前
-export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser"];
+export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser", "agents", "chats", "todo", "artifacts", "memory", "schedule", "skills"];
 
 let toastId = 0;
 
@@ -62,6 +68,10 @@ export async function init() {
     version: data.version,
     summaries: data.conversations,
     mcp: data.mcp,
+    folders: data.folders,
+    statuses: data.statuses,
+    workflows: Object.fromEntries((data.workflows as WorkflowRun[]).map((w) => [w.id, w])),
+    extensions: data.extensions,
     live: Object.fromEntries(
       (data.running as { conversationId: string; approvals: Approval[] }[]).map((r) => [r.conversationId, { ...emptyLive(), approvals: r.approvals }]),
     ),
@@ -69,6 +79,10 @@ export async function init() {
       model: data.settings.chat.model,
       effort: data.settings.chat.effort,
       webSearch: data.settings.chat.webSearch,
+      webFetch: data.settings.chat.webFetch,
+      codeExecution: data.settings.chat.codeExecution,
+      research: false,
+      permissionMode: "default",
       disabledSources: [],
     },
   }));
@@ -77,6 +91,19 @@ export async function init() {
   on("chat.event", ({ conversationId, event }) => applyChatEvent(conversationId, event));
   on("conversations.changed", () => void refreshSummaries());
   on("mcp.changed", (mcp) => setState((s) => ({ ...s, mcp })));
+  on("chats.status", ({ id, status }) => setState((s) => ({ ...s, statuses: { ...s.statuses, [id]: status } })));
+  on("workflow.changed", (run: WorkflowRun) => setState((s) => ({ ...s, workflows: { ...s.workflows, [run.id]: run } })));
+  on("folders.changed", () => void refreshFolders());
+}
+
+async function refreshFolders() {
+  const folders = await call<Folder[]>("folders.list");
+  setState((s) => ({ ...s, folders }));
+}
+
+export async function refreshExtensions() {
+  const extensions = await guard(() => call("extensions.list"));
+  if (extensions) setState((s) => ({ ...s, extensions }));
 }
 
 async function refreshSummaries() {
@@ -86,8 +113,8 @@ async function refreshSummaries() {
     const conversations = { ...s.conversations };
     for (const summary of summaries) {
       const loaded = conversations[summary.id];
-      if (loaded && (loaded.title !== summary.title || loaded.starred !== summary.starred)) {
-        conversations[summary.id] = { ...loaded, title: summary.title, starred: summary.starred };
+      if (loaded && (loaded.title !== summary.title || loaded.starred !== summary.starred || loaded.folderId !== summary.folderId)) {
+        conversations[summary.id] = { ...loaded, title: summary.title, starred: summary.starred, folderId: summary.folderId };
       }
     }
     return { ...s, summaries, conversations };
@@ -164,6 +191,25 @@ function applyChatEvent(id: string, event: ChatEvent) {
     case "notice":
       updateLive(id, (live) => ({ ...live, notices: [...live.notices, event.text] }));
       break;
+    case "inbound":
+      // ほかのチャットや予定から届いた発言。開いていない会話は開いたときに読み込む
+      setState((s) => {
+        const conversation = s.conversations[id];
+        return conversation ? putConversation(s, { ...conversation, messages: [...conversation.messages, event.message] }) : s;
+      });
+      break;
+    case "state":
+      setState((s) => {
+        const conversation = s.conversations[id];
+        return conversation ? putConversation(s, { ...conversation, ...event.state }) : s;
+      });
+      break;
+    case "file":
+      setState((s) => {
+        const conversation = s.conversations[id];
+        return conversation ? putConversation(s, { ...conversation, files: { ...conversation.files, [event.fileId]: event.path } }) : s;
+      });
+      break;
     case "done":
       setState((s) => {
         const notices = [...(s.live[id]?.notices ?? []), ...(event.status === "aborted" ? ["応答を途中で止めました"] : [])];
@@ -198,12 +244,25 @@ function chatOptions() {
     model: choice.model,
     effort: choice.effort,
     webSearch: choice.webSearch,
+    webFetch: choice.webFetch,
+    codeExecution: choice.codeExecution,
     enabledSources: [...BUILTIN_SOURCE_IDS, ...mcp.map((m) => m.name)].filter((name) => !choice.disabledSources.includes(name)),
   };
 }
 
-export async function send(conversationId: string | null, content: WireMessage["content"]) {
-  const result = await guard(() => call<{ conversationId: string }>("chat.send", { conversationId, content, ...chatOptions() }));
+export async function send(conversationId: string | null, content: WireMessage["content"], extra: { research?: boolean } = {}) {
+  const { choice, view } = getState();
+  const research = extra.research ?? choice.research;
+  const result = await guard(() => call<{ conversationId: string }>("chat.send", {
+    conversationId,
+    content,
+    research,
+    // 新しいチャットだけ。既存のチャットはヘッダーで切り替える
+    permissionMode: conversationId ? undefined : choice.permissionMode,
+    folderId: !conversationId && view.name === "new" ? view.folderId : undefined,
+    ...chatOptions(),
+  }));
+  if (result && research) setChoice({ research: false });
   if (!result) return false;
   if (!conversationId) navigate({ name: "chat", id: result.conversationId });
   else {
@@ -284,11 +343,98 @@ export async function revokePermission(apiName: string) {
   if (settings) setState((s) => ({ ...s, settings }));
 }
 
-export const openPath = (target: "root" | "config" | "data" | "logs" | "settings" | "pricing") =>
+export const openPath = (target: "root" | "config" | "data" | "logs" | "settings" | "pricing" | "memory" | "skills" | "commands" | "outputStyles" | "exports") =>
   guard(() => call("app.open", { target }));
 
 export const pickFolder = () => guard(() => call<string | null>("app.pickFolder"));
-export const previewSystemPrompt = () => guard(() => call<string>("chat.systemPrompt"));
+export const previewSystemPrompt = (conversationId?: string) => guard(() => call<string>("chat.systemPrompt", { conversationId }));
+
+// Folders
+
+export async function saveFolder(folder: Partial<Folder>) {
+  const folders = await guard(() => call<Folder[]>("folders.save", { folder }));
+  if (folders) setState((s) => ({ ...s, folders }));
+  return folders;
+}
+
+export async function deleteFolder(id: string) {
+  const folders = await guard(() => call<Folder[]>("folders.delete", { id }));
+  if (folders) setState((s) => ({ ...s, folders }));
+}
+
+export const moveConversation = (id: string, folderId: string | null) => guard(() => call("conversations.move", { id, folderId }));
+
+// Chat commands
+
+export async function setMode(conversationId: string | null, mode: PermissionMode) {
+  if (!conversationId) {
+    setChoice({ permissionMode: mode });
+    return;
+  }
+  const conversation = await guard(() => call<Conversation>("chat.setMode", { conversationId, mode }));
+  if (conversation) setState((s) => putConversation(s, conversation));
+}
+
+export async function compact(conversationId: string, instructions?: string) {
+  toast("会話を要約しています...");
+  const conversation = await guard(() => call<Conversation>("chat.compact", { conversationId, instructions }));
+  if (conversation) {
+    setState((s) => putConversation(s, conversation));
+    toast("要約しました。ここから先は要約から続けます");
+  }
+}
+
+export const btw = (conversationId: string, question: string) => guard(() => call<{ answer: string }>("chat.btw", { conversationId, question }));
+
+export async function exportConversation(conversationId: string) {
+  const result = await guard(() => call<{ path: string }>("chat.export", { conversationId }));
+  if (result) toast(`書き出しました: ${result.path}`);
+}
+
+export async function rewind(conversationId: string, messageIndex: number, restoreFiles: boolean) {
+  const conversation = getState().conversations[conversationId];
+  const text = conversation ? textOf(conversation.messages[messageIndex]?.content ?? "") : "";
+  const result = await guard(() => call<{ conversation: Conversation; files: { restored: string[]; skipped: string[] } | null }>("chat.rewind", { conversationId, messageIndex, restoreFiles }));
+  if (!result) return;
+  setState((s) => ({ ...putConversation(s, result.conversation), prefill: { ...s.prefill, [conversationId]: { text, nonce: Date.now() } } }));
+  if (result.files) {
+    const { restored, skipped } = result.files;
+    toast(`ファイルを ${restored.length} 件戻しました${skipped.length ? `。戻せなかったもの: ${skipped.join("、")}` : ""}`, skipped.length ? "error" : "info");
+  }
+}
+
+export const rewindTurns = (conversationId: string) => guard(() => call<number[]>("chat.rewindInfo", { conversationId }));
+
+export const openArtifact = (conversationId: string, id: string) => setState((s) => ({ ...s, artifact: { conversationId, id } }));
+export const closeArtifact = () => setState((s) => ({ ...s, artifact: null }));
+
+export async function exportArtifact(conversationId: string, id: string) {
+  const result = await guard(() => call<{ path: string }>("artifacts.export", { conversationId, id }));
+  if (result) toast(`保存しました: ${result.path}`);
+}
+
+export const openFile = (conversationId: string, fileId: string, reveal = false) => guard(() => call("files.open", { conversationId, fileId, reveal }));
+export const stopWorkflow = (id: string) => guard(() => call("workflows.stop", { id }));
+export const expandCommand = (name: string, args: string) => guard(() => call<string>("commands.expand", { name, args }));
+
+// Schedules
+
+export const listSchedules = () => guard(() => call<Schedule[]>("schedules.list"));
+export const saveSchedule = (schedule: Partial<Schedule>, loop = false) => guard(() => call<Schedule[]>("schedules.save", { schedule, loop }));
+export const deleteSchedule = (id: string) => guard(() => call<Schedule[]>("schedules.delete", { id }));
+
+// Memory
+
+export const listMemory = () => guard(() => call<MemoryFile[]>("memory.list"));
+export const readMemory = (path: string) => guard(() => call<string>("memory.read", { path }));
+export const writeMemory = (path: string, content: string) => guard(() => call<MemoryFile[]>("memory.write", { path, content }));
+export const deleteMemory = (path: string) => guard(() => call<MemoryFile[]>("memory.delete", { path }));
+
+export async function saveHooks(hooks: Record<string, HookEntry[]>) {
+  const settings = await guard(() => call<Settings>("settings.update", { hooks }));
+  if (settings) setState((s) => ({ ...s, settings }));
+  return settings;
+}
 
 export const localUsage = () => guard(() => call("usage.local"));
 export const reloadPricing = () => guard(() => call("pricing.reload"));

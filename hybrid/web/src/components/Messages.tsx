@@ -1,11 +1,12 @@
-import { ChevronRight, Copy, Globe, LoaderCircle, Pencil, Plug, RotateCcw, TriangleAlert, X } from "lucide-react";
-import { memo, useEffect, useMemo, useState, type ReactElement } from "react";
-import { approve, edit, retry, textOf, toast } from "../actions";
+import { Bell, Bot, CalendarClock, ChevronRight, Code, Copy, Download, ExternalLink, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, MessageSquare, PanelsTopLeft, Pencil, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
+import { memo, useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { approve, edit, navigate, openArtifact, openFile, retry, stopWorkflow, textOf, toast } from "../actions";
 import { findBuiltin } from "../builtins";
 import { renderMarkdown } from "../markdown";
-import { useStore } from "../store";
+import { setState, useStore } from "../store";
 import type { Approval, LiveReply, WireBlock, WireMessage } from "../types";
 import { FileChip } from "./Composer";
+import { STATUS_LABELS, StatusDot } from "./Sidebar";
 import { Spark } from "./ui";
 
 export type Turn =
@@ -75,6 +76,64 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
     />
   );
 });
+
+// ほかのチャットやアプリから届いた発言の印。中身はタグで包まれている
+const PEER_TAGS = ["message", "task", "task-notification", "idle-notification", "scheduled-task", "hook-feedback", "compact-summary", "command"];
+const PEER_PATTERN = new RegExp(`^<(${PEER_TAGS.join("|")})((?:\\s+[\\w-]+="[^"]*")*)\\s*>\\n?([\\s\\S]*?)\\n?</\\1>\\s*$`);
+
+export interface PeerMessage {
+  tag: string;
+  attrs: Record<string, string>;
+  body: string;
+}
+
+export function parsePeer(text: string): PeerMessage | null {
+  const match = PEER_PATTERN.exec(text.trim());
+  if (!match) return null;
+  const attrs: Record<string, string> = {};
+  for (const [, key, value] of match[2].matchAll(/([\w-]+)="([^"]*)"/g)) attrs[key] = value;
+  return { tag: match[1], attrs, body: match[3] };
+}
+
+function peerHeader(peer: PeerMessage): { icon: ReactNode; title: string } {
+  const a = peer.attrs;
+  switch (peer.tag) {
+    case "message": return { icon: <MessageSquare size={15} />, title: `「${a.from_chat ?? "ほかのチャット"}」からのメッセージ` };
+    case "task": return { icon: <Bot size={15} />, title: `「${a.from_chat ?? "親チャット"}」から任された作業` };
+    case "task-notification": {
+      const status = a.status === "completed" ? "終わりました" : a.status === "stopped" ? "止まりました" : "失敗しました";
+      return { icon: a.workflow ? <Workflow size={15} /> : <Bot size={15} />, title: `${a.workflow ? "ワークフロー" : "サブエージェント"}「${a.workflow ?? a.agent ?? ""}」が${status}` };
+    }
+    case "idle-notification": return { icon: <Bell size={15} />, title: `「${a.chat ?? ""}」が待機中になりました` };
+    case "scheduled-task": return { icon: <CalendarClock size={15} />, title: `予定「${a.title ?? ""}」` };
+    case "hook-feedback": return { icon: <Webhook size={15} />, title: `${a.event ?? ""} フックからの補足` };
+    case "compact-summary": return { icon: <ListTree size={15} />, title: "ここより前の会話は要約して続けています" };
+    case "command": return { icon: <TerminalSquare size={15} />, title: a.name ?? "コマンド" };
+    default: return { icon: <Inbox size={15} />, title: peer.tag };
+  }
+}
+
+function PeerCard({ peer }: { peer: PeerMessage }) {
+  // 作業の依頼と予定は読めないと困るので開いておく
+  const [open, setOpen] = useState(peer.tag === "task" || peer.tag === "message" || peer.tag === "scheduled-task");
+  const { icon, title } = peerHeader(peer);
+  const chatId = peer.attrs.chat_id;
+  return (
+    <div className={`peer-card peer-${peer.tag}`}>
+      <button type="button" className="peer-header" onClick={() => setOpen((o) => !o)}>
+        {icon}
+        <span className="peer-title">{title}</span>
+        {chatId && (
+          <span className="link-button small" role="link" onClick={(e) => { e.stopPropagation(); navigate({ name: "chat", id: chatId }); }}>
+            開く <ExternalLink size={12} />
+          </span>
+        )}
+        <ChevronRight size={14} className={`chevron${open ? " open" : ""}`} />
+      </button>
+      {open && peer.body.trim() && <div className="peer-body"><Markdown text={peer.body} /></div>}
+    </div>
+  );
+}
 
 function useElapsed(since: number | undefined, running: boolean) {
   const [now, setNow] = useState(Date.now());
@@ -166,6 +225,9 @@ function resultText(result: WireBlock | undefined) {
 
 function ApprovalInput({ approval }: { approval: Approval }) {
   const input = (approval.input ?? {}) as Record<string, any>;
+  if (approval.apiName === "plan__exit_plan_mode" && typeof input.plan === "string") {
+    return <div className="plan-body"><Markdown text={input.plan} /></div>;
+  }
   // コマンドは JSON のままだと読みにくいので、そのまま見せる
   if (approval.source === "terminal" && typeof input.command === "string") {
     return (
@@ -181,6 +243,19 @@ function ApprovalInput({ approval }: { approval: Approval }) {
 function ApprovalCard({ conversationId, approval }: { conversationId: string; approval: Approval }) {
   const builtin = findBuiltin(approval.source);
   const name = builtin?.titles[approval.tool] ?? approval.title ?? approval.tool;
+  if (approval.apiName === "plan__exit_plan_mode") {
+    return (
+      <div className="approval plan-approval">
+        <div className="approval-title"><ListTree size={16} /><span>Claude が計画を立てました。この計画で進めますか?</span></div>
+        <ApprovalInput approval={approval} />
+        <div className="approval-actions">
+          <button type="button" className="button primary" onClick={() => approve(conversationId, approval.requestId, "once")}>この計画で進める</button>
+          <button type="button" className="button ghost" onClick={() => approve(conversationId, approval.requestId, "deny")}>計画を直してもらう</button>
+        </div>
+        <div className="approval-note">進めると計画モードが終わり、Claude が変更を始めます</div>
+      </div>
+    );
+  }
   return (
     <div className="approval">
       <div className="approval-title">
@@ -207,7 +282,175 @@ function resultImages(result: WireBlock | undefined): WireBlock[] {
   return Array.isArray(result?.content) ? result!.content.filter((c: WireBlock) => c.type === "image") : [];
 }
 
+const CHAT_ID = /chat_id ([0-9a-f-]{36})/;
+const WORKFLOW_ID = /id (wf_[0-9a-f]+)/;
+const ARTIFACT_ID = /id (art_[0-9a-f]+)/;
+
+function AgentCard({ block, result, conversationId }: { block: WireBlock; result?: WireBlock; conversationId: string }) {
+  const title = block.input?.title ?? "サブエージェント";
+  // 結果が届く前は、同じ名前の一番新しい子を探す
+  const childId = useStore((s) => CHAT_ID.exec(resultText(result))?.[1]
+    ?? s.summaries.find((c) => c.parentId === conversationId && c.title === title)?.id);
+  const status = useStore((s) => (childId ? s.statuses[childId] : undefined));
+  return (
+    <div className="tool-card agent-card">
+      <div className="tool-card-header static">
+        {status === "running" ? <LoaderCircle size={15} className="spin" /> : <Bot size={15} />}
+        <span className="tool-card-title">サブエージェント「{title}」</span>
+        {block.input?.background && <span className="tool-badge">バックグラウンド</span>}
+        <StatusDot status={status} />
+        {status && <span className="tool-card-sub">{STATUS_LABELS[status]}</span>}
+        {childId && <button type="button" className="link-button small" onClick={() => navigate({ name: "chat", id: childId })}>チャットを開く <ExternalLink size={12} /></button>}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowCard({ block, result }: { block: WireBlock; result?: WireBlock }) {
+  const id = WORKFLOW_ID.exec(resultText(result))?.[1];
+  const run = useStore((s) => (id ? s.workflows[id] : undefined));
+  const [open, setOpen] = useState(true);
+  const title = run?.title ?? block.input?.title ?? "ワークフロー";
+  const done = run?.agents.filter((a) => a.status === "done").length ?? 0;
+  return (
+    <div className="tool-card workflow-card">
+      <button type="button" className="tool-card-header" onClick={() => setOpen((o) => !o)}>
+        {run?.status === "running" ? <LoaderCircle size={15} className="spin" /> : <Workflow size={15} />}
+        <span className="tool-card-title">{title}</span>
+        {run && <span className="tool-card-sub">{run.phase ?? ""} {run.agents.length > 0 ? `エージェント ${done}/${run.agents.length}` : ""}</span>}
+        {run && <span className={`tool-badge${run.status === "failed" ? " error" : ""}`}>{{ running: "実行中", completed: "完了", failed: "失敗", stopped: "停止" }[run.status]}</span>}
+        <ChevronRight size={14} className={`chevron${open ? " open" : ""}`} />
+      </button>
+      {open && run && (
+        <div className="tool-card-body">
+          {run.agents.length > 0 && (
+            <ul className="workflow-agents">
+              {run.agents.map((a) => (
+                <li key={a.chatId}>
+                  <span className={`agent-state ${a.status}`} />
+                  <span className="agent-label">{a.label}</span>
+                  <span className="agent-phase">{a.phase}</span>
+                  {!a.chatId.startsWith("pending_") && <button type="button" className="link-button small" onClick={() => navigate({ name: "chat", id: a.chatId })}>開く</button>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {run.logs.length > 0 && <pre className="workflow-logs">{run.logs.slice(-20).join("\n")}</pre>}
+          {run.error && <pre className="error">{run.error}</pre>}
+          {run.status === "running" && <button type="button" className="button small" onClick={() => void stopWorkflow(run.id)}><Square size={12} /> 止める</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ArtifactCard({ block, result, conversationId }: { block: WireBlock; result?: WireBlock; conversationId: string }) {
+  const id = ARTIFACT_ID.exec(resultText(result))?.[1] ?? block.input?.id;
+  const artifact = useStore((s) => s.conversations[conversationId]?.artifacts?.find((a) => a.id === id));
+  const title = artifact?.title ?? block.input?.title ?? "アーティファクト";
+  return (
+    <button type="button" className="artifact-card" disabled={!artifact} onClick={() => artifact && openArtifact(conversationId, artifact.id)}>
+      <PanelsTopLeft size={20} />
+      <span className="artifact-card-text">
+        <span className="artifact-card-title">{title}</span>
+        <span className="artifact-card-sub">{artifact ? `${artifact.type} ・ 版 ${artifact.version}` : result?.is_error ? "失敗しました" : "作っています..."}</span>
+      </span>
+      {artifact && <span className="artifact-open">開く</span>}
+    </button>
+  );
+}
+
+// コード実行で作られたファイル。手元に保存できたものは開ける
+function FileOutputs({ result, conversationId }: { result?: WireBlock; conversationId: string }) {
+  const files = useStore((s) => s.conversations[conversationId]?.files);
+  const ids = useMemo(() => {
+    const found: string[] = [];
+    const walk = (node: unknown) => {
+      if (Array.isArray(node)) node.forEach(walk);
+      else if (node && typeof node === "object") {
+        const obj = node as Record<string, unknown>;
+        if (typeof obj.file_id === "string") found.push(obj.file_id);
+        Object.values(obj).forEach(walk);
+      }
+    };
+    walk(result);
+    return [...new Set(found)];
+  }, [result]);
+  if (ids.length === 0) return null;
+  return (
+    <div className="file-outputs">
+      {ids.map((id) => {
+        const path = files?.[id];
+        const name = path ? path.split(/[\\/]/).pop() : id;
+        return (
+          <span key={id} className="file-output">
+            <FileOutput size={15} />
+            <span className="file-output-name">{name}</span>
+            {path ? (
+              <>
+                <button type="button" className="icon-button tiny" title="開く" onClick={() => void openFile(conversationId, id)}><Download size={13} /></button>
+                <button type="button" className="icon-button tiny" title="フォルダを開く" onClick={() => void openFile(conversationId, id, true)}><FolderOpen size={13} /></button>
+              </>
+            ) : <span className="field-hint">保存中...</span>}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+const SERVER_TOOL_TITLES: Record<string, string> = {
+  web_fetch: "Web ページを読みました",
+  code_execution: "コードを実行しました",
+  bash_code_execution: "コマンドを実行しました",
+  text_editor_code_execution: "ファイルを編集しました",
+};
+
+function serverToolText(result: WireBlock | undefined) {
+  const content = result?.content;
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map((c: WireBlock) => c.text ?? "").join("\n");
+  const parts = [content.stdout, content.stderr, content.content?.source?.data?.slice?.(0, 4000), content.error_code && `エラー: ${content.error_code}`];
+  return parts.filter(Boolean).join("\n");
+}
+
+function ServerToolBlock({ block, result, conversationId, active }: { block: WireBlock; result?: WireBlock; conversationId: string; active: boolean }) {
+  const [open, setOpen] = useState(false);
+  const input = block.input ?? {};
+  const isFetch = block.name === "web_fetch";
+  const subject = input.url ?? input.command ?? input.path ?? (typeof input.code === "string" ? input.code.split("\n")[0] : "");
+  const failed = result?.content?.type?.endsWith?.("_error") || result?.content?.error_code;
+  const title = result ? SERVER_TOOL_TITLES[block.name] ?? block.name : isFetch ? "Web ページを読んでいます" : "コードを実行しています";
+  return (
+    <div className="tool-card">
+      <button type="button" className="tool-card-header" onClick={() => setOpen((o) => !o)} disabled={!result}>
+        {active && !result ? <LoaderCircle size={15} className="spin" /> : isFetch ? <Link size={15} /> : <Code size={15} />}
+        <span className="tool-card-title">{title}</span>
+        {subject && <span className="tool-card-sub">{String(subject).slice(0, 100)}</span>}
+        {failed && <span className="tool-badge error">失敗</span>}
+        {result && <ChevronRight size={14} className={`chevron${open ? " open" : ""}`} />}
+      </button>
+      {open && (
+        <div className="tool-card-body">
+          {!isFetch && <><div className="tool-section-label">入力</div><pre>{input.code ?? input.command ?? JSON.stringify(input, null, 2)}</pre></>}
+          {result && <><div className="tool-section-label">結果</div><pre>{serverToolText(result) || "(出力なし)"}</pre></>}
+        </div>
+      )}
+      <FileOutputs result={result} conversationId={conversationId} />
+    </div>
+  );
+}
+
 function ToolUseBlock({ block, result, conversationId, live }: { block: WireBlock; result?: WireBlock; conversationId: string; live: LiveReply | null }) {
+  const approval = live?.approvals.find((a) => a.toolUseId === block.id);
+  if (block.name === "agents__spawn_agent" && !approval) return <AgentCard block={block} result={result} conversationId={conversationId} />;
+  if (block.name === "agents__run_workflow" && result && !result.is_error) return <WorkflowCard block={block} result={result} />;
+  if ((block.name === "artifacts__create" || block.name === "artifacts__update") && !result?.is_error) return <ArtifactCard block={block} result={result} conversationId={conversationId} />;
+  return <GenericToolBlock block={block} result={result} conversationId={conversationId} live={live} />;
+}
+
+function GenericToolBlock({ block, result, conversationId, live }: { block: WireBlock; result?: WireBlock; conversationId: string; live: LiveReply | null }) {
   const [open, setOpen] = useState(false);
   const approval = live?.approvals.find((a) => a.toolUseId === block.id);
   const running = live?.runningTools.includes(block.id) ?? false;
@@ -254,7 +497,11 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
   const notices: string[] = useStore((s) => (isLast ? s.live[conversationId]?.notices ?? (s.conversations[conversationId] as any)?._notices ?? NO_NOTICES : NO_NOTICES));
   const live = turn.live;
   const searchResults = new Map<string, WireBlock>();
-  for (const block of turn.blocks) if (block.type === "web_search_tool_result") searchResults.set(block.tool_use_id, block);
+  const serverResults = new Map<string, WireBlock>();
+  for (const block of turn.blocks) {
+    if (block.type === "web_search_tool_result") searchResults.set(block.tool_use_id, block);
+    else if (typeof block.type === "string" && block.type.endsWith("_tool_result") && block.tool_use_id) serverResults.set(block.tool_use_id, block);
+  }
 
   const elements: ReactElement[] = [];
   let textBuffer = "";
@@ -277,6 +524,8 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
       case "server_tool_use":
         if (block.name === "web_search") {
           elements.push(<WebSearchBlock key={i} query={block.input?.query ?? ""} result={searchResults.get(block.id)} active={!!live} />);
+        } else {
+          elements.push(<ServerToolBlock key={i} block={block} result={serverResults.get(block.id)} conversationId={conversationId} active={!!live} />);
         }
         break;
       case "tool_use":
@@ -314,12 +563,23 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
 
 function UserTurn({ turn, conversationId, running }: { turn: Extract<Turn, { kind: "human" }>; conversationId: string; running: boolean }) {
   const [editing, setEditing] = useState(false);
-  const text = textOf(turn.content);
+  const textBlocks: string[] = typeof turn.content === "string" ? [turn.content] : turn.content.filter((b) => b.type === "text").map((b) => b.text ?? "");
+  const peers = textBlocks.map(parsePeer);
+  // フックの補足のように本文に添えられたものは、本文と分けて小さく出す
+  const text = textBlocks.filter((_, i) => !peers[i]).join("\n");
   const [draft, setDraft] = useState(text);
   const images = Array.isArray(turn.content) ? turn.content.filter((b) => b.type === "image") : [];
   const documents = Array.isArray(turn.content) ? turn.content.filter((b) => b.type === "document") : [];
   // 大きすぎる添付で送れなくなった会話から抜け出せるよう、編集で外せる
   const [kept, setKept] = useState<WireBlock[]>([]);
+
+  if (peers.length > 0 && peers.every(Boolean) && images.length === 0 && documents.length === 0) {
+    return (
+      <div className="peer-turn">
+        {peers.map((peer, i) => <PeerCard key={i} peer={peer!} />)}
+      </div>
+    );
+  }
 
   if (editing) {
     const save = () => {
@@ -358,9 +618,11 @@ function UserTurn({ turn, conversationId, running }: { turn: Extract<Turn, { kin
         {images.map((img, i) => <img key={i} src={`data:${img.source.media_type};base64,${img.source.data}`} alt="" />)}
         {text && <div className="user-text">{text}</div>}
       </div>
+      {peers.some(Boolean) && <div className="peer-turn attached">{peers.filter(Boolean).map((peer, i) => <PeerCard key={i} peer={peer!} />)}</div>}
       <div className="user-actions">
         <button type="button" className="icon-button small" title="コピー" onClick={() => void copyText(text)}><Copy size={14} /></button>
         {!running && <button type="button" className="icon-button small" title="編集" onClick={() => { setDraft(text); setKept([...documents, ...images]); setEditing(true); }}><Pencil size={14} /></button>}
+        {!running && <button type="button" className="icon-button small" title="ここまで巻き戻す" onClick={() => setState((s) => ({ ...s, dialog: { kind: "rewind", conversationId, messageIndex: turn.index } }))}><History size={14} /></button>}
       </div>
     </div>
   );
