@@ -80,6 +80,8 @@ export async function init() {
   on("chats.status", ({ id, status }) => setState((s) => ({ ...s, statuses: { ...s.statuses, [id]: status } })));
   on("workflow.changed", (run: WorkflowRun) => setState((s) => ({ ...s, workflows: { ...s.workflows, [run.id]: run } })));
   on("folders.changed", () => void refreshFolders());
+  // Windows の通知を押したとき
+  on("app.navigate", ({ conversationId }: { conversationId: string }) => navigate({ name: "chat", id: conversationId }));
   on("update.available", (info: UpdateInfo) => setState((s) => ({ ...s, update: info })));
   on("update.installing", (info: UpdateInfo) => setState((s) => ({ ...s, update: { ...info, installing: true } })));
   on("update.failed", (message: string) => {
@@ -408,6 +410,20 @@ export async function edit(conversationId: string, messageIndex: number, content
   if (conversation) setState((s) => putConversation(s, conversation));
 }
 
+export async function archiveConversation(id: string, archived: boolean) {
+  await guard(() => call("conversations.archive", { id, archived }));
+}
+
+export async function backupNow() {
+  const result = await guard(() => call<{ path: string }>("app.backup"));
+  if (result) toast(`バックアップしました: ${result.path}`);
+}
+
+// 応答中に送った文。走り終わっていたら false が返るので、ふつうに送り直す
+export async function interject(conversationId: string, text: string) {
+  return guard(() => call<{ queued: boolean }>("chat.interject", { conversationId, text }));
+}
+
 export async function checkUpdate() {
   const info = await guard(() => call<UpdateInfo>("app.checkUpdate"));
   if (!info) return;
@@ -422,9 +438,10 @@ export async function installUpdate() {
   if (!ok) setState((s) => ({ ...s, update: s.update && { ...s.update, installing: false } }));
 }
 
-export async function approve(conversationId: string, requestId: string, decision: "once" | "always" | "deny") {
+export async function approve(conversationId: string, requestId: string, decision: "once" | "always" | "deny" | "rule", rule?: string) {
   updateLive(conversationId, (live) => ({ ...live, approvals: live.approvals.filter((a) => a.requestId !== requestId) }));
-  await guard(() => call("tools.approve", { requestId, decision }));
+  await guard(() => call("tools.approve", { requestId, decision, rule }));
+  if (decision === "rule") await updateSettings({});
   // 中身側で権限が書き足されるので、取り消せるように設定を取り直す
   if (decision === "always") await updateSettings({});
 }

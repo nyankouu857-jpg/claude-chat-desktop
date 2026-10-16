@@ -22,6 +22,8 @@ public sealed class Schedule
     // Claude Code の /loop と同じく、頼まれた繰り返しは 7 日で切れる。設定画面から作ったものは切れない
     public long? ExpiresAt { get; set; }
     public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    // 新しいチャットで動かすとき、Message Batches で半額で送る。返るまで時間がかかる
+    public bool Batch { get; set; }
 }
 
 // アプリを開いている間だけ動く。閉じている間に過ぎた分は、開いたときに 1 回だけ動かす
@@ -176,7 +178,7 @@ public sealed class Scheduler(AppPaths paths, ChatHub hub, ConversationStore con
         conversation.Title = schedule.Title;
         conversation.FolderId = schedule.FolderId;
         conversation.Options = schedule.Options;
-        var options = await hub.OptionsForAsync(conversation);
+        var options = await hub.OptionsForAsync(conversation) with { Batch = schedule.Batch };
         await hub.StartAsync(conversation, () =>
         {
             conversation.Append(new JsonObject { ["role"] = "user", ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text }) });

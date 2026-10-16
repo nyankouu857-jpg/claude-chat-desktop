@@ -17,8 +17,13 @@ public interface IPlatform
     string? RealClick(string titleMarker, double fx, double fy);
     // デスクトップとスタートメニューにショートカットを作る。できなかったら理由を返す
     string? CreateShortcuts();
-    // デスクトップの通知を出す。できなかったら理由を返す
-    string? Notify(string title, string message);
+    // デスクトップの通知を出す。押されたら onClick を呼ぶ。できなかったら理由を返す
+    string? Notify(string title, string message, Action? onClick = null);
+    // 窓が前に出ていて、人が見ているはずか
+    bool IsActive { get; }
+    void ShowWindow();
+    // ログオンしたときに裏で起動するか。できなかったら理由を返す
+    string? SetStartWithWindows(bool enabled);
     // この exe を作ったコミット。手元でのビルドなど分からないときは null
     string? Commit { get; }
     // 取り出した新しい exe と今の exe を入れ替えて再起動する。できなかったら理由を返す
@@ -55,6 +60,7 @@ public sealed class AppHost : IAsyncDisposable
     readonly OrgCostClient orgCost;
     readonly HttpClient http = new();
     readonly Updater updater;
+    readonly Housekeeping housekeeping;
     // 画面を読み直すたびに確かめ直さない
     int updateChecked;
 
@@ -75,6 +81,8 @@ public sealed class AppHost : IAsyncDisposable
         hub = new ChatHub(paths, settings, secrets, conversations, folders, ledger, hooks, extensions, events);
         hub.DeleteConversation = async id => await DeleteConversationAsync(id);
         updater = new Updater(platform, http);
+        hub.Alert = Alert;
+        housekeeping = new Housekeeping(paths, settings, conversations, hub, () => Emit("conversations.changed", null));
         workflows = new WorkflowRunner(hub, settings, conversations, events);
         scheduler = new Scheduler(paths, hub, conversations, events);
         mcp = new McpHub(paths);
@@ -120,6 +128,7 @@ public sealed class AppHost : IAsyncDisposable
         await ledger.GetPricingAsync();
         await mcp.ApplyAsync(current.McpServers);
         scheduler.Start();
+        housekeeping.Start();
     }
 
     void Send(JsonObject message) => send(message.ToJsonString(Json.Wire));
@@ -152,6 +161,8 @@ public sealed class AppHost : IAsyncDisposable
         "conversations.list" => ListConversationsAsync(),
         "conversations.get" => GetConversationAsync(Str(p, "id")),
         "conversations.rename" => UpdateConversationAsync(Str(p, "id"), c => c.Title = NonEmpty(Str(p, "title"))),
+        "conversations.archive" => UpdateConversationAsync(Str(p, "id"), c => c.Archived = (bool?)p["archived"] == true),
+        "app.backup" => BackupAsync(),
         "conversations.star" => UpdateConversationAsync(Str(p, "id"), c => c.Starred = (bool?)p["starred"] == true),
         "conversations.move" => MoveConversationAsync(Str(p, "id"), (string?)p["folderId"]),
         "conversations.delete" => DeleteConversationAsync(Str(p, "id")),
@@ -180,7 +191,7 @@ public sealed class AppHost : IAsyncDisposable
         "chat.rewind" => RewindAsync(Str(p, "conversationId"), (int?)p["messageIndex"] ?? throw new InvalidOperationException("messageIndex がありません"), (bool?)p["restoreFiles"] == true),
         "chat.rewindInfo" => RewindInfoAsync(Str(p, "conversationId")),
         "chat.switchBranch" => SwitchBranchAsync(Str(p, "conversationId"), (int?)p["index"] ?? -1, (int?)p["version"] ?? -1),
-        "tools.approve" => ApproveAsync(Str(p, "requestId"), Str(p, "decision")),
+        "tools.approve" => ApproveAsync(Str(p, "requestId"), Str(p, "decision"), (string?)p["rule"]),
         "tools.answer" => AnswerAsync(Str(p, "requestId"), p["answers"] as JsonArray ?? throw new InvalidOperationException("answers がありません")),
         "artifacts.export" => ExportArtifactAsync(Str(p, "conversationId"), Str(p, "id")),
         "artifacts.list" => ListArtifactsAsync(),
@@ -224,6 +235,7 @@ public sealed class AppHost : IAsyncDisposable
         "pricing.reload" => ReloadPricingAsync(),
         "app.open" => OpenTargetAsync(Str(p, "target")),
         "app.checkUpdate" => CheckUpdateAsync(),
+        "chat.interject" => InterjectAsync(Str(p, "conversationId"), Str(p, "text")),
         "app.installUpdate" => InstallUpdateAsync(),
         "app.openMail" => OpenMailAsync((string?)p["to"] ?? "", (string?)p["subject"] ?? "", (string?)p["body"] ?? ""),
         "app.pickFolder" => Task.FromResult<JsonNode?>(platform.PickFolder()),
@@ -252,6 +264,30 @@ public sealed class AppHost : IAsyncDisposable
 
     async Task<Conversation> RequireConversationAsync(string id) =>
         await conversations.GetAsync(id) ?? throw new InvalidOperationException("会話が見つかりません");
+
+    // 応答中に送られた文。走っていなければ false を返し、画面はふつうに送り直す
+    async Task<JsonNode?> InterjectAsync(string conversationId, string text)
+    {
+        var conversation = await RequireConversationAsync(conversationId);
+        if (text.Trim().Length == 0) throw new InvalidOperationException("送る文がありません");
+        var outcome = await hooks.RunUserPromptSubmitAsync(conversation, text);
+        if (outcome.Blocked) throw new InvalidOperationException($"UserPromptSubmit フックが止めました: {outcome.Message}");
+        return new JsonObject { ["queued"] = hub.Interject(conversationId, text) };
+    }
+
+    async Task<JsonNode?> BackupAsync() => new JsonObject { ["path"] = await housekeeping.BackupAsync() };
+
+    public bool CloseToTray => settings.Current?.Desktop.CloseToTray ?? true;
+
+    // 窓を見ていないときだけ知らせる。押したらその会話を開く
+    void Alert(Conversation conversation, string message, bool waiting)
+    {
+        var desktop = settings.Current?.Desktop;
+        if (desktop is null || !(waiting ? desktop.NotifyWhenWaiting : desktop.NotifyWhenDone) || platform.IsActive) return;
+        // シークレットチャットは題名も残さない
+        var title = conversation.Incognito ? "シークレットチャット" : conversation.Title;
+        platform.Notify(message, title, () => Emit("app.navigate", new JsonObject { ["conversationId"] = conversation.Id }));
+    }
 
     async Task<JsonNode?> CheckUpdateAsync()
     {
@@ -339,6 +375,8 @@ public sealed class AppHost : IAsyncDisposable
         ["features"] = Json.ToNode(s.Features),
         ["budget"] = Json.ToNode(s.Budget),
         ["updates"] = Json.ToNode(s.Updates),
+        ["desktop"] = Json.ToNode(s.Desktop),
+        ["backup"] = Json.ToNode(s.Backup),
         ["hooks"] = JsonSerializer.SerializeToNode(s.Hooks, Json.Wire),
         ["mcpServers"] = JsonSerializer.SerializeToNode(s.McpServers, Json.Wire),
         ["toolPermissions"] = JsonSerializer.SerializeToNode(s.ToolPermissions, Json.Wire),
@@ -393,6 +431,8 @@ public sealed class AppHost : IAsyncDisposable
             if (patch["features"] is JsonObject features) s.Features = Merge(s.Features, features);
             if (patch["budget"] is JsonObject budget) s.Budget = Merge(s.Budget, budget);
             if (patch["updates"] is JsonObject updates) s.Updates = Merge(s.Updates, updates);
+            if (patch["desktop"] is JsonObject desktop) s.Desktop = Merge(s.Desktop, desktop);
+            if (patch["backup"] is JsonObject backup) s.Backup = Merge(s.Backup, backup);
             if (hookPatch is not null)
             {
                 // 画面が扱うのは決まった 5 つだけ。settings.json に手で書いたほかの項目は消さずに残す
@@ -402,6 +442,12 @@ public sealed class AppHost : IAsyncDisposable
             }
         });
         await bridge.SyncAsync();
+        // レジストリと設定がずれないよう、書けなかったら設定も戻す
+        if (patch["desktop"]?["startWithWindows"] is JsonValue startup && platform.SetStartWithWindows((bool)startup) is { } problem)
+        {
+            await settings.UpdateAsync(s => s.Desktop.StartWithWindows = false);
+            throw new InvalidOperationException(problem);
+        }
         return SettingsView(settings.Current ?? updated);
     }
 
@@ -618,6 +664,8 @@ public sealed class AppHost : IAsyncDisposable
         if (id is null && (string?)p["folderId"] is { } folderId && await folders.GetAsync(folderId) is not null) conversation.FolderId = folderId;
         if (id is null && conversation.FolderId is null) conversation.Incognito = (bool?)p["incognito"] == true;
         var content = p["content"]?.DeepClone() ?? throw new InvalidOperationException("content がありません");
+        // アーカイブしたチャットでも、話しかけたら一覧に戻す
+        conversation.Archived = false;
         await ApplyModeAsync(conversation, (string?)p["permissionMode"]);
         content = await PrepareContentAsync(conversation, content);
         var message = new JsonObject { ["role"] = "user", ["content"] = content };
@@ -722,9 +770,9 @@ public sealed class AppHost : IAsyncDisposable
         return Task.FromResult<JsonNode?>(null);
     }
 
-    Task<JsonNode?> ApproveAsync(string requestId, string decision)
+    Task<JsonNode?> ApproveAsync(string requestId, string decision, string? rule)
     {
-        hub.Approve(requestId, decision);
+        hub.Approve(requestId, decision, rule);
         return Task.FromResult<JsonNode?>(null);
     }
 
@@ -1204,6 +1252,7 @@ public sealed class AppHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         scheduler.Dispose();
+        housekeeping.Dispose();
         foreach (var run in workflows.ListView().OfType<JsonObject>()) workflows.Stop((string?)run["id"] ?? "");
         hub.StopAll();
         // 画面は片付けを数秒しか待たずに終わるので、残ると困るもの (シークレットのファイル、見えないブラウザ、裏のコマンド) を先に片付ける

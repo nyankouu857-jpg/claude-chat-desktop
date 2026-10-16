@@ -56,6 +56,23 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
 
     TerminalSettings? Active() => settings.Current?.Terminal is { Enabled: true } t ? t : null;
 
+    public const string RunCommandApiName = Prefix + "run_command";
+    public const string StartBackgroundApiName = Prefix + "start_background";
+
+    // 許可したコマンドの後ろに別のコマンドをつながれないよう、ルールで通すのは記号の少ない素直なコマンドだけ。
+    // PowerShell は $ や括弧、@ で引数の中の式を評価し、; | & ` 改行でコマンドをつなぐ
+    [GeneratedRegex(@"^[A-Za-z0-9 _\-./\\:=,+*~'""]+$")]
+    private static partial Regex PlainCommand();
+
+    public static bool IsPlainCommand(string command) => PlainCommand().IsMatch(command);
+
+    public static bool MatchesRule(string command, IEnumerable<string> rules)
+    {
+        var trimmed = command.Trim();
+        if (!IsPlainCommand(trimmed)) return false;
+        return rules.Select(r => r.Trim()).Any(r => r.Length > 0 && (trimmed == r || trimmed.StartsWith(r + " ", StringComparison.Ordinal)));
+    }
+
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
         var terminal = Active();

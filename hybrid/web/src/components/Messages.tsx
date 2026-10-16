@@ -7,6 +7,7 @@ import { renderMarkdown } from "../markdown";
 import { setState, useStore } from "../store";
 import type { Approval, LiveReply, WireBlock, WireMessage } from "../types";
 import { FileChip } from "./Composer";
+import { FileChangePreview } from "./Diff";
 import { STATUS_LABELS, StatusDot } from "./Sidebar";
 import { Dropdown, MenuItem, Spark } from "./ui";
 
@@ -337,8 +338,22 @@ function resultText(result: WireBlock | undefined) {
   return (result.content ?? []).map((c: WireBlock) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");
 }
 
+// 確認カードから足せるコマンドのルール。サーバーと同じく、記号の少ない素直なコマンドだけ
+const PLAIN_COMMAND = /^[A-Za-z0-9 _\-./\\:=,+*~'"]+$/;
+
+function suggestedRule(command: string) {
+  const trimmed = command.trim();
+  if (!PLAIN_COMMAND.test(trimmed)) return null;
+  // npm test --watch なら「npm test」。1 語だけのコマンドはそのまま
+  return trimmed.split(/\s+/).slice(0, 2).join(" ");
+}
+
 function ApprovalInput({ approval }: { approval: Approval }) {
   const input = (approval.input ?? {}) as Record<string, any>;
+  if (approval.source === "files" && (approval.tool === "edit_file" || approval.tool === "write_file")) {
+    const preview = <FileChangePreview tool={approval.tool} input={input} />;
+    if (preview) return <div className="approval-diff">{preview}</div>;
+  }
   if (approval.apiName === "plan__exit_plan_mode" && typeof input.plan === "string") {
     return <div className="plan-body"><Markdown text={input.plan} /></div>;
   }
@@ -370,6 +385,9 @@ function ApprovalCard({ conversationId, approval }: { conversationId: string; ap
       </div>
     );
   }
+  const rule = approval.source === "terminal" && (approval.tool === "run_command" || approval.tool === "start_background")
+    ? suggestedRule(String((approval.input as Record<string, unknown> | null)?.command ?? ""))
+    : null;
   return (
     <div className="approval">
       <div className="approval-title">
@@ -386,6 +404,7 @@ function ApprovalCard({ conversationId, approval }: { conversationId: string; ap
       <div className="approval-actions">
         {approval.allowAlways !== false && <button type="button" className="button primary" onClick={() => approve(conversationId, approval.requestId, "always")}>常に許可</button>}
         <button type="button" className={`button${approval.allowAlways === false ? " primary" : ""}`} onClick={() => approve(conversationId, approval.requestId, "once")}>{approval.allowAlways === false ? "許可" : "今回だけ許可"}</button>
+        {rule && <button type="button" className="button" title="設定の「ツールの権限」から外せます" onClick={() => approve(conversationId, approval.requestId, "rule", rule)}>「{rule}」で始まるものは今後確認しない</button>}
         <button type="button" className="button ghost" onClick={() => approve(conversationId, approval.requestId, "deny")}>拒否</button>
       </div>
       {approval.allowAlways === false && !approval.autoReason && <div className="approval-note">内容によって何でもできる操作なので、毎回確認します</div>}
@@ -650,7 +669,9 @@ function GenericToolBlock({ block, result, conversationId, live }: { block: Wire
       {open && (
         <div className="tool-card-body">
           {/* 質問は結果に問いと答えが並ぶので、入力の JSON は見せない */}
-          {source !== "ask" && <><div className="tool-section-label">入力</div><pre>{JSON.stringify(block.input ?? {}, null, 2)}</pre></>}
+          {source === "files" && (tool === "edit_file" || tool === "write_file")
+            ? <FileChangePreview tool={tool} input={block.input ?? {}} />
+            : source !== "ask" && <><div className="tool-section-label">入力</div><pre>{JSON.stringify(block.input ?? {}, null, 2)}</pre></>}
           {result && (
             <>
               {source !== "ask" && <div className="tool-section-label">結果</div>}

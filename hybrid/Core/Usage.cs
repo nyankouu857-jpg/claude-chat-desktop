@@ -57,13 +57,16 @@ public sealed class PricingTable
     public decimal? Cost(UsageRecord r)
     {
         if (!Models.TryGetValue(r.Model, out var price)) return null;
-        var promptTokens = r.Input + r.CacheWrite + r.CacheRead;
+        var promptTokens = r.Input + r.CacheWrite + r.CacheWrite1h + r.CacheRead;
         var isLong = price.LongContextThreshold is long threshold && promptTokens > threshold;
         var inputRate = isLong ? price.LongContextInput ?? price.Input : price.Input;
         var outputRate = isLong ? price.LongContextOutput ?? price.Output : price.Output;
         var cacheWriteRate = isLong ? price.LongContextCacheWrite ?? price.CacheWrite : price.CacheWrite;
         var cacheReadRate = isLong ? price.LongContextCacheRead ?? price.CacheRead : price.CacheRead;
-        var tokens = r.Input * inputRate + r.Output * outputRate + r.CacheWrite * cacheWriteRate + r.CacheRead * cacheReadRate;
+        // 1 時間持つキャッシュの書き込みは入力の 2 倍
+        var tokens = r.Input * inputRate + r.Output * outputRate + r.CacheWrite * cacheWriteRate + r.CacheWrite1h * inputRate * 2 + r.CacheRead * cacheReadRate;
+        // バッチはトークンの分が半額
+        if (r.Batch) tokens /= 2;
         return tokens / 1_000_000m + r.WebSearches * WebSearchPer1000 / 1000m;
     }
 }
@@ -77,8 +80,11 @@ public sealed class UsageRecord
     public long Input { get; set; }
     public long Output { get; set; }
     public long CacheWrite { get; set; }
+    // 1 時間持つキャッシュへの書き込み。CacheWrite には含めない
+    public long CacheWrite1h { get; set; }
     public long CacheRead { get; set; }
     public long WebSearches { get; set; }
+    public bool Batch { get; set; }
     public decimal? CostUsd { get; set; }
 }
 

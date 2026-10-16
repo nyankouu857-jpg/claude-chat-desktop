@@ -1,6 +1,6 @@
-import { Bot, ChartColumn, Shapes, Keyboard, ChevronRight, CircleArrowUp, EllipsisVertical, Folder as FolderIcon, FolderInput, FolderOpen, LoaderCircle, MessagesSquare, PanelLeft, Pencil, Plug, Plus, Settings, Star, Trash, Workflow, X } from "lucide-react";
+import { Archive, ArchiveRestore, Bot, ChartColumn, Shapes, Keyboard, ChevronRight, CircleArrowUp, EllipsisVertical, Folder as FolderIcon, FolderInput, FolderOpen, LoaderCircle, MessagesSquare, PanelLeft, Pencil, Plug, Plus, Settings, Star, Trash, Workflow, X } from "lucide-react";
 import { useState } from "react";
-import { askConfirm, deleteConversation, installUpdate, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
+import { archiveConversation, askConfirm, deleteConversation, installUpdate, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
 import { setState, useStore } from "../store";
 import type { ChatStatus, ConversationSummary } from "../types";
 import { Dialog, Dropdown, MenuItem } from "./ui";
@@ -74,6 +74,11 @@ export function ConversationMenu({ summary, onRename, onMove, align = "right" }:
           </MenuItem>
           <MenuItem icon={<Pencil size={16} />} onClick={() => { close(); onRename(); }}>名前を変更</MenuItem>
           {!summary.parentId && <MenuItem icon={<FolderInput size={16} />} onClick={() => { close(); onMove(); }}>プロジェクトへ移動</MenuItem>}
+          {!summary.parentId && (
+            <MenuItem icon={summary.archived ? <ArchiveRestore size={16} /> : <Archive size={16} />} onClick={() => { close(); void archiveConversation(summary.id, !summary.archived); }}>
+              {summary.archived ? "アーカイブから戻す" : "アーカイブ"}
+            </MenuItem>
+          )}
           <MenuItem icon={<Trash size={16} />} danger onClick={() => {
             close();
             void (async () => { if (await askConfirm("チャットを削除", `「${summary.title}」を削除しますか? この操作は取り消せません。`)) await deleteConversation(summary.id); })();
@@ -156,8 +161,8 @@ export function Sidebar() {
   for (const s of summaries) {
     if (s.parentId && known.has(s.parentId)) childrenOf.set(s.parentId, [...(childrenOf.get(s.parentId) ?? []), s]);
   }
-  // 親が消えた子は一番上に出す
-  const roots = summaries.filter((s) => !s.parentId || !known.has(s.parentId));
+  // 親が消えた子は一番上に出す。アーカイブしたものは「チャット」の画面にだけ出す
+  const roots = summaries.filter((s) => (!s.parentId || !known.has(s.parentId)) && !s.archived);
   const starredProjects = folders.filter((f) => f.starred && !f.archived);
   const starred = roots.filter((s) => s.starred);
   // claude.ai と同じく、プロジェクトのチャットも最近の項目に並べる

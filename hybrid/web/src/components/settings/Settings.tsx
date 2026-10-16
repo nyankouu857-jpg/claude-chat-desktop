@@ -1,6 +1,6 @@
 import { ArrowLeft, ExternalLink, FolderOpen, Link2, Maximize2, Minimize2, RefreshCw, TriangleAlert, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { checkUpdate, closeSettings, createShortcuts, installUpdate, openPath, openSettings, setSettingsFull, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
+import { backupNow, checkUpdate, closeSettings, createShortcuts, installUpdate, openPath, openSettings, setSettingsFull, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
 import { findBuiltin } from "../../builtins";
 import { LANGUAGES } from "../../languages";
 import { ALL_MODELS, EFFORTS } from "../../models";
@@ -97,7 +97,40 @@ function General({ settings }: { settings: Settings }) {
           if (await updateSettings({ profile })) toast("保存しました");
         }}>変更を保存</button>
       </div>
+      <Desktop settings={settings} />
       <Updates settings={settings} />
+    </>
+  );
+}
+
+function Desktop({ settings }: { settings: Settings }) {
+  const desktop = settings.desktop;
+  const row = (key: keyof Settings["desktop"], label: string, hint: string) => (
+    <div className="switch-row">
+      <div>
+        <div>{label}</div>
+        <div className="field-hint">{hint}</div>
+      </div>
+      <Toggle checked={desktop[key]} onChange={(v) => void updateSettings({ desktop: { [key]: v } })} label={label} />
+    </div>
+  );
+  return (
+    <>
+      <Section title="アプリの動き">
+        {row("closeToTray", "× で閉じたらトレイにしまう", "アプリは終わらずに通知領域に残り、予定も動き続けます。終わらせるときはトレイのアイコンを右クリックして「終了」を選びます")}
+        {row("startWithWindows", "Windows にログオンしたら起動する", "窓を出さずにトレイに入ります。予定を確実に動かしたいときに使います")}
+        {row("notifyWhenDone", "返答が終わったら通知する", "アプリを見ていないときだけ、Windows の通知で知らせます。押すとそのチャットを開きます")}
+        {row("notifyWhenWaiting", "確認や質問を待っているときに通知する", "ツールの確認や Claude からの質問で止まっているときに知らせます")}
+      </Section>
+      <Section title="チャットの整理">
+        <div className="switch-row">
+          <div>
+            <div>使っていないチャットをアーカイブする日数</div>
+            <div className="field-hint">この日数使っていないチャットを一覧から外します。消えはせず、「チャット」の画面の「アーカイブ」から戻せます。スターを付けたものは外しません。0 で外しません</div>
+          </div>
+          <NumberField value={settings.chat.archiveAfterDays} min={0} max={3650} onCommit={(v) => void updateSettings({ chat: { archiveAfterDays: v } })} />
+        </div>
+      </Section>
     </>
   );
 }
@@ -271,6 +304,13 @@ function Api({ settings }: { settings: Settings }) {
             {!COMPACT_THRESHOLDS.some((t) => t.value === chat.compactThreshold) && <option value={chat.compactThreshold}>{chat.compactThreshold.toLocaleString()} トークン</option>}
           </select>
         </div>
+        <div className="switch-row">
+          <div>
+            <div>長い会話のキャッシュを 1 時間持たせる</div>
+            <div className="field-hint">送る量がこの長さを超えた会話は、キャッシュを 5 分ではなく 1 時間残します。書き込みは少し高くなりますが、休憩を挟んでも続きを安く送れます。0 で使いません</div>
+          </div>
+          <NumberField value={chat.longCacheAbove} min={0} max={1_000_000} step={10_000} onCommit={(v) => void updateSettings({ chat: { longCacheAbove: v } })} />
+        </div>
       </Section>
 
       <SystemPrompt chat={chat} />
@@ -318,6 +358,26 @@ function SystemPrompt({ chat }: { chat: Settings["chat"] }) {
   );
 }
 
+function AllowedCommands({ settings }: { settings: Settings }) {
+  const commands = settings.terminal.allowedCommands;
+  return (
+    <Section title="確認しないコマンド" description="ここにある語で始まるコマンドは、ターミナルで確認なしに実行します。; や | でほかのコマンドをつないだものや、$ や括弧を含むものは、当てはまっても毎回確認します。コマンドの確認カードの「今後確認しない」で追加されます。">
+      {commands.length === 0 ? (
+        <div className="empty-note">まだありません</div>
+      ) : (
+        <div className="list-card">
+          {commands.map((command) => (
+            <div key={command} className="list-row">
+              <code>{command}</code>
+              <button type="button" className="button small" onClick={() => void updateSettings({ terminal: { allowedCommands: commands.filter((c) => c !== command) } })}>取り消す</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
+  );
+}
+
 function Permissions({ settings }: { settings: Settings }) {
   const mcp = useStore((s) => s.mcp);
   const entries = Object.entries(settings.toolPermissions);
@@ -332,28 +392,61 @@ function Permissions({ settings }: { settings: Settings }) {
     return builtin && title ? `${builtin.label} / ${title}` : apiName;
   };
   return (
-    <Section title="常に許可しているツール" description="ここにないツールは、Claude が使おうとするたびに確認が出ます。">
-      {entries.length === 0 ? (
-        <div className="empty-note">まだありません。ツールの確認で「常に許可」を選ぶとここに追加されます。</div>
-      ) : (
-        <div className="list-card">
-          {entries.map(([apiName]) => (
-            <div key={apiName} className="list-row">
-              <span>{describe(apiName)}</span>
-              <button type="button" className="button small" onClick={() => void revokePermission(apiName)}>取り消す</button>
-            </div>
-          ))}
+    <>
+      <Section title="常に許可しているツール" description="ここにないツールは、Claude が使おうとするたびに確認が出ます。">
+        {entries.length === 0 ? (
+          <div className="empty-note">まだありません。ツールの確認で「常に許可」を選ぶとここに追加されます。</div>
+        ) : (
+          <div className="list-card">
+            {entries.map(([apiName]) => (
+              <div key={apiName} className="list-row">
+                <span>{describe(apiName)}</span>
+                <button type="button" className="button small" onClick={() => void revokePermission(apiName)}>取り消す</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+      <AllowedCommands settings={settings} />
+    </>
+  );
+}
+
+function Backup({ settings }: { settings: Settings }) {
+  const backup = settings.backup;
+  const [folder, setFolder] = useState(backup.folder);
+  useEffect(() => setFolder(backup.folder), [backup.folder]);
+  return (
+    <Section title="自動バックアップ" description="1 日 1 回、設定と会話などのデータ (config と data) を zip にまとめて保存します。巻き戻し用の控えは大きいので入れません。戻すときは zip の中身をアプリのフォルダに上書きしてください。">
+      <div className="switch-row">
+        <div>
+          <div>自動でバックアップする</div>
         </div>
-      )}
+        <Toggle checked={backup.enabled} onChange={(v) => void updateSettings({ backup: { enabled: v } })} label="自動でバックアップする" />
+      </div>
+      <Field label="置き場所 (空ならドキュメントの ClaudeChat-backups。アプリのフォルダの外にしてください)">
+        <input className="input" value={folder} placeholder="例: D:\\Backup\\ClaudeChat" onChange={(e) => setFolder(e.target.value)} onBlur={() => { if (folder !== backup.folder) void updateSettings({ backup: { folder } }); }} />
+      </Field>
+      <div className="switch-row">
+        <div>
+          <div>残す数</div>
+          <div className="field-hint">これより古いものは消します</div>
+        </div>
+        <NumberField value={backup.keep} min={1} max={365} onCommit={(v) => void updateSettings({ backup: { keep: v } })} />
+      </div>
+      <div className="button-row">
+        <button type="button" className="button" onClick={() => void backupNow()}>今すぐバックアップ</button>
+      </div>
     </Section>
   );
 }
 
-function Data() {
+function Data({ settings }: { settings: Settings }) {
   const paths = useStore((s) => s.paths);
   const version = useStore((s) => s.version);
   return (
     <>
+      <Backup settings={settings} />
       <Section title="アプリのフォルダ" description="設定、会話履歴、使用量の記録、ログは、すべてこのフォルダの中にあります。フォルダごとコピーすればバックアップになります。">
         {paths?.isFallback && (
           <div className="warning-box">
@@ -405,7 +498,7 @@ function SettingsBody({ tab, settings }: { tab: SettingsTab; settings: Settings 
         {tab === "connectors" && <Connectors settings={settings} />}
         {tab === "permissions" && <Permissions settings={settings} />}
         {tab === "usage" && <Usage />}
-        {tab === "data" && <Data />}
+        {tab === "data" && <Data settings={settings} />}
       </div>
     </div>
   );

@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { askConfirm, compact, deleteConversation, exportConversation, navigate, starConversation, stop, stopWorkflow, toggleInfoPanel } from "../actions";
 import { setState, useStore } from "../store";
 import { Composer } from "./Composer";
+import { ChatSearch } from "./ChatSearch";
 import { MessageList } from "./Messages";
 import { MoveDialog, RenameDialog, STATUS_LABELS, StatusDot } from "./Sidebar";
 import { Dropdown, MenuItem, tokens, usd } from "./ui";
@@ -115,6 +116,7 @@ export function ChatView({ id }: { id: string }) {
         )}
         <button type="button" className={`icon-button${infoOpen ? " on" : ""}`} title={infoOpen ? "右の欄を閉じる" : "右の欄を開く"} onClick={toggleInfoPanel}><PanelRight size={17} /></button>
       </header>
+      <ChatSearch scroller={scroller} />
       <div
         className="chat-scroll"
         ref={scroller}

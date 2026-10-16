@@ -130,11 +130,16 @@ sealed class ConsolePlatform(string trashDir) : IPlatform
     public bool CanRealClick => false;
     public string? RealClick(string titleMarker, double fx, double fy) => "この環境では本物のマウスでのクリックは使えません";
     public string? CreateShortcuts() => "この環境ではショートカットを作れません";
-    public string? Notify(string title, string message)
+    public string? Notify(string title, string message, Action? onClick = null)
     {
         Console.WriteLine($"通知: {title} / {message}");
         return null;
     }
+
+    // ブラウザの画面を見ているかは分からないので、いつも見ていないことにして通知を確かめられるようにする
+    public bool IsActive => false;
+    public void ShowWindow() { }
+    public string? SetStartWithWindows(bool enabled) => "この環境では自動起動を設定できません";
 
     // ごみ箱の代わり
     public void MoveToTrash(string path)

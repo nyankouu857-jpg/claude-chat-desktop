@@ -13,6 +13,9 @@ public partial class App : Application
 {
     Mutex? singleInstance;
     public const string UpdatedFlag = "--updated";
+    // ログオン時の自動起動。窓を出さずにトレイに入る
+    public const string BackgroundFlag = "--background";
+    EventWaitHandle? showRequest;
     // 更新で起動し直したときは、前のプロセスが片付けを終えるまで待つ
     static readonly TimeSpan UpdateHandoverWait = TimeSpan.FromSeconds(30);
 
@@ -36,9 +39,11 @@ public partial class App : Application
         // 同じフォルダのデータを2つのプロセスが同時に書くと履歴が壊れる
         var mutexName = "ClaudeChat-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(paths.Root.ToLowerInvariant())))[..16];
         singleInstance = new Mutex(false, mutexName);
+        // トレイにいる方を前に出してもらう
+        showRequest = new EventWaitHandle(false, EventResetMode.AutoReset, mutexName + "-show");
         if (!TryAcquire(singleInstance, e.Args.Contains(UpdatedFlag) ? UpdateHandoverWait : TimeSpan.Zero))
         {
-            MessageBox.Show("ClaudeChat はすでに起動しています。", "ClaudeChat");
+            showRequest.Set();
             Shutdown();
             return;
         }
@@ -49,7 +54,16 @@ public partial class App : Application
         };
         WindowsPlatform.DeleteReplacedExe();
         CreateShortcutsOnFirstRun(paths);
-        new MainWindow(paths).Show();
+        var platform = new WindowsPlatform();
+        var background = e.Args.Contains(BackgroundFlag);
+        var window = new MainWindow(paths, platform, background);
+        MainWindow = window;
+        window.Show();
+        var waiting = showRequest!;
+        new Thread(() =>
+        {
+            while (waiting.WaitOne()) Dispatcher.Invoke(window.BringToFront);
+        }) { IsBackground = true }.Start();
     }
 
     // 初めて起動したときだけ作る。消したショートカットを起動のたびに作り直さないよう、作ったことを覚えておく
@@ -111,7 +125,7 @@ sealed partial class WindowsPlatform : IPlatform
             return $"exe を入れ替えられませんでした。書き込めないフォルダに置いているかもしれません: {e.Message}";
         }
         Process.Start(new ProcessStartInfo(exe, App.UpdatedFlag) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) });
-        Application.Current.Dispatcher.BeginInvoke(() => Application.Current.MainWindow?.Close());
+        Application.Current.Dispatcher.BeginInvoke(() => (Application.Current.MainWindow as MainWindow)?.Exit());
         return null;
     }
 

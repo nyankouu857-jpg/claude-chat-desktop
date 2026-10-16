@@ -155,6 +155,7 @@ public sealed class ChatHub(
             RebuildSystemPrompt = BuildPrompt,
             MaxToolTurns = Math.Max(1, defaults.MaxToolTurns),
             CompactThreshold = defaults.CompactThreshold,
+            LongCacheAbove = defaults.LongCacheAbove,
         };
     }
 
@@ -222,9 +223,33 @@ public sealed class ChatHub(
         _ = RunAsync(conversation, options, cancellation, completion, hops);
     }
 
+    // 応答中にユーザーが送った文。次のツールの切れ目で渡し、渡しきれなければ応答の後に続きとして送る
+    readonly ConcurrentDictionary<string, ConcurrentQueue<string>> interjections = new();
+
+    public bool Interject(string conversationId, string text)
+    {
+        if (!running.ContainsKey(conversationId)) return false;
+        interjections.GetOrAdd(conversationId, _ => new()).Enqueue(text);
+        return true;
+    }
+
+    IReadOnlyList<string> TakeInterjections(string conversationId)
+    {
+        var taken = new List<string>();
+        if (interjections.TryGetValue(conversationId, out var queue))
+        {
+            while (queue.TryDequeue(out var text)) taken.Add(text);
+        }
+        return taken;
+    }
+
+    // 画面を見ていないときの知らせ。Windows の通知を出すのは AppHost
+    public Action<Conversation, string, bool>? Alert { get; set; }
+
     async Task RunAsync(Conversation conversation, ChatOptions options, CancellationTokenSource cancellation, TaskCompletionSource<ChatRunResult> completion, int hops)
     {
         var id = conversation.Id;
+        options = options with { TakeInterjections = () => TakeInterjections(id) };
         ToolContext.Current = new ToolContext { Conversation = conversation, Options = options, Depth = DepthOf(conversation), Hops = hops };
         // 途中経過を順番どおりに保存する。落ちてもそこまでの会話は残る
         var saveChain = Task.CompletedTask;
@@ -323,6 +348,10 @@ public sealed class ChatHub(
     {
         try
         {
+            // サブエージェントの終わりは親が受け取るので、知らせるのは人が始めた会話だけ
+            if (conversation.ParentId is null && result.Status != ChatStatus.Aborted) Alert?.Invoke(conversation, result.Status == ChatStatus.Done ? "返答が終わりました" : "返答が失敗しました", false);
+            // 最後のツールの後に届いた指示は、ユーザーの発言として続けて送る
+            foreach (var text in TakeInterjections(conversation.Id)) await DeliverAsync(conversation, text, 0);
             // 往復の回数は引き継ぐ。知らせのたびに 0 に戻すと、知らせ合いが止まらなくなる
             var hops = RunHopsOf(conversation.Id);
             if (backgroundChildren.TryRemove(conversation.Id, out _) && conversation.ParentId is { } parentId && await conversations.GetAsync(parentId) is { } parent)
@@ -609,7 +638,9 @@ public sealed class ChatHub(
             hub.EmitStatus(conversation);
             using var registration = cancellationToken.Register(() => decision.TrySetCanceled(cancellationToken));
             // 通知のフックが遅くても、確認と停止は待たせない
-            _ = hub.NotifyAsync(conversation, (string?)request["kind"] == "question" ? "Claude からの質問" : $"{request["title"] ?? request["tool"]} の確認待ち");
+            var waiting = (string?)request["kind"] == "question" ? "Claude からの質問" : $"{request["title"] ?? request["tool"]} の確認待ち";
+            _ = hub.NotifyAsync(conversation, waiting);
+            hub.Alert?.Invoke(conversation, waiting, true);
             try
             {
                 return await decision.Task;
@@ -639,10 +670,22 @@ public sealed class ChatHub(
 
     Task NotifyAsync(Conversation conversation, string message) => hooks.RunNotificationAsync(conversation, message);
 
-    public void Approve(string requestId, string decision)
+    public void Approve(string requestId, string decision, string? rule = null)
     {
-        if (decision is not ("once" or "always" or "deny")) throw new InvalidOperationException("decision が不正です");
+        if (decision is not ("once" or "always" or "deny" or "rule")) throw new InvalidOperationException("decision が不正です");
         if (!approvals.TryGetValue(requestId, out var pending)) return;
+        if (decision == "rule")
+        {
+            // ルールはコマンドの確認でだけ受け付け、そのコマンド自身が当てはまるものに限る
+            var command = (string?)pending.Request["input"]?["command"] ?? "";
+            if ((string?)pending.Request["apiName"] is not (TerminalToolProvider.RunCommandApiName or TerminalToolProvider.StartBackgroundApiName)
+                || rule is null || !TerminalToolProvider.IsPlainCommand(rule.Trim()) || !TerminalToolProvider.MatchesRule(command, [rule]))
+            {
+                throw new InvalidOperationException("このコマンドには、そのルールは使えません");
+            }
+            pending.Decision.TrySetResult("rule:" + rule.Trim());
+            return;
+        }
         // 質問を「許可」で抜けると、答えの代わりに once が届いてしまう
         if (IsQuestion(pending.Request) && decision != "deny") throw new InvalidOperationException("質問には回答で答えてください");
         pending.Decision.TrySetResult(decision);

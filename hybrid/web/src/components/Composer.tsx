@@ -1,6 +1,6 @@
 import { ArrowUp, Check, ChevronDown, ChevronRight, Circle, CircleDot, Code, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Quote, Settings2, Square, Telescope, Type, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { clearPrefill, extractDocumentText, openSettings, send, setChoice, setMode, setQuote, stop, toast } from "../actions";
+import { clearPrefill, extractDocumentText, interject, openSettings, send, setChoice, setMode, setQuote, stop, toast } from "../actions";
 import { BUILTIN_SOURCES } from "../builtins";
 import { allCommands, runCommand } from "../commands";
 import { EFFORTS, MODELS, OTHER_MODELS, defaultEffortOf, effortsOf, modelLabel } from "../models";
@@ -473,8 +473,26 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
       if (outcome !== null) return;
     }
     if (running) {
-      if (trimmed.startsWith("/")) toast("応答中に使えるのは /btw だけです。終わってから使ってください", "error");
-      return;
+      if (trimmed.startsWith("/")) {
+        toast("応答中に使えるのは /btw だけです。終わってから使ってください", "error");
+        return;
+      }
+      if (attachments.length > 0) {
+        toast("応答中に送れるのは文だけです。添付は終わってから送ってください", "error");
+        return;
+      }
+      // Claude Code と同じく、止めずに次のツールの切れ目で届ける
+      if (conversationId) {
+        setSending(true);
+        const result = await interject(conversationId, trimmed);
+        setSending(false);
+        if (!result) return;
+        if (result.queued) {
+          setText("");
+          toast("次の区切りで Claude に届けます");
+          return;
+        }
+      }
     }
     if (researching) {
       toast("リサーチの途中です。結果が届くまで待つか、止めてから送ってください", "error");
@@ -534,7 +552,7 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
         ref={textarea}
         rows={1}
         value={text}
-        placeholder={research ? "何を調べますか?" : conversationId ? "Claude に返信... (/ でコマンド)" : "今日はどんなお手伝いをしましょうか?"}
+        placeholder={research ? "何を調べますか?" : running ? "応答中でも送れます。次の区切りで Claude に届けます" : conversationId ? "Claude に返信... (/ でコマンド)" : "今日はどんなお手伝いをしましょうか?"}
         onChange={(e) => setText(e.target.value)}
         onPaste={(e) => {
           const files = [...e.clipboardData.files];

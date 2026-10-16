@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace ClaudeChat.Core;
 
 // claude.ai のプロジェクトにあたる。会話をまとめ、専用の指示とチャット同士の通信範囲を持つ
@@ -11,6 +13,8 @@ public sealed class Folder
     public bool Archived { get; set; }
     // folder: 同じフォルダの中だけ / all: どのチャットとも / none: 通信しない
     public string MessagingScope { get; set; } = "folder";
+    // このプロジェクトで新しいチャットを始めるときの入力欄の設定 (モデル、思考の深さ、ツール)。画面だけが使う
+    public JsonObject? Defaults { get; set; }
     public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 }
 

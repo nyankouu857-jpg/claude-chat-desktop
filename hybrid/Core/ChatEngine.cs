@@ -134,7 +134,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     Display = Display.Summarized,
                     BlockBinding = new BetaThinkingBlockBinding { PrefixMismatchBehavior = BetaThinkingPrefixMismatchBehavior.DropBlock },
                 },
-            CacheControl = new BetaCacheControlEphemeral(),
+            CacheControl = UsesLongCache(conversation, options) ? new BetaCacheControlEphemeral { Ttl = Ttl.Ttl1h } : new BetaCacheControlEphemeral(),
         };
         var format = options.OutputSchema is { } schema ? FromJson<BetaJsonOutputFormat>(new JsonObject { ["type"] = "json_schema", ["schema"] = schema.DeepClone() }) : null;
         // 思考の量をトークン数で決める世代は effort を受け付けないので、項目ごと送らない
@@ -231,6 +231,64 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         JsonObject? streamUsage = null;
         // コンテナは時間が経つと消えるので、断られたら 1 度だけ新しく作り直す
         var containerRetried = false;
+        var transientRetries = 0;
+
+        async Task<BetaMessage> StreamAsync(MessageCreateParams request)
+        {
+            var aggregator = new BetaMessageContentAggregator();
+            var toolInputJson = new Dictionary<int, string>();
+            var stream = client.Beta.Messages.CreateStreaming(request, cancellationToken);
+            await using var events = stream.CollectAsync(aggregator).GetAsyncEnumerator(cancellationToken);
+            if (!await events.MoveNextAsync()) throw new InvalidOperationException("API から空の応答が返りました");
+            do
+            {
+                var streamEvent = events.Current;
+                if (streamEvent.TryPickStart(out var messageStart))
+                {
+                    streamUsage = ToWire(messageStart.Message.Usage);
+                }
+                else if (streamEvent.TryPickDelta(out var messageDelta) && streamUsage is not null)
+                {
+                    foreach (var (key, value) in ToWire(messageDelta.Usage).Where(kv => kv.Value is not null).ToList()) streamUsage[key] = value!.DeepClone();
+                }
+                else if (streamEvent.TryPickContentBlockStart(out var start))
+                {
+                    var index = (int)start.Index;
+                    var block = ToWire(start.ContentBlock);
+                    if ((string?)block["type"] == "text") partialText[index] = "";
+                    emit(new JsonObject { ["type"] = "block-start", ["index"] = index, ["block"] = block });
+                }
+                else if (streamEvent.TryPickContentBlockDelta(out var delta))
+                {
+                    var index = (int)delta.Index;
+                    if (delta.Delta.TryPickText(out var text))
+                    {
+                        partialText[index] = partialText.GetValueOrDefault(index, "") + text.Text;
+                        emit(new JsonObject { ["type"] = "delta", ["index"] = index, ["text"] = text.Text });
+                    }
+                    else if (delta.Delta.TryPickThinking(out var thinking))
+                    {
+                        emit(new JsonObject { ["type"] = "delta", ["index"] = index, ["text"] = thinking.Thinking });
+                    }
+                    else if (delta.Delta.TryPickCompaction(out var compaction))
+                    {
+                        // 要約は 1 回でまとめて届く。画面で「要約に失敗」と出さないよう流す
+                        if ((string?)ToWire(compaction)["content"] is { } summary) emit(new JsonObject { ["type"] = "delta", ["index"] = index, ["text"] = summary });
+                    }
+                    else if (delta.Delta.TryPickInputJson(out var inputJson))
+                    {
+                        toolInputJson[index] = toolInputJson.GetValueOrDefault(index, "") + inputJson.PartialJson;
+                    }
+                }
+                else if (streamEvent.TryPickContentBlockStop(out var stop) && toolInputJson.TryGetValue((int)stop.Index, out var json))
+                {
+                    emit(new JsonObject { ["type"] = "block-stop", ["index"] = (int)stop.Index, ["input"] = TryParse(json) });
+                }
+            }
+            while (await events.MoveNextAsync());
+            return aggregator.Message();
+        }
+
         try
         {
             var mode = conversation.PermissionMode;
@@ -254,17 +312,14 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     costConfirmed = true;
                 }
                 var toolSpecs = tools.GetTools(options.EnabledSources);
-                var aggregator = new BetaMessageContentAggregator();
-                var toolInputJson = new Dictionary<int, string>();
                 partialText.Clear();
                 emit(new JsonObject { ["type"] = "message-start" });
-
-                var stream = client.Beta.Messages.CreateStreaming(BuildRequest(conversation, options, toolSpecs), cancellationToken);
-                IAsyncEnumerator<BetaRawMessageStreamEvent> events;
+                var request = BuildRequest(conversation, options, toolSpecs);
+                BetaMessage message;
                 try
                 {
-                    events = stream.CollectAsync(aggregator).GetAsyncEnumerator(cancellationToken);
-                    if (!await events.MoveNextAsync()) throw new InvalidOperationException("API から空の応答が返りました");
+                    message = options.Batch ? await SendBatchAsync(conversation, request, emit, cancellationToken) : await StreamAsync(request);
+                    transientRetries = 0;
                 }
                 catch (AnthropicBadRequestException e) when (!containerRetried && conversation.ContainerId is not null && e.Message.Contains("container", StringComparison.OrdinalIgnoreCase))
                 {
@@ -273,55 +328,18 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     turn--;
                     continue;
                 }
-                await using var _ = events;
-                do
+                catch (Exception e) when (IsTransient(e) && transientRetries < TransientRetryDelays.Length && !cancellationToken.IsCancellationRequested)
                 {
-                    var streamEvent = events.Current;
-                    if (streamEvent.TryPickStart(out var messageStart))
-                    {
-                        streamUsage = ToWire(messageStart.Message.Usage);
-                    }
-                    else if (streamEvent.TryPickDelta(out var messageDelta) && streamUsage is not null)
-                    {
-                        foreach (var (key, value) in ToWire(messageDelta.Usage).Where(kv => kv.Value is not null).ToList()) streamUsage[key] = value!.DeepClone();
-                    }
-                    else if (streamEvent.TryPickContentBlockStart(out var start))
-                    {
-                        var index = (int)start.Index;
-                        var block = ToWire(start.ContentBlock);
-                        if ((string?)block["type"] == "text") partialText[index] = "";
-                        emit(new JsonObject { ["type"] = "block-start", ["index"] = index, ["block"] = block });
-                    }
-                    else if (streamEvent.TryPickContentBlockDelta(out var delta))
-                    {
-                        var index = (int)delta.Index;
-                        if (delta.Delta.TryPickText(out var text))
-                        {
-                            partialText[index] = partialText.GetValueOrDefault(index, "") + text.Text;
-                            emit(new JsonObject { ["type"] = "delta", ["index"] = index, ["text"] = text.Text });
-                        }
-                        else if (delta.Delta.TryPickThinking(out var thinking))
-                        {
-                            emit(new JsonObject { ["type"] = "delta", ["index"] = index, ["text"] = thinking.Thinking });
-                        }
-                        else if (delta.Delta.TryPickCompaction(out var compaction))
-                        {
-                            // 要約は 1 回でまとめて届く。画面で「要約に失敗」と出さないよう流す
-                            if ((string?)ToWire(compaction)["content"] is { } summary) emit(new JsonObject { ["type"] = "delta", ["index"] = index, ["text"] = summary });
-                        }
-                        else if (delta.Delta.TryPickInputJson(out var inputJson))
-                        {
-                            toolInputJson[index] = toolInputJson.GetValueOrDefault(index, "") + inputJson.PartialJson;
-                        }
-                    }
-                    else if (streamEvent.TryPickContentBlockStop(out var stop) && toolInputJson.TryGetValue((int)stop.Index, out var json))
-                    {
-                        emit(new JsonObject { ["type"] = "block-stop", ["index"] = (int)stop.Index, ["input"] = TryParse(json) });
-                    }
+                    // 途中まで流れた分も課金されている。捨てる前に記録し、画面の途中の文も消す
+                    await RecordInterruptedUsageAsync(conversation, options.Model, streamUsage);
+                    streamUsage = null;
+                    emit(new JsonObject { ["type"] = "discard" });
+                    var wait = TransientRetryDelays[transientRetries++];
+                    Notice(emit, $"API が混み合っているか、接続が切れました。{wait.TotalSeconds:0} 秒待ってやり直します ({transientRetries}/{TransientRetryDelays.Length})");
+                    await Task.Delay(wait, cancellationToken);
+                    turn--;
+                    continue;
                 }
-                while (await events.MoveNextAsync());
-
-                var message = aggregator.Message();
                 var content = new JsonArray(message.Content.Select(b => (JsonNode)ToWire(b)).ToArray());
                 // 画面の「↓ 1.2k tokens」を、流れてきた文字からの見積もりから本当の数に置き換える
                 emit(new JsonObject { ["type"] = "usage", ["output"] = message.Usage.OutputTokens });
@@ -341,7 +359,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 partialText.Clear();
                 emit(new JsonObject { ["type"] = "message", ["message"] = assistant.DeepClone() });
                 streamUsage = null;
-                await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, "chat", ToWire(message.Usage));
+                await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, "chat", ToWire(message.Usage), options.Batch);
                 if (message.Container?.ID is { } container) conversation.ContainerId = container;
                 await DownloadFilesAsync(conversation, content, emit, cancellationToken);
 
@@ -359,7 +377,17 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     var user = new JsonObject { ["role"] = "user", ["content"] = results };
                     conversation.Append(user);
                     emit(new JsonObject { ["type"] = "message", ["message"] = user.DeepClone() });
-                    if (stopReason == "tool_use") continue;
+                    if (stopReason == "tool_use")
+                    {
+                        // 応答中に送られた指示は、ツールの結果の後ろに続けて渡す。API は続いた user をひとつにまとめて読む
+                        foreach (var text in options.TakeInterjections?.Invoke() ?? [])
+                        {
+                            var note = new JsonObject { ["role"] = "user", ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text }) };
+                            conversation.Append(note);
+                            emit(new JsonObject { ["type"] = "message", ["message"] = note.DeepClone() });
+                        }
+                        continue;
+                    }
                 }
 
                 if (stopReason == "max_tokens") Notice(emit, "出力上限に達したため途中で終わっています");
@@ -599,6 +627,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 : null;
         }
         if (spec.AutoApprove || readOnlyCall || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return null;
+        if (spec.ApiName is TerminalToolProvider.RunCommandApiName or TerminalToolProvider.StartBackgroundApiName
+            && TerminalToolProvider.MatchesRule((string?)input["command"] ?? "", current.Terminal.AllowedCommands)) return null;
 
         string? autoReason = null;
         if (conversation.PermissionMode == "auto" && !AlwaysAskInAuto(spec))
@@ -623,6 +653,15 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         }, cancellationToken);
 
         if (decision == "always" && spec.AllowAlways) await settings.UpdateAsync(s => s.ToolPermissions[spec.ApiName] = "always");
+        if (decision.StartsWith("rule:"))
+        {
+            var rule = decision["rule:".Length..];
+            await settings.UpdateAsync(s =>
+            {
+                if (!s.Terminal.AllowedCommands.Contains(rule)) s.Terminal.AllowedCommands.Add(rule);
+            });
+            return null;
+        }
         if (decision is "once" or "always") return null;
         return spec.ApiName == PlanToolProvider.ExitPlanMode
             ? "ユーザーは計画を承認しませんでした。計画モードのまま、どこを変えればよいかユーザーに確認してください"
@@ -697,13 +736,15 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
     // 要約やフォールバックの分は iterations にしか載らないので、あればそちらを使う。
     // 長い入力の割増はリクエストごとに決まるので、まとめずに 1 回ずつ記録する
-    async Task RecordUsageAsync(Conversation conversation, string model, string kind, JsonObject usage)
+    async Task RecordUsageAsync(Conversation conversation, string model, string kind, JsonObject usage, bool batch = false)
     {
         var iterations = (usage["iterations"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
         if (iterations.Count == 0) iterations = [usage];
         var webSearches = (long?)usage["server_tool_use"]?["web_search_requests"] ?? 0;
         foreach (var iteration in iterations)
         {
+            var written = (long?)iteration["cache_creation_input_tokens"] ?? 0;
+            var written1h = Math.Min(written, (long?)iteration["cache_creation"]?["ephemeral_1h_input_tokens"] ?? 0);
             var record = await ledger.RecordAsync(new UsageRecord
             {
                 At = DateTimeOffset.UtcNow,
@@ -712,18 +753,20 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 Model = (string?)iteration["model"] ?? model,
                 Input = (long?)iteration["input_tokens"] ?? 0,
                 Output = (long?)iteration["output_tokens"] ?? 0,
-                CacheWrite = (long?)iteration["cache_creation_input_tokens"] ?? 0,
+                CacheWrite = written - written1h,
+                CacheWrite1h = written1h,
+                Batch = batch,
                 CacheRead = (long?)iteration["cache_read_input_tokens"] ?? 0,
                 WebSearches = webSearches,
             });
             webSearches = 0;
-            conversation.Usage.Input += record.Input + record.CacheWrite;
+            conversation.Usage.Input += record.Input + written;
             conversation.Usage.Output += record.Output;
             conversation.Usage.CacheRead += record.CacheRead;
-            conversation.Usage.CacheWrite += record.CacheWrite;
+            conversation.Usage.CacheWrite += written;
             conversation.Usage.CostUsd += record.CostUsd ?? 0;
             // 右の「コンテキスト」用に、最後に送った会話の大きさを覚えておく
-            if (kind == "chat") conversation.Usage.Context = record.Input + record.CacheRead + record.CacheWrite;
+            if (kind == "chat") conversation.Usage.Context = record.Input + record.CacheRead + written;
         }
     }
 
@@ -810,8 +853,63 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         return (conversation.Usage.Context, messages.Skip(lastAssistant).Sum(m => EstimateTokens(m.ToJsonString(Unescaped))));
     }
 
-    // プロンプトのキャッシュ (ephemeral) が残る時間
+    // プロンプトのキャッシュ (ephemeral) が残る時間。長い会話は 1 時間持たせる
     static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
+    static readonly TimeSpan LongCacheLifetime = TimeSpan.FromHours(1);
+
+    // 書き込みは 5 分のものより高いが、休憩を挟んで同じ長い会話を続けても読み直しが安いまま
+    static bool UsesLongCache(Conversation conversation, ChatOptions options) =>
+        options.LongCacheAbove > 0 && conversation.Usage.Context >= options.LongCacheAbove;
+
+    // SDK 自身も数回やり直すので、それでも駄目だったときにもう少し長く待つ
+    static readonly TimeSpan[] TransientRetryDelays = [TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(180)];
+
+    // 混雑 (529)、サーバーの不調 (5xx)、レート制限、接続切れ、流れている途中の error イベント
+    static bool IsTransient(Exception e) =>
+        e is Anthropic5xxException or AnthropicRateLimitException or AnthropicIOException or AnthropicSseException
+        || (e is AnthropicApiException api && (int)api.StatusCode is 408 or 409 or 529);
+
+    // 急がない送信を Message Batches で送る。料金は半分で、結果が返るまで数分から長いと 24 時間かかる
+    static readonly TimeSpan BatchPollInterval = TimeSpan.FromSeconds(30);
+
+    async Task<BetaMessage> SendBatchAsync(Conversation conversation, MessageCreateParams request, Action<JsonObject> emit, CancellationToken cancellationToken)
+    {
+        // バッチは Fallbacks を受け付けないことがあるので外す。stream は付けない
+        var body = request.RawBodyData.Where(kv => kv.Key != "fallbacks").ToDictionary(kv => kv.Key, kv => kv.Value);
+        var batch = await client.Beta.Messages.Batches.Create(new Anthropic.Models.Beta.Messages.Batches.BatchCreateParams
+        {
+            Requests = [new() { CustomID = "chat", Params = Anthropic.Models.Beta.Messages.Batches.Params.FromRawUnchecked(body) }],
+            Betas = request.Betas,
+        }, cancellationToken);
+        Notice(emit, "バッチで送りました (料金は半分)。結果が返るまで待っています");
+        try
+        {
+            while (batch.ProcessingStatus.Raw() != "ended")
+            {
+                await Task.Delay(BatchPollInterval, cancellationToken);
+                batch = await client.Beta.Messages.Batches.Retrieve(batch.ID, new(), cancellationToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 止めたあとまで処理と課金が進まないように
+            try
+            {
+                await client.Beta.Messages.Batches.Cancel(batch.ID, new(), CancellationToken.None);
+            }
+            catch (Exception)
+            {
+            }
+            throw;
+        }
+        await foreach (var response in client.Beta.Messages.Batches.ResultsStreaming(batch.ID, new(), cancellationToken))
+        {
+            if (response.Result.TryPickSucceeded(out var succeeded)) return succeeded.Message;
+            if (response.Result.TryPickErrored(out var errored)) throw new InvalidOperationException($"バッチの送信が失敗しました: {Json.ToNode(errored.Error)?["error"]?["message"] ?? Json.ToNode(errored.Error)}");
+            throw new InvalidOperationException("バッチの送信が期限切れか取り消しで終わりました");
+        }
+        throw new InvalidOperationException("バッチの結果が空でした");
+    }
 
     // 今日や今月の合計が上限に届いていたら、その理由
     async Task<string?> BudgetLimitAsync()
@@ -830,10 +928,19 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         var limit = (await settings.GetAsync()).Budget.ConfirmRequestUsd;
         if (limit <= 0) return null;
         var (previous, added) = PromptSize(conversation);
-        // 5 分以内に送った会話は、前回までの分がキャッシュから安く読まれる。それ以外は書き込みの単価
-        var warm = await ledger.LastChatRequestAsync(conversation.Id) is { } last && DateTimeOffset.UtcNow - last < CacheLifetime;
+        // キャッシュが残っている会話は、前回までの分が安く読まれる。それ以外は書き込みの単価
+        var longCache = UsesLongCache(conversation, options);
+        var warm = await ledger.LastChatRequestAsync(conversation.Id) is { } last && DateTimeOffset.UtcNow - last < (longCache ? LongCacheLifetime : CacheLifetime);
         var cached = warm ? previous : 0;
-        var cost = (await ledger.GetPricingAsync()).Cost(new UsageRecord { Model = options.Model, CacheRead = cached, CacheWrite = previous + added - cached });
+        var written = previous + added - cached;
+        var cost = (await ledger.GetPricingAsync()).Cost(new UsageRecord
+        {
+            Model = options.Model,
+            CacheRead = cached,
+            CacheWrite = longCache ? 0 : written,
+            CacheWrite1h = longCache ? written : 0,
+            Batch = options.Batch,
+        });
         if (cost is not { } usd || usd < limit) return null;
         var decision = await gate.RequestAsync(new JsonObject
         {

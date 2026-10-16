@@ -1,6 +1,7 @@
 import { Archive, ArchiveRestore, ArrowLeft, EllipsisVertical, FileText, Pencil, Plus, Search, Star, Trash, Type, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { addKnowledge, askConfirm, deleteFolder, deleteKnowledge, listKnowledge, navigate, readKnowledge, saveFolder, toast } from "../actions";
+import { addKnowledge, askConfirm, deleteFolder, deleteKnowledge, listKnowledge, navigate, readKnowledge, saveFolder, setChoice, toast } from "../actions";
+import { ALL_MODELS } from "../models";
 import { setState, useStore } from "../store";
 import type { Folder, KnowledgeFile } from "../types";
 import { Composer, KNOWLEDGE_ACCEPT, fileToText } from "./Composer";
@@ -176,11 +177,41 @@ function Knowledge({ folderId }: { folderId: string }) {
   );
 }
 
+function ProjectDefaults({ folder }: { folder: Folder }) {
+  const choice = useStore((s) => s.choice);
+  const defaults = folder.defaults;
+  const describe = () => {
+    if (!defaults) return "決めていません。入力欄で選んだものがそのまま使われます";
+    const model = ALL_MODELS.find((m) => m.id === defaults.model)?.label ?? defaults.model;
+    const tools = [defaults.webSearch && "Web 検索", defaults.codeExecution && "コード実行"].filter(Boolean).join("、");
+    const off = defaults.disabledSources?.length ? `、オフにしたツール ${defaults.disabledSources.length} 個` : "";
+    return `${model} ・ 思考 ${defaults.effort}${tools ? ` ・ ${tools}` : ""}${off}`;
+  };
+  return (
+    <section className="project-side-card">
+      <div className="project-side-head"><span>新しいチャットの既定</span></div>
+      <div className="field-hint">{describe()}</div>
+      <div className="button-row">
+        <button type="button" className="button small" onClick={() => void saveFolder({
+          ...folder,
+          defaults: { model: choice.model, effort: choice.effort, webSearch: choice.webSearch, webFetch: choice.webFetch, codeExecution: choice.codeExecution, disabledSources: choice.disabledSources },
+        })}>今の入力欄の設定を既定にする</button>
+        {defaults && <button type="button" className="button small ghost" onClick={() => void saveFolder({ ...folder, defaults: null })}>消す</button>}
+      </div>
+    </section>
+  );
+}
+
 export function ProjectPage({ id }: { id: string }) {
   const folder = useStore((s) => s.folders.find((f) => f.id === id));
   const memoryOn = useStore((s) => !!s.settings?.features.memory);
   const summaries = useStore((s) => s.summaries);
   const chats = summaries.filter((c) => c.folderId === id && !c.parentId);
+  const defaults = folder?.defaults;
+  // プロジェクトを開いたら、ここで始めるチャットの入力欄をこのプロジェクトの既定にそろえる
+  useEffect(() => {
+    if (defaults) setChoice(defaults);
+  }, [id]);
 
   if (!folder) {
     return (
@@ -250,6 +281,7 @@ export function ProjectPage({ id }: { id: string }) {
               {folder.instructions.trim() || "Claude への指示を書くと、このプロジェクトのすべてのチャットに渡します"}
             </div>
           </section>
+          <ProjectDefaults folder={folder} />
           <Knowledge folderId={folder.id} />
           {memoryOn && (
             <section className="project-side-card">

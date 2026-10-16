@@ -213,6 +213,7 @@ function ConfirmDialog({ dialog }: { dialog: Extract<DialogState, { kind: "confi
 const SHORTCUTS: [string, string][] = [
   ["Ctrl + Shift + O", "新しいチャット"],
   ["Ctrl + K", "チャットを検索"],
+  ["Ctrl + F", "開いている会話の中を探す"],
   ["Ctrl + Shift + S", "サイドバーを開く・閉じる"],
   ["Ctrl + /", "ショートカットの一覧"],
   ["Esc", "応答を止める (入力欄で)"],

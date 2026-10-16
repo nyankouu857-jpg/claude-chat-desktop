@@ -16,6 +16,12 @@ public sealed record ChatOptions
     public string? SystemPrompt { get; init; }
     public int MaxToolTurns { get; init; } = 30;
     public int CompactThreshold { get; init; } = 150_000;
+    // 送る量がこれ以上の会話はキャッシュを 1 時間持たせる。0 で使わない
+    public int LongCacheAbove { get; init; } = 100_000;
+    // 予定の実行などの急がない送信を Message Batches で送る
+    public bool Batch { get; init; }
+    // 応答中に送られた指示を受け取る。受け取った分は消える
+    public Func<IReadOnlyList<string>>? TakeInterjections { get; init; }
     // ワークフローのエージェントに決まった形の JSON で答えさせる
     public JsonObject? OutputSchema { get; init; }
     public Func<string>? RebuildSystemPrompt { get; init; }

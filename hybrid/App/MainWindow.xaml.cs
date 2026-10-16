@@ -17,17 +17,21 @@ public partial class MainWindow : Window
     const string AppOrigin = "https://app.claudechat";
 
     readonly AppPaths paths;
+    readonly WindowsPlatform platform;
     readonly Dictionary<string, string> resources;
     AppHost? host;
+    // トレイの「終了」や更新など、本当に終わらせるとき。× はトレイにしまうだけ
+    bool exiting;
     // 片付けを待つ上限。止まったものを待ち続けて、閉じたはずのアプリを残さない
     static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(3);
 
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 
-    public MainWindow(AppPaths paths)
+    internal MainWindow(AppPaths paths, WindowsPlatform platform, bool background)
     {
         this.paths = paths;
+        this.platform = platform;
         // MSBuild が付ける埋め込み名は区切りが \ になることがあるので / にそろえて引く
         resources = Assembly.GetExecutingAssembly().GetManifestResourceNames()
             .Where(n => n.StartsWith("web/"))
@@ -37,9 +41,30 @@ public partial class MainWindow : Window
         Background = new SolidColorBrush(dark ? Color.FromRgb(0x26, 0x26, 0x24) : Color.FromRgb(0xFA, 0xF9, 0xF5));
         Browser.DefaultBackgroundColor = dark ? System.Drawing.Color.FromArgb(0x26, 0x26, 0x24) : System.Drawing.Color.FromArgb(0xFA, 0xF9, 0xF5);
         SourceInitialized += (_, _) => UseDarkTitleBar(dark);
-        Loaded += async (_, _) => await InitializeAsync();
+        if (background)
+        {
+            // 予定を動かすために画面も読み込むが、窓は見せない
+            ShowInTaskbar = false;
+            WindowState = WindowState.Minimized;
+        }
+        Loaded += async (_, _) =>
+        {
+            platform.ShowTrayIcon(this, BringToFront, Exit);
+            await InitializeAsync();
+            if (!background) return;
+            Hide();
+            WindowState = WindowState.Normal;
+            ShowInTaskbar = true;
+        };
         Closing += async (_, e) =>
         {
+            if (!exiting && host?.CloseToTray == true)
+            {
+                e.Cancel = true;
+                Hide();
+                return;
+            }
+            platform.RemoveTrayIcon();
             if (host is null) return;
             // MCP サーバーの子プロセスを残さないよう、片付けてから終わる
             e.Cancel = true;
@@ -58,6 +83,19 @@ public partial class MainWindow : Window
             // × はアプリの終了。裏で動き続けるスレッドが残っていても、プロセスごと終わらせる
             Environment.Exit(0);
         };
+    }
+
+    public void BringToFront()
+    {
+        Show();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    public void Exit()
+    {
+        exiting = true;
+        Close();
     }
 
     static bool PrefersDarkTheme()
@@ -139,7 +177,7 @@ public partial class MainWindow : Window
             if (e.Uri.StartsWith("http://") || e.Uri.StartsWith("https://")) WindowsPlatform.OpenUrl(e.Uri);
         };
 
-        host = new AppHost(paths, new DpapiProtector(), new WindowsPlatform(), json =>
+        host = new AppHost(paths, new DpapiProtector(), platform, json =>
         {
             // UI スレッドのキューは先入れ先出しなので、通知の順番が保たれる
             Dispatcher.InvokeAsync(() => core.PostWebMessageAsString(json));

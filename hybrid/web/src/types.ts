@@ -55,6 +55,7 @@ export interface Conversation {
   id: string;
   title: string;
   starred: boolean;
+  archived?: boolean;
   model?: string;
   createdAt: number;
   updatedAt: number;
@@ -81,6 +82,7 @@ export interface ConversationSummary {
   id: string;
   title: string;
   starred: boolean;
+  archived?: boolean;
   updatedAt: number;
   preview: string;
   folderId?: string | null;
@@ -98,6 +100,8 @@ export interface Folder {
   archived: boolean;
   messagingScope: "folder" | "all" | "none";
   createdAt: number;
+  // このプロジェクトで新しいチャットを始めるときの入力欄の設定
+  defaults?: { model?: string; effort?: Effort; webSearch?: boolean; webFetch?: boolean; codeExecution?: boolean; disabledSources?: string[] } | null;
 }
 
 export interface WorkflowAgent {
@@ -146,6 +150,7 @@ export interface Schedule {
   lastRunAt?: number | null;
   expiresAt?: number | null;
   createdAt: number;
+  batch?: boolean;
 }
 
 export interface HookEntry {
@@ -183,6 +188,8 @@ export interface Settings {
     showThinking: boolean;
     maxToolTurns: number;
     compactThreshold: number;
+    longCacheAbove: number;
+    archiveAfterDays: number;
     systemPrompt: string;
     appendAppContext: boolean;
     webSearchMaxUses: number;
@@ -193,11 +200,13 @@ export interface Settings {
     outputStyle: string;
   };
   files: FileAccess;
-  terminal: { enabled: boolean; timeoutSeconds: number };
+  terminal: { enabled: boolean; timeoutSeconds: number; allowedCommands: string[] };
   programs: { enabled: boolean };
   browser: { enabled: boolean; executablePath?: string | null; mode: "dedicated" | "extension" };
   agents: { enabled: boolean; maxConcurrent: number; maxWorkflowAgents: number; maxMessageHops: number; autoApproveChildren: boolean; deleteFinishedChildren: boolean };
   updates: { checkOnStartup: boolean; autoInstall: boolean };
+  desktop: { closeToTray: boolean; startWithWindows: boolean; notifyWhenDone: boolean; notifyWhenWaiting: boolean };
+  backup: { enabled: boolean; folder: string; keep: number };
   budget: { confirmRequestUsd: number; dailyLimitUsd: number; monthlyLimitUsd: number };
   features: { memory: boolean; confirmMemoryWrites: boolean; artifacts: boolean; chatSearch: boolean; disabledSkills: string[]; allowBypassMode: boolean };
   hooks: Record<string, HookEntry[]>;

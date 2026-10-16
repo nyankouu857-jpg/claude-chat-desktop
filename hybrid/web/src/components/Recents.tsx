@@ -1,6 +1,6 @@
 import { Plus, Search, Star } from "lucide-react";
 import { useEffect, useState } from "react";
-import { askConfirm, deleteConversation, navigate, searchConversations } from "../actions";
+import { archiveConversation, askConfirm, deleteConversation, navigate, searchConversations } from "../actions";
 import { useStore } from "../store";
 import type { ConversationSummary } from "../types";
 import { ConversationMenu, MoveDialog, RenameDialog } from "./Sidebar";
@@ -34,7 +34,10 @@ function Row({ summary, snippet, selecting, selected, onSelect }: { summary: Con
 const SEARCH_DELAY_MS = 250;
 
 export function Recents() {
-  const summaries = useStore((s) => s.summaries);
+  const all = useStore((s) => s.summaries);
+  const [showArchived, setShowArchived] = useState(false);
+  const summaries = all.filter((s) => !!s.archived === showArchived);
+  const archivedCount = all.filter((s) => s.archived).length;
   const [query, setQuery] = useState("");
   const [bodyHits, setBodyHits] = useState<Record<string, string> | null>(null);
   const [selecting, setSelecting] = useState(false);
@@ -68,6 +71,11 @@ export function Recents() {
     setSelected(new Set());
     setSelecting(false);
   };
+  const archiveSelected = async () => {
+    for (const id of selected) await archiveConversation(id, !showArchived);
+    setSelected(new Set());
+    setSelecting(false);
+  };
 
   return (
     <div className="page">
@@ -81,13 +89,19 @@ export function Recents() {
           <input autoFocus placeholder="チャットを検索..." value={query} onChange={(e) => setQuery(e.target.value)} />
         </label>
         <div className="recent-toolbar">
-          <span className="recent-count">{q ? `${filtered.length} 件見つかりました` : `${summaries.length} 件のチャット`}</span>
+          <span className="recent-count">{q ? `${filtered.length} 件見つかりました` : `${summaries.length} 件の${showArchived ? "アーカイブしたチャット" : "チャット"}`}</span>
+          {(archivedCount > 0 || showArchived) && (
+            <button type="button" className="link-button" onClick={() => { setShowArchived((v) => !v); setSelected(new Set()); }}>
+              {showArchived ? "チャットに戻る" : `アーカイブ (${archivedCount})`}
+            </button>
+          )}
           <span className="spacer" />
           {selecting ? (
             <>
               <button type="button" className="link-button" onClick={() => setSelected(selected.size === filtered.length ? new Set() : new Set(filtered.map((s) => s.id)))}>
                 {selected.size === filtered.length && filtered.length > 0 ? "選択を外す" : "すべて選択"}
               </button>
+              <button type="button" className="button small" disabled={selected.size === 0} onClick={() => void archiveSelected()}>{showArchived ? "戻す" : "アーカイブ"} ({selected.size})</button>
               <button type="button" className="button small danger" disabled={selected.size === 0} onClick={() => void deleteSelected()}>削除 ({selected.size})</button>
               <button type="button" className="button small ghost" onClick={() => { setSelecting(false); setSelected(new Set()); }}>キャンセル</button>
             </>

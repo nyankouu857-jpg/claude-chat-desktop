@@ -30,6 +30,10 @@ public sealed class ChatDefaults
     public int MaxToolTurns { get; set; } = 30;
     // 長い会話を要約し始める入力トークン数
     public int CompactThreshold { get; set; } = 150_000;
+    // 送る量がこれ以上の会話はキャッシュを 1 時間持たせる。0 で使わない
+    public int LongCacheAbove { get; set; } = 100_000;
+    // この日数使っていないチャットを一覧から外す。0 で外さない
+    public int ArchiveAfterDays { get; set; }
     public string SystemPrompt { get; set; } = "";
     // オフで日付・呼び名・フォルダ一覧を付けない
     public bool AppendAppContext { get; set; } = true;
@@ -54,6 +58,24 @@ public sealed class AgentSettings
     public bool AutoApproveChildren { get; set; } = true;
     // 結果は親に渡し終えているので、一覧に残しても散らかるだけ
     public bool DeleteFinishedChildren { get; set; } = true;
+}
+
+public sealed class BackupSettings
+{
+    public bool Enabled { get; set; } = true;
+    // 空ならドキュメントの ClaudeChat-backups。代表フォルダごと消えても残るよう、外に置く
+    public string Folder { get; set; } = "";
+    public int Keep { get; set; } = 7;
+}
+
+public sealed class DesktopSettings
+{
+    // × で終わらせずにトレイにしまう。しまっている間も予定は動く
+    public bool CloseToTray { get; set; } = true;
+    public bool StartWithWindows { get; set; }
+    // 窓を見ていないときだけ Windows の通知で知らせる
+    public bool NotifyWhenDone { get; set; } = true;
+    public bool NotifyWhenWaiting { get; set; } = true;
 }
 
 public sealed class UpdateSettings
@@ -103,6 +125,8 @@ public sealed class TerminalSettings
 {
     public bool Enabled { get; set; }
     public int TimeoutSeconds { get; set; } = 120;
+    // この語で始まるコマンドは確認しない。例: "npm test"、"git status"
+    public List<string> AllowedCommands { get; set; } = [];
 }
 
 public sealed class ProgramSettings
@@ -155,6 +179,8 @@ public sealed class AppSettings
     public FeatureSettings Features { get; set; } = new();
     public BudgetSettings Budget { get; set; } = new();
     public UpdateSettings Updates { get; set; } = new();
+    public DesktopSettings Desktop { get; set; } = new();
+    public BackupSettings Backup { get; set; } = new();
     // PreToolUse / PostToolUse / UserPromptSubmit / Stop / Notification
     public Dictionary<string, List<HookEntry>> Hooks { get; set; } = [];
     public Dictionary<string, McpServerConfig> McpServers { get; set; } = [];

@@ -41,7 +41,7 @@ export function Schedules() {
 
   return (
     <>
-      <Section title="予定" description="決まった時刻や間隔で、Claude に頼みごとを送ります。アプリを開いている間だけ動き、閉じている間に過ぎた分は次に開いたときに 1 回だけ動きます。チャットで /loop と打つか、Claude に頼んでも登録できます。">
+      <Section title="予定" description="決まった時刻や間隔で、Claude に頼みごとを送ります。アプリを開いているか、トレイにしまっている間に動きます。アプリを終了している間に過ぎた分は、次に起動したときに 1 回だけ動きます。チャットで /loop と打つか、Claude に頼んでも登録できます。">
         {schedules.length === 0 ? <div className="empty-note">まだありません</div> : (
           <div className="list-card">
             {schedules.map((s) => {
@@ -50,7 +50,7 @@ export function Schedules() {
                 <div key={s.id} className="list-row schedule-row">
                   <span className="schedule-text">
                     <span>{s.title}</span>
-                    <span className="field-hint">{describe(s)} ・ {target}</span>
+                    <span className="field-hint">{describe(s)} ・ {target}{s.batch && !s.conversationId ? " ・ バッチ (半額)" : ""}</span>
                   </span>
                   <Toggle checked={s.enabled} label="有効" onChange={async (v) => setSchedules((await setScheduleEnabled(s.id, v)) ?? schedules)} />
                   <button type="button" className="icon-button small" title="消す" onClick={async () => setSchedules((await deleteSchedule(s.id)) ?? schedules)}><Trash size={14} /></button>
@@ -97,6 +97,15 @@ export function Schedules() {
             {summaries.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
           </select>
         </label>
+        {!draft.conversationId && (
+          <div className="switch-row">
+            <div>
+              <div>バッチで送って料金を半分にする</div>
+              <div className="field-hint">急がない予定向けです。結果が返るまで数分から、長いと数時間かかります。Claude がツールを使うたびに待ちが入ります</div>
+            </div>
+            <Toggle checked={!!draft.batch} label="バッチで送る" onChange={(v) => setDraft({ ...draft, batch: v })} />
+          </div>
+        )}
         <div className="settings-actions">
           <button type="button" className="button primary" disabled={!draft.title?.trim() || !draft.prompt?.trim()} onClick={() => void save()}><Plus size={14} /> 登録</button>
         </div>

@@ -58,6 +58,8 @@ public sealed class Conversation
     public string Id { get; set; } = Guid.NewGuid().ToString();
     public string Title { get; set; } = DefaultTitle;
     public bool Starred { get; set; }
+    // 一覧から外しただけで、消してはいない
+    public bool Archived { get; set; }
     public string? Model { get; set; }
     public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     public long UpdatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -244,6 +246,7 @@ public sealed class Conversation
                 ["id"] = Id,
                 ["title"] = Title,
                 ["starred"] = Starred,
+                ["archived"] = Archived,
                 ["model"] = Model,
                 ["createdAt"] = CreatedAt,
                 ["updatedAt"] = UpdatedAt,
@@ -277,6 +280,7 @@ public sealed class ConversationSummary
     public string Id { get; set; } = "";
     public string Title { get; set; } = "";
     public bool Starred { get; set; }
+    public bool Archived { get; set; }
     public long UpdatedAt { get; set; }
     public string Preview { get; set; } = "";
     public string? FolderId { get; set; }
@@ -355,6 +359,7 @@ public sealed class ConversationStore(AppPaths paths)
                 Id = conversation.Id,
                 Title = conversation.Title,
                 Starred = conversation.Starred,
+                Archived = conversation.Archived,
                 UpdatedAt = conversation.UpdatedAt,
                 Preview = PreviewOf(conversation),
                 FolderId = conversation.FolderId,
