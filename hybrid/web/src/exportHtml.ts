@@ -89,6 +89,7 @@ body { background: var(--bg-100); margin: 0; }
 .export-page { max-width: 820px; margin: 0 auto; padding: 32px 24px 60px; }
 .export-page h1.export-title { font-family: var(--font-serif); font-weight: 500; font-size: 26px; color: var(--text-100); margin: 0 0 28px; }
 .export-page .user-turn { display: flex; justify-content: flex-end; margin-bottom: 22px; }
+.export-page .code-actions { display: none; }
 .export-file, .export-tool { font-size: 12.5px; color: var(--text-300); margin: 4px 0 8px; }
 .export-artifact { border: 0.5px solid var(--border); border-radius: 12px; overflow: hidden; margin: 10px 0 16px; background: var(--bg-000); }
 .export-artifact-title { padding: 8px 14px; font-size: 13px; color: var(--text-200); border-bottom: 0.5px solid var(--border); }
