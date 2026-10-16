@@ -30,7 +30,23 @@ public partial class App : Application
             MessageBox.Show(args.Exception.Message, "ClaudeChat", MessageBoxButton.OK, MessageBoxImage.Error);
             args.Handled = true;
         };
+        CreateShortcutsOnFirstRun(paths);
         new MainWindow(paths).Show();
+    }
+
+    // 初めて起動したときだけ作る。消したショートカットを起動のたびに作り直さないよう、作ったことを覚えておく
+    static void CreateShortcutsOnFirstRun(AppPaths paths)
+    {
+        var marker = Path.Combine(paths.ConfigDir, "shortcuts-created");
+        if (File.Exists(marker)) return;
+        try
+        {
+            if (new WindowsPlatform().CreateShortcuts() is null) File.WriteAllText(marker, DateTime.Now.ToString("O"));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or COMException)
+        {
+            // ショートカットが無くてもアプリは使える。設定から作り直せる
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)

@@ -15,6 +15,8 @@ public interface IPlatform
     bool CanRealClick { get; }
     // 題名に titleMarker を含むブラウザの窓の、ページ表示領域の中の割合 (0 から 1) の位置を本物のマウスで押す。できなかったら理由を返す
     string? RealClick(string titleMarker, double fx, double fy);
+    // デスクトップとスタートメニューにショートカットを作る。できなかったら理由を返す
+    string? CreateShortcuts();
 }
 
 // 画面 (WebView2 やブラウザ) とのやり取りを一手に引き受ける。通信路には依存しない
@@ -197,6 +199,7 @@ public sealed class AppHost : IAsyncDisposable
         "pricing.reload" => ReloadPricingAsync(),
         "app.open" => OpenTargetAsync(Str(p, "target")),
         "app.pickFolder" => Task.FromResult<JsonNode?>(platform.PickFolder()),
+        "app.createShortcuts" => Task.FromResult<JsonNode?>(platform.CreateShortcuts() is { } failed ? throw new InvalidOperationException(failed) : null),
         "browser.extensionStatus" => BrowserStatusAsync(),
         "browser.writeExtension" => WriteExtensionAsync(),
         "browser.resetToken" => ResetBrowserTokenAsync(),

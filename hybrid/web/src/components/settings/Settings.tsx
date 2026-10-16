@@ -1,6 +1,6 @@
-import { ExternalLink, FolderOpen, RefreshCw, TriangleAlert } from "lucide-react";
+import { ExternalLink, FolderOpen, Link2, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { navigate, openPath, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
+import { createShortcuts, navigate, openPath, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
 import { findBuiltin } from "../../builtins";
 import { LANGUAGES } from "../../languages";
 import { EFFORTS, MODELS } from "../../models";
@@ -328,7 +328,9 @@ function Data() {
         <div className="button-row">
           <button type="button" className="button" onClick={() => void openPath("root")}><FolderOpen size={15} /> フォルダを開く</button>
           <button type="button" className="button" onClick={() => void openPath("logs")}><FolderOpen size={15} /> ログ</button>
+          <button type="button" className="button" onClick={() => void createShortcuts()}><Link2 size={15} /> ショートカットを作り直す</button>
         </div>
+        <div className="field-hint">初めて起動したときに、デスクトップとスタートメニューに ClaudeChat のショートカットを作っています。消したり、アプリを別の場所に移したりしたときは、ここから作り直せます。</div>
       </Section>
       <Section title="設定ファイル" description="config/settings.json を直接編集できます。編集したら再読み込みしてください。コネクタは Claude Desktop と同じ mcpServers の書き方が使えます。">
         <div className="button-row">

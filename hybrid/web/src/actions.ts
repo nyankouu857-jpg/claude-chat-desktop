@@ -503,6 +503,15 @@ export interface BrowserExtensionStatus {
   token?: string | null;
 }
 
+export async function createShortcuts() {
+  try {
+    await call("app.createShortcuts");
+    toast("デスクトップとスタートメニューにショートカットを作りました");
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), "error");
+  }
+}
+
 export const browserExtensionStatus = () => call<BrowserExtensionStatus>("browser.extensionStatus");
 export const writeBrowserExtension = () => guard(() => call<string>("browser.writeExtension"));
 
