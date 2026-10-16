@@ -28,6 +28,8 @@ export interface ComposerChoice {
   webFetch: boolean;
   codeExecution: boolean;
   research: boolean;
+  // 回答のスタイル。claude.ai と同じく入力欄から会話ごとに選ぶ
+  style: string;
   // 新しいチャットの権限モード。既存のチャットは会話の側に持つ
   permissionMode: PermissionMode;
   // 使わないコネクタ。空ならすべて使う
@@ -39,7 +41,10 @@ export type DialogState =
   | { kind: "rewind"; conversationId: string; messageIndex?: number }
   | { kind: "tasks"; conversationId: string }
   | { kind: "help" }
-  | { kind: "folder"; folderId?: string };
+  | { kind: "folder"; folderId?: string }
+  | { kind: "shortcuts" }
+  | { kind: "style"; styleId?: string }
+  | { kind: "confirm"; title: string; message: string; confirmLabel: string };
 
 export interface AppState {
   ready: boolean;
@@ -58,6 +63,8 @@ export interface AppState {
   extensions: Extensions;
   // 巻き戻しで入力欄に戻す文
   prefill: Record<string, { text: string; nonce: number }>;
+  // 回答の一部を選んで「返信」したときの引用
+  quotes: Record<string, string>;
   artifact: { conversationId: string; id: string } | null;
   dialog: DialogState | null;
   view: View;
@@ -80,13 +87,14 @@ let state: AppState = {
   folders: [],
   statuses: {},
   workflows: {},
-  extensions: { commands: [], outputStyles: [] },
+  extensions: { commands: [], outputStyles: [], skills: [] },
   prefill: {},
+  quotes: {},
   artifact: null,
   dialog: null,
   view: { name: "new" },
   sidebarOpen: true,
-  choice: { model: "claude-opus-5-5", effort: "medium", webSearch: false, webFetch: true, codeExecution: false, research: false, permissionMode: "default", disabledSources: [] },
+  choice: { model: "claude-opus-5-5", effort: "medium", webSearch: false, webFetch: true, codeExecution: false, research: false, style: "default", permissionMode: "default", disabledSources: [] },
   toasts: [],
 };
 

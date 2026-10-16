@@ -8,6 +8,8 @@ import type {
   HookEntry,
   LiveReply,
   McpServerConfig,
+  ArtifactListItem,
+  KnowledgeFile,
   MemoryFile,
   PermissionMode,
   Schedule,
@@ -92,6 +94,7 @@ export async function init() {
       webFetch: data.settings.chat.webFetch,
       codeExecution: data.settings.chat.codeExecution,
       research: false,
+      style: data.settings.chat.outputStyle,
       permissionMode: "default",
       disabledSources: [],
     },
@@ -102,6 +105,35 @@ export async function init() {
 async function refreshFolders() {
   const folders = await call<Folder[]>("folders.list");
   setState((s) => ({ ...s, folders }));
+}
+
+export const getStyle = (id: string) => guard(() => call<{ id: string; name: string; text: string }>("styles.get", { id }));
+export const generateStyle = (request: string) => guard(() => call<{ name: string; text: string }>("styles.generate", { request }));
+
+export async function saveStyle(id: string | undefined, name: string, text: string) {
+  const saved = await guard(() => call<string>("styles.save", { id, name, text }));
+  if (saved) await refreshExtensions();
+  return saved;
+}
+
+export async function deleteStyle(id: string) {
+  await guard(() => call("styles.delete", { id }));
+  await refreshExtensions();
+  if (getState().choice.style === id) setChoice({ style: "default" });
+}
+
+export async function importSkill(file: File) {
+  const data = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+  const name = await guard(() => call<string>("skills.import", { data }));
+  if (name) {
+    await refreshExtensions();
+    toast(`Skill「${name}」を追加しました`);
+  }
 }
 
 export async function refreshExtensions() {
@@ -204,7 +236,13 @@ function applyChatEvent(id: string, event: ChatEvent) {
     case "state":
       setState((s) => {
         const conversation = s.conversations[id];
-        return conversation ? putConversation(s, { ...conversation, ...event.state }) : s;
+        if (!conversation) return s;
+        // claude.ai と同じく、作ったり直したりしたアーティファクトはすぐ横に開く
+        const before = new Map(conversation.artifacts.map((a) => [a.id, a.version]));
+        const touched = event.state.artifacts.find((a) => before.get(a.id) !== a.version);
+        const next = putConversation(s, { ...conversation, ...event.state });
+        const viewing = s.view.name === "chat" && s.view.id === id;
+        return touched && viewing ? { ...next, artifact: { conversationId: id, id: touched.id } } : next;
       });
       break;
     case "file":
@@ -212,6 +250,10 @@ function applyChatEvent(id: string, event: ChatEvent) {
         const conversation = s.conversations[id];
         return conversation ? putConversation(s, { ...conversation, files: { ...conversation.files, [event.fileId]: event.path } }) : s;
       });
+      break;
+    case "discard":
+      // 断られて捨てた応答の途中の文を消す
+      updateLive(id, (live) => ({ ...live, blocks: [] }));
       break;
     case "done":
       setState((s) => {
@@ -249,6 +291,7 @@ function chatOptions() {
     webSearch: choice.webSearch,
     webFetch: choice.webFetch,
     codeExecution: choice.codeExecution,
+    style: choice.style,
     enabledSources: [...BUILTIN_SOURCE_IDS, ...mcp.map((m) => m.name)].filter((name) => !choice.disabledSources.includes(name)),
   };
 }
@@ -262,7 +305,8 @@ export async function send(conversationId: string | null, content: WireMessage["
     research,
     // 新しいチャットだけ。既存のチャットはヘッダーで切り替える
     permissionMode: conversationId ? undefined : choice.permissionMode,
-    folderId: !conversationId && view.name === "new" ? view.folderId : undefined,
+    folderId: conversationId ? undefined : view.name === "new" ? view.folderId : view.name === "project" ? view.id : undefined,
+    incognito: !conversationId && view.name === "new" && !view.folderId && view.incognito ? true : undefined,
     ...chatOptions(),
   }));
   if (result && research) setChoice({ research: false });
@@ -283,8 +327,16 @@ export async function send(conversationId: string | null, content: WireMessage["
 
 export const stop = (conversationId: string) => guard(() => call("chat.stop", { conversationId }));
 
-export async function retry(conversationId: string) {
-  const conversation = await guard(() => call<Conversation>("chat.retry", { conversationId, ...chatOptions() }));
+// messageIndex はやり直す返事の元になった発言。省けば最後の発言
+export async function retry(conversationId: string, opts: { messageIndex?: number; model?: string } = {}) {
+  const options = { ...chatOptions(), ...(opts.model ? { model: opts.model } : {}) };
+  if (opts.model) setChoice({ model: opts.model });
+  const conversation = await guard(() => call<Conversation>("chat.retry", { conversationId, messageIndex: opts.messageIndex, ...options }));
+  if (conversation) setState((s) => putConversation(s, conversation));
+}
+
+export async function switchBranch(conversationId: string, index: number, version: number) {
+  const conversation = await guard(() => call<Conversation>("chat.switchBranch", { conversationId, index, version }));
   if (conversation) setState((s) => putConversation(s, conversation));
 }
 
@@ -299,6 +351,8 @@ export async function approve(conversationId: string, requestId: string, decisio
   // 中身側で権限が書き足されるので、取り消せるように設定を取り直す
   if (decision === "always") await updateSettings({});
 }
+
+export const searchConversations = (query: string) => guard(() => call<{ id: string; snippet: string }[]>("conversations.search", { query }));
 
 export const renameConversation = (id: string, title: string) => guard(() => call("conversations.rename", { id, title }));
 export const starConversation = (id: string, starred: boolean) => guard(() => call("conversations.star", { id, starred }));
@@ -322,6 +376,7 @@ export async function updateSettings(patch: Partial<{ [K in keyof Settings]: Par
   for (const key of ["model", "effort", "webSearch", "webFetch", "codeExecution"] as const) {
     if (chat[key] !== undefined) (choice as Record<string, unknown>)[key] = chat[key];
   }
+  if (chat.outputStyle !== undefined) choice.style = chat.outputStyle;
   if (Object.keys(choice).length > 0) setChoice(choice);
   return settings;
 }
@@ -418,6 +473,31 @@ export async function rewind(conversationId: string, messageIndex: number, resto
 
 export const rewindTurns = (conversationId: string) => guard(() => call<number[]>("chat.rewindInfo", { conversationId }));
 
+// ブラウザの confirm の代わり。claude.ai と同じく、赤いボタンの確認ダイアログを出す
+let confirmResolver: ((ok: boolean) => void) | null = null;
+
+export function askConfirm(title: string, message: string, confirmLabel = "削除") {
+  confirmResolver?.(false);
+  setState((s) => ({ ...s, dialog: { kind: "confirm", title, message, confirmLabel } }));
+  return new Promise<boolean>((resolve) => { confirmResolver = resolve; });
+}
+
+export function answerConfirm(ok: boolean) {
+  confirmResolver?.(ok);
+  confirmResolver = null;
+  setState((s) => ({ ...s, dialog: null }));
+}
+
+export const setQuote = (conversationId: string, text: string | null) =>
+  setState((s) => {
+    const { [conversationId]: _, ...quotes } = s.quotes;
+    return { ...s, quotes: text ? { ...quotes, [conversationId]: text } : quotes };
+  });
+
+export const extractDocumentText = (name: string, data: string) => call<string>("files.extractText", { name, data });
+
+export const listArtifacts = () => guard(() => call<ArtifactListItem[]>("artifacts.list"));
+
 export const openArtifact = (conversationId: string, id: string) => setState((s) => ({ ...s, artifact: { conversationId, id } }));
 export const closeArtifact = () => setState((s) => ({ ...s, artifact: null }));
 
@@ -439,10 +519,16 @@ export const setScheduleEnabled = (id: string, enabled: boolean) => guard(() => 
 
 // Memory
 
-export const listMemory = () => guard(() => call<MemoryFile[]>("memory.list"));
-export const readMemory = (path: string) => guard(() => call<string>("memory.read", { path }));
-export const writeMemory = (path: string, content: string) => guard(() => call<MemoryFile[]>("memory.write", { path, content }));
-export const deleteMemory = (path: string) => guard(() => call<MemoryFile[]>("memory.delete", { path }));
+// folderId を渡すとそのプロジェクトのメモリ
+export const listMemory = (folderId?: string) => guard(() => call<MemoryFile[]>("memory.list", { folderId }));
+export const readMemory = (path: string, folderId?: string) => guard(() => call<string>("memory.read", { path, folderId }));
+export const writeMemory = (path: string, content: string, folderId?: string) => guard(() => call<MemoryFile[]>("memory.write", { path, content, folderId }));
+export const deleteMemory = (path: string, folderId?: string) => guard(() => call<MemoryFile[]>("memory.delete", { path, folderId }));
+
+export const listKnowledge = (id: string) => guard(() => call<KnowledgeFile[]>("folders.knowledge", { id }));
+export const addKnowledge = (id: string, name: string, text: string) => guard(() => call<KnowledgeFile[]>("folders.addKnowledge", { id, name, text }));
+export const readKnowledge = (id: string, name: string) => guard(() => call<string>("folders.readKnowledge", { id, name }));
+export const deleteKnowledge = (id: string, name: string) => guard(() => call<KnowledgeFile[]>("folders.deleteKnowledge", { id, name }));
 
 export async function saveHooks(hooks: Record<string, HookEntry[]>) {
   const settings = await guard(() => call<Settings>("settings.update", { hooks }));

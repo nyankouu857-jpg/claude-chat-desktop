@@ -1,8 +1,8 @@
-import { Bot, ChartColumn, ChevronRight, Ellipsis, Folder as FolderIcon, FolderInput, FolderOpen, MessagesSquare, PanelLeft, Pencil, Plug, Plus, Settings, Star, Trash, Workflow } from "lucide-react";
+import { Bot, ChartColumn, Shapes, Keyboard, ChevronRight, EllipsisVertical, Folder as FolderIcon, FolderInput, FolderOpen, MessagesSquare, PanelLeft, Pencil, Plug, Plus, Settings, Star, Trash, Workflow } from "lucide-react";
 import { useState } from "react";
-import { deleteConversation, deleteFolder, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
+import { askConfirm, deleteConversation, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
 import { setState, useStore } from "../store";
-import type { ChatStatus, ConversationSummary, Folder } from "../types";
+import type { ChatStatus, ConversationSummary } from "../types";
 import { Dialog, Dropdown, MenuItem } from "./ui";
 
 export const STATUS_LABELS: Record<ChatStatus, string> = {
@@ -19,11 +19,12 @@ export function StatusDot({ status }: { status?: ChatStatus }) {
 }
 
 export function MoveDialog({ summary, onClose }: { summary: { id: string; title: string; folderId?: string | null }; onClose: () => void }) {
-  const folders = useStore((s) => s.folders);
+  const allFolders = useStore((s) => s.folders);
+  const folders = allFolders.filter((f) => !f.archived || f.id === summary.folderId);
   const [target, setTarget] = useState<string | null>(summary.folderId ?? null);
   return (
     <Dialog
-      title="フォルダへ移動"
+      title="プロジェクトへ移動"
       onClose={onClose}
       footer={
         <>
@@ -35,7 +36,7 @@ export function MoveDialog({ summary, onClose }: { summary: { id: string; title:
       <div className="radio-list">
         <label className={`radio-row${target === null ? " selected" : ""}`}>
           <input type="radio" checked={target === null} onChange={() => setTarget(null)} />
-          <span className="radio-title">フォルダに入れない</span>
+          <span className="radio-title">プロジェクトに入れない</span>
         </label>
         {folders.map((f) => (
           <label key={f.id} className={`radio-row${target === f.id ? " selected" : ""}`}>
@@ -44,7 +45,7 @@ export function MoveDialog({ summary, onClose }: { summary: { id: string; title:
           </label>
         ))}
       </div>
-      {folders.length === 0 && <div className="field-hint">フォルダはサイドバーの「フォルダ」の + から作れます</div>}
+      {folders.length === 0 && <div className="field-hint">プロジェクトはサイドバーの「プロジェクト」から作れます</div>}
     </Dialog>
   );
 }
@@ -62,7 +63,7 @@ export function ConversationMenu({ summary, onRename, onMove, align = "right" }:
       align={align}
       trigger={(open, toggle) => (
         <button type="button" className={`icon-button small row-menu${open ? " open" : ""}`} aria-label="メニュー" onClick={(e) => { e.stopPropagation(); toggle(); }}>
-          <Ellipsis size={16} />
+          <EllipsisVertical size={16} />
         </button>
       )}
     >
@@ -72,10 +73,10 @@ export function ConversationMenu({ summary, onRename, onMove, align = "right" }:
             {summary.starred ? "スターを外す" : "スターを付ける"}
           </MenuItem>
           <MenuItem icon={<Pencil size={16} />} onClick={() => { close(); onRename(); }}>名前を変更</MenuItem>
-          {!summary.parentId && <MenuItem icon={<FolderInput size={16} />} onClick={() => { close(); onMove(); }}>フォルダへ移動</MenuItem>}
+          {!summary.parentId && <MenuItem icon={<FolderInput size={16} />} onClick={() => { close(); onMove(); }}>プロジェクトへ移動</MenuItem>}
           <MenuItem icon={<Trash size={16} />} danger onClick={() => {
             close();
-            if (confirm(`${summary.title} を削除しますか?`)) void deleteConversation(summary.id);
+            void (async () => { if (await askConfirm("チャットを削除", `「${summary.title}」を削除しますか? この操作は取り消せません。`)) await deleteConversation(summary.id); })();
           }}>削除</MenuItem>
         </>
       )}
@@ -140,50 +141,6 @@ function ConversationTree({ summary, depth, activeId, childrenOf }: { summary: C
   );
 }
 
-function FolderSection({ folder, chats, activeId, childrenOf }: { folder: Folder; chats: ConversationSummary[]; activeId: string | null; childrenOf: Map<string, ConversationSummary[]> }) {
-  const view = useStore((s) => s.view);
-  // 子の会話を開いているときも、親のいるフォルダは開いたままにする
-  const containsActive = chats.some((c) => c.id === activeId || (childrenOf.get(c.id) ?? []).some((k) => k.id === activeId))
-    || (view.name === "new" && view.folderId === folder.id);
-  const [expanded, setExpanded] = useState<boolean | null>(null);
-  const open = expanded ?? containsActive;
-  return (
-    <>
-      <div className={`folder-row${view.name === "new" && view.folderId === folder.id ? " active" : ""}`} onClick={() => setExpanded(!open)}>
-        <ChevronRight size={13} className={`folder-chevron${open ? " rotated" : ""}`} />
-        <FolderIcon size={15} />
-        <span className="conversation-title">{folder.name}</span>
-        <span className="folder-count">{chats.length}</span>
-        <Dropdown
-          align="right"
-          trigger={(menuOpen, toggle) => (
-            <button type="button" className={`icon-button small row-menu${menuOpen ? " open" : ""}`} aria-label="フォルダのメニュー" onClick={(e) => { e.stopPropagation(); toggle(); }}>
-              <Ellipsis size={16} />
-            </button>
-          )}
-        >
-          {(close) => (
-            <>
-              <MenuItem icon={<Plus size={16} />} onClick={() => { close(); navigate({ name: "new", folderId: folder.id }); }}>このフォルダで新しいチャット</MenuItem>
-              <MenuItem icon={<Pencil size={16} />} onClick={() => { close(); setState((s) => ({ ...s, dialog: { kind: "folder", folderId: folder.id } })); }}>指示と通信の設定</MenuItem>
-              <MenuItem icon={<Trash size={16} />} danger onClick={() => {
-                close();
-                if (confirm(`フォルダ「${folder.name}」を削除しますか? 中のチャットは消えずにフォルダの外へ出ます`)) void deleteFolder(folder.id);
-              }}>フォルダを削除</MenuItem>
-            </>
-          )}
-        </Dropdown>
-      </div>
-      {open && (
-        <div className="folder-children">
-          {chats.length === 0 && <div className="folder-empty">チャットはまだありません</div>}
-          {chats.map((c) => <ConversationTree key={c.id} summary={c} depth={1} activeId={activeId} childrenOf={childrenOf} />)}
-        </div>
-      )}
-    </>
-  );
-}
-
 export function Sidebar() {
   const open = useStore((s) => s.sidebarOpen);
   const summaries = useStore((s) => s.summaries);
@@ -199,9 +156,10 @@ export function Sidebar() {
   }
   // 親が消えた子は一番上に出す
   const roots = summaries.filter((s) => !s.parentId || !known.has(s.parentId));
-  const folderIds = new Set(folders.map((f) => f.id));
+  const starredProjects = folders.filter((f) => f.starred && !f.archived);
   const starred = roots.filter((s) => s.starred);
-  const recents = roots.filter((s) => !s.starred && !(s.folderId && folderIds.has(s.folderId)));
+  // claude.ai と同じく、プロジェクトのチャットも最近の項目に並べる
+  const recents = roots.filter((s) => !s.starred);
   const displayName = profile?.fullName || profile?.nickname || "あなた";
 
   const userMenu = (
@@ -225,6 +183,7 @@ export function Sidebar() {
           <MenuItem icon={<Settings size={16} />} onClick={() => { close(); openSettings("general"); }}>設定</MenuItem>
           <MenuItem icon={<ChartColumn size={16} />} onClick={() => { close(); openSettings("usage"); }}>使用量と料金</MenuItem>
           <MenuItem icon={<FolderOpen size={16} />} onClick={() => { close(); void openPath("root"); }}>アプリのフォルダを開く</MenuItem>
+          <MenuItem icon={<Keyboard size={16} />} onClick={() => { close(); setState((s) => ({ ...s, dialog: { kind: "shortcuts" } })); }}>キーボードショートカット</MenuItem>
         </>
       )}
     </Dropdown>
@@ -236,6 +195,8 @@ export function Sidebar() {
         <button type="button" className="icon-button" aria-label="サイドバーを開く" onClick={toggleSidebar}><PanelLeft size={18} /></button>
         <button type="button" className="new-chat-icon" aria-label="新しいチャット" onClick={() => navigate({ name: "new" })}><Plus size={16} /></button>
         <button type="button" className="icon-button" aria-label="チャット" onClick={() => navigate({ name: "recents" })}><MessagesSquare size={18} /></button>
+        <button type="button" className="icon-button" aria-label="プロジェクト" onClick={() => navigate({ name: "projects" })}><FolderIcon size={18} /></button>
+        <button type="button" className="icon-button" aria-label="アーティファクト" onClick={() => navigate({ name: "artifacts" })}><Shapes size={18} /></button>
         <div className="sidebar-spacer" />
         {userMenu}
       </nav>
@@ -256,6 +217,12 @@ export function Sidebar() {
         <button type="button" className={`nav-link${view.name === "recents" ? " active" : ""}`} onClick={() => navigate({ name: "recents" })}>
           <MessagesSquare size={17} /> チャット
         </button>
+        <button type="button" className={`nav-link${view.name === "projects" || view.name === "project" ? " active" : ""}`} onClick={() => navigate({ name: "projects" })}>
+          <FolderIcon size={17} /> プロジェクト
+        </button>
+        <button type="button" className={`nav-link${view.name === "artifacts" ? " active" : ""}`} onClick={() => navigate({ name: "artifacts" })}>
+          <Shapes size={17} /> アーティファクト
+        </button>
         <button type="button" className={`nav-link${view.name === "settings" && view.tab === "connectors" ? " active" : ""}`} onClick={() => openSettings("connectors")}>
           <Plug size={17} /> コネクタ
         </button>
@@ -264,16 +231,15 @@ export function Sidebar() {
         </button>
       </div>
       <div className="sidebar-scroll">
-        <div className="sidebar-section with-action">
-          フォルダ
-          <button type="button" className="icon-button tiny" aria-label="フォルダを作る" title="フォルダを作る" onClick={() => setState((s) => ({ ...s, dialog: { kind: "folder" } }))}><Plus size={14} /></button>
-        </div>
-        {folders.map((f) => (
-          <FolderSection key={f.id} folder={f} chats={roots.filter((s) => s.folderId === f.id && !s.starred)} activeId={activeId} childrenOf={childrenOf} />
-        ))}
-        {starred.length > 0 && (
+        {(starred.length > 0 || starredProjects.length > 0) && (
           <>
             <div className="sidebar-section">スター付き</div>
+            {starredProjects.map((f) => (
+              <div key={f.id} className={`folder-row${view.name === "project" && view.id === f.id ? " active" : ""}`} onClick={() => navigate({ name: "project", id: f.id })}>
+                <FolderIcon size={15} />
+                <span className="conversation-title">{f.name}</span>
+              </div>
+            ))}
             {starred.map((s) => <ConversationTree key={s.id} summary={s} depth={0} activeId={activeId} childrenOf={childrenOf} />)}
           </>
         )}

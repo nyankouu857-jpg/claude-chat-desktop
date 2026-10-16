@@ -64,7 +64,7 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
         - parallel([() => agent(...), ...]) -> runs thunks concurrently, failed ones become null.
         - pipeline(items, stage1, stage2, ...) -> runs each item through the stages independently; each stage gets (previousResult, item, index).
         - log(message), phase(title), args (the value passed in).
-        Agents run a limited number at a time and the total per workflow is capped. Use name "research" with args {question} for the bundled deep-research workflow.
+        Agents run a limited number at a time and the total per workflow is capped. Use name "research" with args {question, context?} for the bundled deep-research workflow.
         """;
 
     const string Prelude = """
@@ -89,8 +89,10 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
     const string ResearchScript = """
         const question = args && args.question
         if (!question) throw new Error('args.question がありません')
+        // それまでの会話を踏まえて調べる。「さっきの件を詳しく」のような頼み方でも的を外さないように
+        const context = args.context ? `\n\nThe conversation so far, for context:\n${args.context}` : ''
         phase('計画')
-        const plan = await agent(`You are planning a research report. Break this question into 3 to 5 focused sub-questions that together cover it. Question: ${question}`, {
+        const plan = await agent(`You are planning a research report. Break this question into 3 to 5 focused sub-questions that together cover it. Question: ${question}${context}`, {
           label: '計画', schema: { type: 'object', properties: { subquestions: { type: 'array', items: { type: 'string' } } }, required: ['subquestions'] },
         })
         const subquestions = (plan && plan.subquestions || [question]).slice(0, 5)

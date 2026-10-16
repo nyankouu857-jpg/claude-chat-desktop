@@ -7,13 +7,13 @@ public static class SystemPrompt
 {
     const string AppContext = """
         <app_context>
-        You are Claude, an AI assistant made by Anthropic. The user is talking with you through ClaudeChat, a personal Windows desktop chat app built on the Claude API. It is not claude.ai, but it offers similar features: folders that work like claude.ai projects, and, when the user enables them, artifacts, memory, past-chat search, web fetch, and code execution. Use only the tools you are actually given.
+        You are Claude, an AI assistant made by Anthropic. The user is talking with you through ClaudeChat, a personal Windows desktop chat app built on the Claude API. It is not claude.ai, but it offers similar features: projects, and, when the user enables them, artifacts, memory, past-chat search, web fetch, and code execution. Use only the tools you are actually given.
 
-        The current date is {{date}}.
+        The current date is {{date}}. You are {{model}}.
 
         The user chooses the model and can switch models in the middle of a conversation, so earlier messages in this thread that identify as a different model or report a different knowledge cutoff may still be accurate.
 
-        Web search is a tool the user can turn on or off for each conversation from the tools menu next to the message box. When the web search tool is available, use it for anything that may have changed since your knowledge cutoff. When it is not available and up-to-date information matters, say so and suggest turning it on.
+        Web search is a tool the user can turn on or off for each conversation from the tools menu next to the message box. When the web search tool is available, use it for anything that may have changed since your knowledge cutoff. When it is not available and up-to-date information matters, say so and suggest turning it on. The app shows the sources you cite next to your text automatically, so don't add your own list of source links unless asked.
 
         Your responses are rendered as Markdown. Code blocks with a language name get syntax highlighting, and LaTeX math between $...$ or $$...$$ is rendered.
 
@@ -23,7 +23,7 @@ public static class SystemPrompt
 
     const string KnowledgeCutoff = """
         <knowledge_cutoff>
-        Your reliable knowledge has a cutoff, past which you can't answer reliably. Answer the way a highly informed person at your cutoff would if talking to someone on {{date}}, and say so when relevant. For events or news that may post-date the cutoff, you often can't know either way, so say so. For current news or events (for example, current officeholders), give your most recent pre-cutoff information, note that it may be outdated, and point to web search. If you aren't certain that something you recall is true and on-point, say so and suggest enabling web search for newer information. Neither confirm nor deny claims about events after your cutoff that you can't verify without search, and mention the cutoff only when relevant. Wherever your knowledge could be superseded, say so and direct the user to web search, or use it yourself when it is available.
+        Your reliable knowledge cutoff is the end of June 2026. Answer the way a highly informed person at your cutoff would if talking to someone on {{date}}, and say so when relevant. For events or news that may post-date the cutoff, you often can't know either way, so say so. For current news or events (for example, current officeholders), give your most recent pre-cutoff information, note that it may be outdated, and point to web search. If you aren't certain that something you recall is true and on-point, say so and suggest enabling web search for newer information. Neither confirm nor deny claims about events after your cutoff that you can't verify without search, and mention the cutoff only when relevant. Wherever your knowledge could be superseded, say so and direct the user to web search, or use it yourself when it is available.
         </knowledge_cutoff>
         """;
 
@@ -81,11 +81,12 @@ public static class SystemPrompt
         var parts = new List<string>();
         if (settings.Chat.AppendAppContext)
         {
-            parts.Add(AppContext.Replace("{{date}}", date));
+            parts.Add(AppContext.Replace("{{date}}", date).Replace("{{model}}", ModelName(context.Model)));
             parts.Add(KnowledgeCutoff.Replace("{{date}}", date));
             parts.Add(ToneAndFormatting);
             if (profile.Nickname.Length > 0) parts.Add($"The user would like to be called {profile.Nickname}.");
             else if (profile.FullName.Length > 0) parts.Add($"The user's name is {profile.FullName}.");
+            if (profile.Occupation.Trim().Length > 0) parts.Add($"The user's work: {profile.Occupation.Trim()}.");
             if (context.FilesEnabled && FileToolProvider.DescribeForPrompt(settings.Files, context.Conversation?.WorktreePath) is { } folders) parts.Add(folders);
         }
         parts.Add(PeerMessages);
@@ -103,18 +104,31 @@ public static class SystemPrompt
         if (context.Folder is { } folder)
         {
             var instructions = folder.Instructions.Trim();
-            parts.Add($"<project name=\"{folder.Name.Replace("\"", "'")}\">\nThis chat belongs to the user's folder \"{folder.Name}\"."
-                + (instructions.Length > 0 ? $" The user's instructions for this folder:\n{instructions}" : "") + "\n</project>");
+            parts.Add($"<project name=\"{folder.Name.Replace("\"", "'")}\">\nThis chat belongs to the user's project \"{folder.Name}\"."
+                + (instructions.Length > 0 ? $" The user's instructions for this project:\n{instructions}" : "") + "\n</project>");
+            if (context.ProjectKnowledge is { Length: > 0 } knowledge) parts.Add(knowledge);
         }
-        if (context.OutputStyle.Length > 0) parts.Add($"<output_style>\n{context.OutputStyle}\n</output_style>");
-        var language = profile.Language?.Trim() ?? ProfileSettings.DefaultLanguage;
+        if (context.MemoryListing is { Length: > 0 } memory) parts.Add(memory);
+        // claude.ai と同じく、スタイルより本人がその場で言ったことを優先させる
+        if (context.OutputStyle.Length > 0) parts.Add($"<userStyle>\nWrite in this style unless the user's latest message asks otherwise:\n{context.OutputStyle}\n</userStyle>");
+        // 未選択なら書かれた言語に合わせる
+        var language = profile.Language?.Trim() ?? "";
         parts.Add(language.Length > 0
             ? $"The user's language is {language}, so respond in {language}."
             : "Respond in the same language the user writes in.");
         var preferences = profile.Preferences.Trim();
-        if (preferences.Length > 0) parts.Add($"The user has set the following preferences. Apply them to your responses.\n<user_preferences>\n{preferences}\n</user_preferences>");
+        if (preferences.Length > 0) parts.Add($"The user's preferences. Apply ones about format and approach; use background details only when relevant. Don't mention them.\n<userPreferences>\n{preferences}\n</userPreferences>");
         return string.Join("\n\n", parts);
     }
+
+ static string ModelName(string model) => model switch
+    {
+        "claude-opus-5-5" => "Claude Opus 5.5",
+        "claude-fable-5-1" => "Claude Fable 5.1",
+        "claude-sonnet-5-5" => "Claude Sonnet 5.5",
+        "claude-haiku-5-5" => "Claude Haiku 5.5",
+        _ => $"Claude ({model})",
+    };
 
     const string PlanMode = """
         <plan_mode>
@@ -132,4 +146,7 @@ public sealed class PromptContext
     public Conversation? Conversation { get; init; }
     public IReadOnlyList<SkillInfo> Skills { get; init; } = [];
     public string OutputStyle { get; init; } = "";
+    public string Model { get; init; } = "";
+    public string? MemoryListing { get; init; }
+    public string? ProjectKnowledge { get; init; }
 }

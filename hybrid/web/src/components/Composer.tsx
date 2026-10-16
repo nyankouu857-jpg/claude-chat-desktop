@@ -1,10 +1,10 @@
-import { ArrowUp, Check, ChevronDown, Circle, CircleDot, Code, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Settings2, SlidersHorizontal, Square, Telescope, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronRight, Circle, CircleDot, Code, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Quote, Settings2, Square, Telescope, Type, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { clearPrefill, openSettings, send, setChoice, setMode, stop, toast } from "../actions";
+import { clearPrefill, extractDocumentText, openSettings, send, setChoice, setMode, setQuote, stop, toast } from "../actions";
 import { BUILTIN_SOURCES } from "../builtins";
 import { allCommands, runCommand } from "../commands";
-import { EFFORTS, MODELS, modelLabel } from "../models";
-import { getState, useStore } from "../store";
+import { EFFORTS, MODELS, defaultEffortOf, modelLabel } from "../models";
+import { getState, setState, useStore } from "../store";
 import type { PermissionMode, Todo, WireBlock } from "../types";
 import { Dropdown, MenuItem, Toggle } from "./ui";
 
@@ -24,7 +24,54 @@ const TEXT_EXTENSIONS = [
   "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "rb", "go", "rs", "java", "kt", "cs", "csproj", "sln", "xaml", "c", "h", "cpp", "hpp",
   "php", "swift", "sql", "sh", "bash", "ps1", "psm1", "bat", "cmd", "vue", "svelte", "env", "gitignore", "dockerfile",
 ];
-const ACCEPT = [...IMAGE_TYPES, "application/pdf", ".pdf", "text/*", ...TEXT_EXTENSIONS.map((e) => `.${e}`)].join(",");
+// 手元で文字だけ取り出して渡す形式。サーバー側の DocumentText.Extensions と同じ
+const DOCUMENT_EXTENSIONS = ["docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "rtf"];
+const MAX_DOCUMENT_BYTES = 30 * 1024 * 1024;
+// claude.ai と同じく 1 回に添付できるのは 20 個まで
+const MAX_ATTACHMENTS = 20;
+// これより長い貼り付けは、claude.ai と同じく本文ではなく添付にする
+const PASTE_AS_FILE_CHARS = 4000;
+// API が縮小せずに読める大きさ。これより大きい画像は送る前に縮める
+const MAX_IMAGE_EDGE = 1568;
+const ACCEPT = [...IMAGE_TYPES, "application/pdf", ".pdf", "text/*", ...TEXT_EXTENSIONS.map((e) => `.${e}`), ...DOCUMENT_EXTENSIONS.map((e) => `.${e}`)].join(",");
+
+const extensionOf = (name: string) => (name.includes(".") ? name.split(".").pop()!.toLowerCase() : "");
+
+// 大きすぎる画像は断らずに縮める。透明を残すため PNG は PNG のまま
+async function shrinkImage(file: File): Promise<{ mediaType: string; data: string } | null> {
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    canvas.getContext("2d")!.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const mediaType = file.type === "image/png" ? "image/png" : "image/jpeg";
+    // 写真の画質がほぼ落ちない程度
+    const dataUrl = canvas.toDataURL(mediaType, 0.9);
+    return { mediaType, data: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+  } catch {
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+export const KNOWLEDGE_ACCEPT = ["text/*", ...TEXT_EXTENSIONS.map((e) => `.${e}`), ...DOCUMENT_EXTENSIONS.map((e) => `.${e}`)].join(",");
+
+// プロジェクトのナレッジは文字にして持つ。文字にできない形式は null
+export async function fileToText(file: File): Promise<string | null> {
+  if (DOCUMENT_EXTENSIONS.includes(extensionOf(file.name))) {
+    if (file.size > MAX_DOCUMENT_BYTES) throw new Error(`${file.name} は 30MB を超えています`);
+    return await extractDocumentText(file.name, await readAsBase64(file));
+  }
+  if (!isTextFile(file)) return null;
+  if (file.size > MAX_TEXT_BYTES) throw new Error(`${file.name} は 2MB を超えています`);
+  return await readAsText(file);
+}
 
 interface PendingAttachment {
   kind: "image" | "pdf" | "text";
@@ -106,6 +153,7 @@ function ModelMenu() {
       trigger={(open, toggle) => (
         <button type="button" className={`model-button${open ? " open" : ""}`} onClick={toggle}>
           {modelLabel(choice.model)}
+          <span className="model-effort">{EFFORTS.find((e) => e.id === choice.effort)?.label}</span>
           <ChevronDown size={14} />
         </button>
       )}
@@ -113,7 +161,7 @@ function ModelMenu() {
       {(close) => (
         <>
           {MODELS.map((m) => (
-            <MenuItem key={m.id} checked={choice.model === m.id} hint={m.description} onClick={() => { setChoice({ model: m.id }); close(); }}>
+            <MenuItem key={m.id} checked={choice.model === m.id} hint={m.description} onClick={() => { setChoice({ model: m.id, effort: m.defaultEffort }); close(); }}>
               {m.label}
             </MenuItem>
           ))}
@@ -129,6 +177,7 @@ function ModelMenu() {
                 onClick={() => setChoice({ effort: e.id })}
               >
                 {e.label}
+                {defaultEffortOf(choice.model) === e.id && <span className="effort-default">既定</span>}
               </button>
             ))}
           </div>
@@ -139,9 +188,12 @@ function ModelMenu() {
   );
 }
 
+// claude.ai と同じく、添付、スタイル、検索やツールを「＋」1 つにまとめる。
 // 新しいチャットでは入力欄が画面の中ほどにあり、上に開くと項目が画面からはみ出す
-function ToolsMenu({ direction }: { direction: "up" | "down" }) {
+function PlusMenu({ direction, onAddFiles }: { direction: "up" | "down"; onAddFiles: () => void }) {
   const choice = useStore((s) => s.choice);
+  const styles = useStore((s) => s.extensions.outputStyles);
+  const [stylesOpen, setStylesOpen] = useState(false);
   const mcp = useStore((s) => s.mcp);
   const settings = useStore((s) => s.settings);
   const builtins = settings ? BUILTIN_SOURCES.filter((b) => b.isAvailable(settings)) : [];
@@ -169,14 +221,28 @@ function ToolsMenu({ direction }: { direction: "up" | "down" }) {
       direction={direction}
       className="tools-menu"
       trigger={(open, toggle) => (
-        <button type="button" className={`icon-button composer-tool${open ? " open" : ""}${activeCount ? " active" : ""}`} aria-label="検索とツール" title="検索とツール" onClick={toggle}>
-          <SlidersHorizontal size={17} />
+        <button type="button" className={`icon-button composer-tool${open ? " open" : ""}${activeCount ? " active" : ""}`} aria-label="ファイル、スタイル、ツール" title="ファイル、スタイル、ツール" onClick={toggle}>
+          <Plus size={18} />
           {activeCount > 0 && <span className="tool-count">{activeCount}</span>}
         </button>
       )}
     >
       {(close) => (
         <>
+          <MenuItem icon={<Paperclip size={16} />} hint="画像、PDF、テキスト、Office 文書" onClick={() => { close(); onAddFiles(); }}>ファイルや写真を追加</MenuItem>
+          <MenuItem icon={<Type size={16} />} hint={styles.find((st) => st.id === choice.style)?.label ?? "標準"} onClick={() => setStylesOpen((o) => !o)}>
+            <span className="menu-expand">スタイルを使う <ChevronRight size={13} className={stylesOpen ? "rotated" : ""} /></span>
+          </MenuItem>
+          {stylesOpen && (
+            <div className="menu-sublist">
+              {styles.map((st) => (
+                <MenuItem key={st.id} checked={choice.style === st.id} onClick={() => { setChoice({ style: st.id }); close(); }}>{st.label}</MenuItem>
+              ))}
+              <MenuItem icon={<Plus size={14} />} onClick={() => { close(); setState((s) => ({ ...s, dialog: { kind: "style" } })); }}>スタイルを作る</MenuItem>
+              <MenuItem icon={<Settings2 size={14} />} onClick={() => { close(); openSettings("features"); }}>スタイルを編集する</MenuItem>
+            </div>
+          )}
+          <div className="menu-separator" />
           {row("research", <Telescope size={16} />, "リサーチ", "複数のエージェントで深く調べる", choice.research, (v) => setChoice({ research: v }))}
           {row("web", <Globe size={16} />, "Web 検索", `1 回の返答で ${settings?.chat.webSearchMaxUses ?? 5} 回まで`, choice.webSearch, (v) => setChoice({ webSearch: v }))}
           {row("fetch", <Link size={16} />, "Web ページの取得", "URL の中身を読む", choice.webFetch, (v) => setChoice({ webFetch: v }))}
@@ -291,6 +357,9 @@ function useSlashItems(query: string | null) {
 export function Composer({ conversationId, autoFocus, prefill }: { conversationId: string | null; autoFocus?: boolean; prefill?: { text: string; nonce: number } }) {
   const running = useStore((s) => (conversationId ? !!s.live[conversationId] : false));
   const research = useStore((s) => s.choice.research);
+  const style = useStore((s) => s.choice.style);
+  const styleLabel = useStore((s) => s.extensions.outputStyles.find((st) => st.id === s.choice.style)?.label);
+  const quote = useStore((s) => (conversationId ? s.quotes[conversationId] : undefined));
   // リサーチの結果が届く前に別の質問を始めると、結果がその応答の後ろに回ってしまう
   const researching = useStore((s) => !!conversationId && Object.values(s.workflows).some((w) => w.parentId === conversationId && w.name === "research" && w.status === "running"));
   const storedPrefill = useStore((s) => (conversationId ? s.prefill[conversationId] : undefined));
@@ -330,12 +399,32 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
   async function addFiles(files: Iterable<File>) {
     const added: PendingAttachment[] = [];
     for (const file of files) {
+      if (attachments.length + added.length >= MAX_ATTACHMENTS) {
+        toast(`一度に添付できるのは ${MAX_ATTACHMENTS} 個までです`, "error");
+        break;
+      }
       if (IMAGE_TYPES.includes(file.type)) {
-        if (base64Length(file.size) > MAX_IMAGE_BYTES) {
-          toast(`${file.name} は大きすぎるので添付できません。画像は 3.7MB くらいまでです`, "error");
+        // GIF は縮めると動かなくなるので、そのまま送れる大きさなら縮めない
+        if (file.type === "image/gif" && base64Length(file.size) <= MAX_IMAGE_BYTES) {
+          added.push({ kind: "image", mediaType: file.type, data: await readAsBase64(file), name: file.name });
           continue;
         }
-        added.push({ kind: "image", mediaType: file.type, data: await readAsBase64(file), name: file.name });
+        const shrunk = await shrinkImage(file);
+        if (!shrunk || shrunk.data.length > MAX_IMAGE_BYTES) {
+          toast(`${file.name} を読み込めませんでした`, "error");
+          continue;
+        }
+        added.push({ kind: "image", mediaType: shrunk.mediaType, data: shrunk.data, name: file.name });
+      } else if (DOCUMENT_EXTENSIONS.includes(extensionOf(file.name))) {
+        if (file.size > MAX_DOCUMENT_BYTES) {
+          toast(`${file.name} は 30MB を超えているので添付できません`, "error");
+          continue;
+        }
+        try {
+          added.push({ kind: "text", mediaType: "text/plain", data: await extractDocumentText(file.name, await readAsBase64(file)), name: file.name });
+        } catch (e) {
+          toast(e instanceof Error ? e.message : String(e), "error");
+        }
       } else if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
         if (file.size > MAX_PDF_BYTES) {
           toast(`${file.name} は 20MB を超えているので添付できません`, "error");
@@ -349,7 +438,7 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
         }
         added.push({ kind: "text", mediaType: "text/plain", data: await readAsText(file), name: file.name });
       } else {
-        toast(`${file.name} は対応していない形式です。画像、PDF、テキストのファイルを使ってください`, "error");
+        toast(`${file.name} は対応していない形式です。画像、PDF、テキスト、Word / Excel / PowerPoint のファイルを使ってください`, "error");
       }
     }
     setAttachments((current) => [...current, ...added]);
@@ -378,16 +467,19 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
       toast("この会話の添付ファイルの合計が大きすぎて送れません。添付を減らすか、新しいチャットで送ってください", "error");
       return;
     }
+    // 選んで「返信」した部分は引用として本文の前に付ける
+    const message = quote ? `${quote.split("\n").map((line) => `> ${line}`).join("\n")}\n\n${trimmed}` : trimmed;
     // API の推奨どおり添付を本文より前に置く
     const content: string | WireBlock[] = attachments.length === 0
-      ? trimmed
-      : [...attachments.map(toBlock), ...(trimmed ? [{ type: "text", text: trimmed }] : [])];
+      ? message
+      : [...attachments.map(toBlock), ...(message ? [{ type: "text", text: message }] : [])];
     setSending(true);
     const ok = await send(conversationId, content);
     setSending(false);
     if (ok) {
       setText("");
       setAttachments([]);
+      if (conversationId) setQuote(conversationId, null);
     }
   }
 
@@ -401,6 +493,13 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
       onDrop={(e) => { e.preventDefault(); setDragging(false); void addFiles([...e.dataTransfer.files]); }}
     >
       <TodoList conversationId={conversationId} />
+      {quote && conversationId && (
+        <div className="quote-chip">
+          <Quote size={14} />
+          <span className="quote-text">{quote}</span>
+          <button type="button" className="icon-button tiny" aria-label="引用を外す" onClick={() => setQuote(conversationId, null)}><X size={12} /></button>
+        </div>
+      )}
       {slashQuery !== null && <SlashMenu query={slashQuery} selected={slashIndex} onPick={(name) => { setText(`/${name} `); textarea.current?.focus(); }} />}
       {attachments.length > 0 && (
         <div className="attachments">
@@ -422,10 +521,18 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
         onChange={(e) => setText(e.target.value)}
         onPaste={(e) => {
           const files = [...e.clipboardData.files];
+          const pasted = e.clipboardData.getData("text/plain");
           // Excel などは文字と一緒に画像も入れてくるので、文字があれば普通に貼る
-          if (files.length && !e.clipboardData.getData("text/plain")) {
+          if (files.length && !pasted) {
             e.preventDefault();
             void addFiles(files);
+            return;
+          }
+          // claude.ai と同じく、長い貼り付けは入力欄を埋めずに添付にする
+          if (pasted.length > PASTE_AS_FILE_CHARS && attachments.length < MAX_ATTACHMENTS) {
+            e.preventDefault();
+            const lines = pasted.replace(/\n+$/, "").split("\n").length;
+            setAttachments((list) => [...list, { kind: "text", mediaType: "text/plain", data: pasted, name: `貼り付けたテキスト (${lines} 行)` }]);
           }
         }}
         onKeyDown={(e) => {
@@ -445,6 +552,12 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
               return;
             }
           }
+          // claude.ai と同じく、応答中は Esc で止める
+          if (e.key === "Escape" && running && conversationId) {
+            e.preventDefault();
+            void stop(conversationId);
+            return;
+          }
           // IME 変換確定の Enter で送信しない
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault();
@@ -453,19 +566,12 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
         }}
       />
       <div className="composer-bar">
-        <Dropdown
-          direction="up"
-          trigger={(open, toggle) => (
-            <button type="button" className={`icon-button composer-tool${open ? " open" : ""}`} aria-label="ファイルを追加" title="ファイルを追加" onClick={toggle}>
-              <Plus size={18} />
-            </button>
-          )}
-        >
-          {(close) => (
-            <MenuItem icon={<Paperclip size={16} />} hint="画像、PDF、テキスト" onClick={() => { close(); fileInput.current?.click(); }}>ファイルを追加</MenuItem>
-          )}
-        </Dropdown>
-        <ToolsMenu direction={conversationId ? "up" : "down"} />
+        <PlusMenu direction={conversationId ? "up" : "down"} onAddFiles={() => fileInput.current?.click()} />
+        {style !== "default" && styleLabel && (
+          <button type="button" className="research-chip style-chip" title="スタイルを標準に戻す" onClick={() => setChoice({ style: "default" })}>
+            <Type size={13} /> {styleLabel} <X size={12} />
+          </button>
+        )}
         {research && (
           <button type="button" className="research-chip" title="リサーチをやめる" onClick={() => setChoice({ research: false })}>
             <Telescope size={14} /> リサーチ <X size={12} />

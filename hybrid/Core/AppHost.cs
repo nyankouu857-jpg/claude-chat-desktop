@@ -52,7 +52,7 @@ public sealed class AppHost : IAsyncDisposable
         conversations = new ConversationStore(paths);
         folders = new FolderStore(paths);
         ledger = new UsageLedger(paths);
-        extensions = new Extensions(paths);
+        extensions = new Extensions(paths, settings);
         checkpoints = new Checkpoints(paths, platform);
         hooks = new Hooks(settings, paths);
         hub = new ChatHub(paths, settings, secrets, conversations, folders, ledger, hooks, extensions, events);
@@ -123,9 +123,19 @@ public sealed class AppHost : IAsyncDisposable
         "conversations.star" => UpdateConversationAsync(Str(p, "id"), c => c.Starred = (bool?)p["starred"] == true),
         "conversations.move" => MoveConversationAsync(Str(p, "id"), (string?)p["folderId"]),
         "conversations.delete" => DeleteConversationAsync(Str(p, "id")),
+        "conversations.search" => SearchConversationsAsync(Str(p, "query")),
         "folders.list" => ListFoldersAsync(),
         "folders.save" => SaveFolderAsync(p),
         "folders.delete" => DeleteFolderAsync(Str(p, "id")),
+        "folders.knowledge" => KnowledgeAsync(Str(p, "id"), dir => Task.FromResult(ProjectKnowledge.List(dir))),
+        "folders.addKnowledge" => KnowledgeAsync(Str(p, "id"), dir => ProjectKnowledge.AddAsync(dir, Str(p, "name"), Str(p, "text"))),
+        "folders.readKnowledge" => ReadKnowledgeAsync(Str(p, "id"), Str(p, "name")),
+        "folders.deleteKnowledge" => KnowledgeAsync(Str(p, "id"), dir =>
+        {
+            var path = ProjectKnowledge.PathOf(dir, Str(p, "name"));
+            if (File.Exists(path)) platform.MoveToTrash(path);
+            return Task.FromResult(ProjectKnowledge.List(dir));
+        }),
         "chats.statuses" => StatusesAsync(),
         "chat.send" => SendAsync(p),
         "chat.retry" => RetryAsync(p),
@@ -137,21 +147,40 @@ public sealed class AppHost : IAsyncDisposable
         "chat.export" => ExportAsync(Str(p, "conversationId")),
         "chat.rewind" => RewindAsync(Str(p, "conversationId"), (int?)p["messageIndex"] ?? throw new InvalidOperationException("messageIndex がありません"), (bool?)p["restoreFiles"] == true),
         "chat.rewindInfo" => RewindInfoAsync(Str(p, "conversationId")),
+        "chat.switchBranch" => SwitchBranchAsync(Str(p, "conversationId"), (int?)p["index"] ?? -1, (int?)p["version"] ?? -1),
         "tools.approve" => ApproveAsync(Str(p, "requestId"), Str(p, "decision")),
         "artifacts.export" => ExportArtifactAsync(Str(p, "conversationId"), Str(p, "id")),
+        "artifacts.list" => ListArtifactsAsync(),
+        "files.extractText" => Task.FromResult<JsonNode?>(DocumentText.Extract(Str(p, "name"), Convert.FromBase64String(Str(p, "data")))),
         "files.open" => OpenFileAsync(Str(p, "conversationId"), Str(p, "fileId"), (bool?)p["reveal"] == true),
         "workflows.list" => Task.FromResult<JsonNode?>(workflows.ListView()),
         "workflows.stop" => StopWorkflowAsync(Str(p, "id")),
         "extensions.list" => Task.FromResult<JsonNode?>(ExtensionsView()),
+        "skills.import" => Task.FromResult<JsonNode?>(extensions.ImportSkill(Convert.FromBase64String(Str(p, "data")))),
+        "styles.get" => Task.FromResult<JsonNode?>(extensions.GetOutputStyle(Str(p, "id"))),
+        "styles.save" => SaveStyleAsync((string?)p["id"], Str(p, "name"), Str(p, "text")),
+        "styles.delete" => DeleteStyleAsync(Str(p, "id")),
+        "styles.generate" => GenerateStyleAsync(Str(p, "request")),
         "commands.expand" => ExpandCommandAsync(Str(p, "name"), (string?)p["args"] ?? ""),
         "schedules.list" => ListSchedulesAsync(),
         "schedules.save" => SaveScheduleAsync(p),
         "schedules.delete" => DeleteScheduleAsync(Str(p, "id")),
         "schedules.setEnabled" => SetScheduleEnabledAsync(Str(p, "id"), (bool?)p["enabled"] == true),
-        "memory.list" => Task.FromResult<JsonNode?>(ListMemory()),
-        "memory.read" => Task.FromResult<JsonNode?>(File.ReadAllText(MemoryPath(Str(p, "path")))),
-        "memory.write" => WriteMemoryAsync(Str(p, "path"), (string?)p["content"] ?? ""),
-        "memory.delete" => DeleteMemoryAsync(Str(p, "path")),
+        "memory.list" => MemoryAsync(p, root => ListMemory(root)),
+        "memory.read" => MemoryAsync(p, root => File.ReadAllText(MemoryPath(root, Str(p, "path")))),
+        "memory.write" => MemoryAsync(p, root =>
+        {
+            var path = MemoryPath(root, Str(p, "path"));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, (string?)p["content"] ?? "");
+            return ListMemory(root);
+        }),
+        "memory.delete" => MemoryAsync(p, root =>
+        {
+            var path = MemoryPath(root, Str(p, "path"));
+            if (File.Exists(path)) platform.MoveToTrash(path);
+            return ListMemory(root);
+        }),
         "mcp.list" => Task.FromResult<JsonNode?>(mcp.Describe()),
         "mcp.save" => SaveMcpAsync(p),
         "mcp.restart" => RestartMcpAsync(Str(p, "name")),
@@ -224,6 +253,7 @@ public sealed class AppHost : IAsyncDisposable
     {
         ["commands"] = new JsonArray(extensions.ListCommands().Select(c => (JsonNode)new JsonObject { ["name"] = c.Name, ["description"] = c.Description, ["kind"] = c.Kind }).ToArray()),
         ["outputStyles"] = extensions.ListOutputStyles(),
+        ["skills"] = new JsonArray(extensions.ListSkills(includeDisabled: true).Select(s => (JsonNode)new JsonObject { ["name"] = s.Name, ["description"] = s.Description, ["enabled"] = extensions.IsSkillEnabled(s.Name) }).ToArray()),
     };
 
     async Task<JsonObject> SecretsViewAsync()
@@ -328,7 +358,7 @@ public sealed class AppHost : IAsyncDisposable
     // 子のエージェントも一緒に動かす。親子が別のフォルダにいると一覧で迷子になる
     async Task<JsonNode?> MoveConversationAsync(string id, string? folderId)
     {
-        if (folderId is not null && await folders.GetAsync(folderId) is null) throw new InvalidOperationException("フォルダが見つかりません");
+        if (folderId is not null && await folders.GetAsync(folderId) is null) throw new InvalidOperationException("プロジェクトが見つかりません");
         var conversation = await RequireConversationAsync(id);
         foreach (var target in new[] { conversation }.Concat(await DescendantsAsync(id)))
         {
@@ -369,6 +399,29 @@ public sealed class AppHost : IAsyncDisposable
         return null;
     }
 
+    // チャット一覧の検索。題名だけでなく本文も探し、見つかった所の前後を返す
+    async Task<JsonNode?> SearchConversationsAsync(string query)
+    {
+        var words = query.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var hits = new JsonArray();
+        if (words.Length == 0) return hits;
+        foreach (var summary in await conversations.ListAsync())
+        {
+            if (await conversations.GetAsync(summary.Id) is not { } c) continue;
+            var body = string.Join("\n", c.CopyMessages().Where(m => Conversation.IsHumanTurn(m) || (string?)m["role"] == "assistant").Select(m => WireText.Of(m["content"])));
+            var text = $"{c.Title}\n{body}";
+            if (!words.All(w => text.Contains(w, StringComparison.OrdinalIgnoreCase))) continue;
+            var at = body.IndexOf(words[0], StringComparison.OrdinalIgnoreCase);
+            var start = Math.Max(0, at - 40);
+            hits.Add(new JsonObject
+            {
+                ["id"] = c.Id,
+                ["snippet"] = at < 0 ? "" : body.Substring(start, Math.Min(160, body.Length - start)).Replace('\n', ' '),
+            });
+        }
+        return hits;
+    }
+
     // Folders
 
     async Task<JsonNode?> ListFoldersAsync() => Json.ToNode(await folders.ListAsync());
@@ -391,9 +444,26 @@ public sealed class AppHost : IAsyncDisposable
             await conversations.SaveAsync(c, touch: false);
         }
         await folders.DeleteAsync(id);
+        // ナレッジとメモリはプロジェクトと一緒に消す。チャットだけは外へ出して残す
+        foreach (var dir in new[] { ProjectKnowledge.DirFor(paths, id), MemoryToolProvider.RootFor(paths, id) })
+        {
+            if (Directory.Exists(dir)) platform.MoveToTrash(dir);
+        }
         Emit("folders.changed", null);
         Emit("conversations.changed", null);
         return await ListFoldersAsync();
+    }
+
+    async Task<JsonNode?> KnowledgeAsync(string folderId, Func<string, Task<JsonArray>> action)
+    {
+        if (await folders.GetAsync(folderId) is null) throw new InvalidOperationException("プロジェクトが見つかりません");
+        return await action(ProjectKnowledge.DirFor(paths, folderId));
+    }
+
+    async Task<JsonNode?> ReadKnowledgeAsync(string folderId, string name)
+    {
+        if (await folders.GetAsync(folderId) is null) throw new InvalidOperationException("プロジェクトが見つかりません");
+        return await File.ReadAllTextAsync(ProjectKnowledge.PathOf(ProjectKnowledge.DirFor(paths, folderId), name));
     }
 
     async Task<JsonNode?> StatusesAsync() => await hub.StatusesAsync();
@@ -410,7 +480,7 @@ public sealed class AppHost : IAsyncDisposable
     static JsonObject RequestOptions(JsonObject p)
     {
         var options = new JsonObject();
-        foreach (var key in new[] { "model", "effort", "webSearch", "webFetch", "codeExecution", "enabledSources" })
+        foreach (var key in new[] { "model", "effort", "webSearch", "webFetch", "codeExecution", "enabledSources", "style" })
         {
             if (p[key] is { } value) options[key] = value.DeepClone();
         }
@@ -441,6 +511,7 @@ public sealed class AppHost : IAsyncDisposable
         var id = (string?)p["conversationId"];
         var conversation = (id is null ? null : await conversations.GetAsync(id)) ?? conversations.Create();
         if (id is null && (string?)p["folderId"] is { } folderId && await folders.GetAsync(folderId) is not null) conversation.FolderId = folderId;
+        if (id is null && conversation.FolderId is null) conversation.Incognito = (bool?)p["incognito"] == true;
         var content = p["content"]?.DeepClone() ?? throw new InvalidOperationException("content がありません");
         await ApplyModeAsync(conversation, (string?)p["permissionMode"]);
         content = await PrepareContentAsync(conversation, content);
@@ -474,6 +545,7 @@ public sealed class AppHost : IAsyncDisposable
         conversation.Options = RequestOptions(p);
         var question = WireText.Of(message["content"]).Trim();
         if (question.Length == 0) throw new InvalidOperationException("調べたいことを書いてください");
+        var context = ResearchContext(conversation);
         await hub.ExclusiveAsync(conversation, async _ =>
         {
             conversation.Append(message);
@@ -482,7 +554,25 @@ public sealed class AppHost : IAsyncDisposable
             return 0;
         });
         var title = question.Length > 30 ? question[..30] + "…" : question;
-        workflows.Start(conversation, null, "research", new JsonObject { ["question"] = question }, $"リサーチ: {title}");
+        workflows.Start(conversation, null, "research", new JsonObject { ["question"] = question, ["context"] = context }, $"リサーチ: {title}");
+    }
+
+    // 直近のやり取りだけを文字で渡す。長い会話を丸ごと渡すとエージェントごとに料金がかさむ
+    static string? ResearchContext(Conversation conversation)
+    {
+        const int MaxChars = 8000;
+        var lines = new List<string>();
+        var total = 0;
+        foreach (var message in conversation.CopyMessages().AsEnumerable().Reverse())
+        {
+            var text = WireText.Of(message["content"]).Trim();
+            if (text.Length == 0) continue;
+            var line = $"{((string?)message["role"] == "user" ? "User" : "Assistant")}: {(text.Length > 2000 ? text[..2000] + "…" : text)}";
+            if (total + line.Length > MaxChars) break;
+            lines.Insert(0, line);
+            total += line.Length;
+        }
+        return lines.Count > 0 ? string.Join("\n\n", lines) : null;
     }
 
     async Task<JsonNode?> RetryAsync(JsonObject p)
@@ -491,10 +581,12 @@ public sealed class AppHost : IAsyncDisposable
         var options = await OptionsAsync(conversation, p);
         await hub.StartAsync(conversation, () =>
         {
-            var lastHuman = conversation.LastHumanIndex();
-            if (lastHuman < 0) throw new InvalidOperationException("やり直す発言がありません");
-            // 最後の発言より前は一切変えないので、過去の思考ブロックはそのまま有効
-            conversation.TruncateFrom(lastHuman + 1);
+            // 指定が無ければ最後の発言への返事をやり直す
+            var human = (int?)p["messageIndex"] ?? conversation.LastHumanIndex();
+            var messages = conversation.CopyMessages();
+            if (human < 0 || human >= messages.Count || !Conversation.IsHumanTurn(messages[human])) throw new InvalidOperationException("やり直す発言がありません");
+            // その発言より前は一切変えないので、過去の思考ブロックはそのまま有効。元の返事は別の版として残す
+            conversation.BranchFrom(human + 1);
             return Task.CompletedTask;
         }, options);
         return conversation.ToWire();
@@ -509,7 +601,7 @@ public sealed class AppHost : IAsyncDisposable
         await hub.StartAsync(conversation, () =>
         {
             checkpoints.ForgetFrom(conversation.Id, index);
-            conversation.TruncateFrom(index);
+            conversation.BranchFrom(index);
             conversation.Append(new JsonObject { ["role"] = "user", ["content"] = content });
             return Task.CompletedTask;
         }, options);
@@ -622,8 +714,44 @@ public sealed class AppHost : IAsyncDisposable
         return new JsonObject { ["conversation"] = conversation.ToWire(), ["files"] = restored };
     }
 
+    async Task<JsonNode?> SwitchBranchAsync(string conversationId, int index, int version)
+    {
+        var conversation = await RequireConversationAsync(conversationId);
+        await hub.ExclusiveAsync(conversation, async _ =>
+        {
+            conversation.SwitchBranch(index, version);
+            await conversations.SaveAsync(conversation, touch: false);
+            return 0;
+        });
+        return conversation.ToWire();
+    }
+
     async Task<JsonNode?> RewindInfoAsync(string conversationId) =>
         new JsonArray(checkpoints.Turns((await RequireConversationAsync(conversationId)).Id).Select(t => (JsonNode)t).ToArray());
+
+    // claude.ai のアーティファクト一覧。すべての会話から集める
+    async Task<JsonNode?> ListArtifactsAsync()
+    {
+        var items = new List<(long UpdatedAt, JsonObject Item)>();
+        foreach (var summary in await conversations.ListAsync())
+        {
+            if (await conversations.GetAsync(summary.Id) is not { } conversation) continue;
+            lock (conversation.Artifacts)
+            {
+                items.AddRange(conversation.Artifacts.Select(a => (a.UpdatedAt, new JsonObject
+                {
+                    ["conversationId"] = conversation.Id,
+                    ["conversationTitle"] = conversation.Title,
+                    ["id"] = a.Id,
+                    ["title"] = a.Title,
+                    ["type"] = a.Type,
+                    ["version"] = a.Version,
+                    ["updatedAt"] = a.UpdatedAt,
+                })));
+            }
+        }
+        return new JsonArray(items.OrderByDescending(i => i.UpdatedAt).Select(i => (JsonNode)i.Item).ToArray());
+    }
 
     async Task<JsonNode?> ExportArtifactAsync(string conversationId, string id)
     {
@@ -633,9 +761,10 @@ public sealed class AppHost : IAsyncDisposable
         var extension = artifact.Type switch
         {
             "html" => ".html",
+            "react" => ".jsx",
             "svg" => ".svg",
             "mermaid" => ".mmd",
-            "code" => ".txt",
+            "code" => CodeExtension(artifact.Language),
             _ => ".md",
         };
         var path = Path.Combine(paths.ExportsDir, $"{FileNameOf(artifact.Title)}-v{artifact.Version}{extension}");
@@ -644,6 +773,35 @@ public sealed class AppHost : IAsyncDisposable
         platform.OpenPath(paths.ExportsDir);
         return new JsonObject { ["path"] = path };
     }
+
+    static string CodeExtension(string? language) => language?.Trim().ToLowerInvariant() switch
+    {
+        "python" or "py" => ".py",
+        "javascript" or "js" => ".js",
+        "typescript" or "ts" => ".ts",
+        "tsx" => ".tsx",
+        "jsx" => ".jsx",
+        "csharp" or "c#" or "cs" => ".cs",
+        "java" => ".java",
+        "kotlin" => ".kt",
+        "go" => ".go",
+        "rust" => ".rs",
+        "ruby" => ".rb",
+        "php" => ".php",
+        "swift" => ".swift",
+        "c" => ".c",
+        "cpp" or "c++" => ".cpp",
+        "html" => ".html",
+        "css" => ".css",
+        "json" => ".json",
+        "yaml" or "yml" => ".yaml",
+        "xml" => ".xml",
+        "sql" => ".sql",
+        "bash" or "sh" or "shell" => ".sh",
+        "powershell" or "ps1" => ".ps1",
+        "batch" or "bat" => ".bat",
+        _ => ".txt",
+    };
 
     static readonly string[] ExecutableExtensions =
     [
@@ -668,6 +826,26 @@ public sealed class AppHost : IAsyncDisposable
         return Task.FromResult<JsonNode?>(null);
     }
 
+    Task<JsonNode?> SaveStyleAsync(string? id, string name, string text)
+    {
+        var saved = extensions.SaveOutputStyle(id, name, text);
+        return Task.FromResult<JsonNode?>(saved);
+    }
+
+    Task<JsonNode?> DeleteStyleAsync(string id)
+    {
+        var file = extensions.CustomStylePath(id);
+        if (File.Exists(file)) platform.MoveToTrash(file);
+        return Task.FromResult<JsonNode?>(null);
+    }
+
+    async Task<JsonNode?> GenerateStyleAsync(string request)
+    {
+        var engine = await hub.EngineAsync();
+        var style = await engine.GenerateStyleAsync(request) ?? throw new InvalidOperationException("スタイルを作れませんでした。説明を変えてもう一度試してください");
+        return new JsonObject { ["name"] = style.Name, ["text"] = style.Instructions };
+    }
+
     // 自作コマンドと Skills の本文を、送る文に展開する
     Task<JsonNode?> ExpandCommandAsync(string name, string args)
     {
@@ -690,27 +868,16 @@ public sealed class AppHost : IAsyncDisposable
 
     public static bool IsArtifactPath(string path) => path.StartsWith("artifact/", StringComparison.Ordinal);
 
-    // artifact/<会話>/<アーティファクト>
+    // artifact/<会話>/<アーティファクト>/<版>
     public async Task<string?> RenderArtifactAsync(string path)
     {
         var parts = path.Split('/');
-        if (parts.Length != 3 || await conversations.GetAsync(parts[1]) is not { } conversation) return null;
-        Artifact? artifact;
-        lock (conversation.Artifacts) artifact = conversation.Artifacts.FirstOrDefault(a => a.Id == parts[2]);
-        if (artifact is null) return null;
-        return artifact.Type switch
+        if (parts.Length != 4 || !int.TryParse(parts[3], out var version) || await conversations.GetAsync(parts[1]) is not { } conversation) return null;
+        lock (conversation.Artifacts)
         {
-            "html" => artifact.Content,
-            "svg" => $"<!doctype html><meta charset=\"utf-8\"><style>body{{margin:0;display:flex;justify-content:center;background:#fff}}svg{{max-width:100%;height:auto}}</style>{artifact.Content}",
-            "mermaid" => $$"""
-                <!doctype html><meta charset="utf-8">
-                <style>body{margin:16px;background:#fff;font-family:sans-serif}</style>
-                <pre class="mermaid">{{System.Net.WebUtility.HtmlEncode(artifact.Content)}}</pre>
-                <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
-                <script>mermaid.initialize({ startOnLoad: true, securityLevel: "strict" })</script>
-                """,
-            _ => null,
-        };
+            var artifact = conversation.Artifacts.FirstOrDefault(a => a.Id == parts[2]);
+            return artifact?.ContentOf(version) is { } content ? ArtifactPages.Render(artifact, content) : null;
+        }
     }
 
     // Schedules
@@ -762,18 +929,25 @@ public sealed class AppHost : IAsyncDisposable
 
     // Memory
 
-    string MemoryPath(string relative)
+    // folderId があればそのプロジェクトのメモリ。無ければ全体のメモリ
+    async Task<JsonNode?> MemoryAsync(JsonObject p, Func<string, JsonNode> action)
     {
-        var root = Path.GetFullPath(paths.MemoryDir);
+        var folderId = (string?)p["folderId"];
+        if (folderId is not null && await folders.GetAsync(folderId) is null) throw new InvalidOperationException("プロジェクトが見つかりません");
+        var root = Path.GetFullPath(MemoryToolProvider.RootFor(paths, folderId));
+        Directory.CreateDirectory(root);
+        return action(root);
+    }
+
+    static string MemoryPath(string root, string relative)
+    {
         var full = Path.GetFullPath(Path.Combine(root, relative.TrimStart('/', '\\')));
         if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("メモリのフォルダの外は扱えません");
         return full;
     }
 
-    JsonArray ListMemory()
+    static JsonArray ListMemory(string root)
     {
-        var root = Path.GetFullPath(paths.MemoryDir);
-        Directory.CreateDirectory(root);
         var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
         return new JsonArray(Directory.EnumerateFiles(root, "*", options)
             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
@@ -784,21 +958,6 @@ public sealed class AppHost : IAsyncDisposable
                 ["updatedAt"] = new DateTimeOffset(File.GetLastWriteTimeUtc(f)).ToUnixTimeMilliseconds(),
             })
             .ToArray());
-    }
-
-    async Task<JsonNode?> WriteMemoryAsync(string relative, string content)
-    {
-        var path = MemoryPath(relative);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.WriteAllTextAsync(path, content);
-        return ListMemory();
-    }
-
-    Task<JsonNode?> DeleteMemoryAsync(string relative)
-    {
-        var path = MemoryPath(relative);
-        if (File.Exists(path)) platform.MoveToTrash(path);
-        return Task.FromResult<JsonNode?>(ListMemory());
     }
 
     async Task<JsonNode?> SaveMcpAsync(JsonObject p)

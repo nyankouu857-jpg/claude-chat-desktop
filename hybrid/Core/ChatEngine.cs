@@ -68,17 +68,33 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
     static T FromJson<T>(JsonObject json) => JsonSerializer.Deserialize<T>(json.ToJsonString())!;
 
-    // 動的フィルタ版の検索と取得は内部でコード実行を使うので、コード実行と一緒に宣言すると 400 になる
+    // 検索結果を地域に合わせる。国コードは対応外だと 400 になるので、確実に分かるタイムゾーンだけ渡す
+    static readonly string? LocalTimeZone = TimeZoneInfo.Local.HasIanaId
+        ? TimeZoneInfo.Local.Id
+        : TimeZoneInfo.TryConvertWindowsIdToIanaId(TimeZoneInfo.Local.Id, out var iana) ? iana : null;
+
+    // 動的フィルタ版はコード実行の 20260120 以降と一緒に使え、そのときコード実行は無料になる。
+    // Haiku はプログラムからのツール呼び出しに対応していないので基本版にする
     static IEnumerable<BetaToolUnion> ServerTools(ChatOptions options)
     {
-        var basic = IsHaiku(options.Model) || options.CodeExecution;
+        var basic = IsHaiku(options.Model);
         if (options.WebSearch)
         {
-            yield return FromJson<BetaToolUnion>(new JsonObject { ["type"] = basic ? "web_search_20250305" : "web_search_20260209", ["name"] = "web_search", ["max_uses"] = options.WebSearchMaxUses });
+            var search = new JsonObject { ["type"] = basic ? "web_search_20250305" : "web_search_20260209", ["name"] = "web_search", ["max_uses"] = options.WebSearchMaxUses };
+            if (LocalTimeZone is { } zone) search["user_location"] = new JsonObject { ["type"] = "approximate", ["timezone"] = zone };
+            yield return FromJson<BetaToolUnion>(search);
         }
         if (options.WebFetch)
         {
-            yield return FromJson<BetaToolUnion>(new JsonObject { ["type"] = basic ? "web_fetch_20250910" : "web_fetch_20260209", ["name"] = "web_fetch", ["max_uses"] = options.WebFetchMaxUses });
+            yield return FromJson<BetaToolUnion>(new JsonObject
+            {
+                ["type"] = basic ? "web_fetch_20250910" : "web_fetch_20260209",
+                ["name"] = "web_fetch",
+                ["max_uses"] = options.WebFetchMaxUses,
+                // 取得したページも検索と同じく出典を示させる。長いページで文脈を埋めないよう上限を置く
+                ["citations"] = new JsonObject { ["enabled"] = true },
+                ["max_content_tokens"] = 100_000,
+            });
         }
         if (options.CodeExecution)
         {
@@ -258,6 +274,17 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
                 var message = aggregator.Message();
                 var content = new JsonArray(message.Content.Select(b => (JsonNode)ToWire(b)).ToArray());
+                // 途中で断られた応答は完成した回答として扱わず捨てる。別モデルが書き直した (fallback) ときは残す
+                if (message.StopReason?.Raw() == "refusal" && !content.OfType<JsonObject>().Any(b => (string?)b["type"] == "fallback"))
+                {
+                    partialText.Clear();
+                    streamUsage = null;
+                    await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, "chat", ToWire(message.Usage));
+                    var category = (string?)ToWire(message)["stop_details"]?["category"];
+                    Notice(emit, category is null ? "Claude がこのリクエストへの応答を断りました" : $"Claude がこのリクエストへの応答を断りました ({category})");
+                    emit(new JsonObject { ["type"] = "discard" });
+                    return new ChatRunResult(ChatStatus.Done);
+                }
                 var assistant = new JsonObject { ["role"] = "assistant", ["content"] = content };
                 conversation.Append(assistant);
                 partialText.Clear();
@@ -284,8 +311,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     if (stopReason == "tool_use") continue;
                 }
 
-                if (stopReason == "refusal") Notice(emit, "Claude がこのリクエストへの応答を断りました");
-                else if (stopReason == "max_tokens") Notice(emit, "出力上限に達したため途中で終わっています");
+                if (stopReason == "max_tokens") Notice(emit, "出力上限に達したため途中で終わっています");
                 return new ChatRunResult(ChatStatus.Done);
             }
             Notice(emit, $"ツールの呼び出しが {options.MaxToolTurns} 回に達したので止めました。続けるには続きをお願いしてください");
@@ -586,8 +612,9 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
     public async Task<string?> GenerateTitleAsync(Conversation conversation)
     {
         var messages = conversation.CopyMessages();
-        var user = WireText.Of(messages.FirstOrDefault(m => (string?)m["role"] == "user")?["content"]);
-        var assistant = string.Join("\n", messages.Where(m => (string?)m["role"] == "assistant").Select(m => WireText.Of(m["content"])));
+        // claude.ai と同じく最初のやり取りで名付ける。ツールの途中経過は混ぜない
+        var user = WireText.Of(messages.FirstOrDefault(m => Conversation.IsHumanTurn(m))?["content"]);
+        var assistant = messages.Where(m => (string?)m["role"] == "assistant").Select(m => WireText.Of(m["content"]).Trim()).FirstOrDefault(t => t.Length > 0) ?? "";
         if (user.Length == 0 && assistant.Length == 0) return null;
         // タイトル用途なので長文は頭だけで十分
         static string Excerpt(string s) => s.Length > 2000 ? s[..2000] : s;
@@ -597,7 +624,9 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             Model = TitleModel,
             MaxTokens = 1024,
             OutputConfig = new NonBeta.OutputConfig { Effort = NonBeta.Effort.Low },
-            System = "会話の内容を表す短い日本語タイトルを20文字以内で1つだけ出力してください。記号や引用符、前置きは付けないでください。",
+            // タイトルに考える時間は要らない
+            Thinking = new NonBeta.ThinkingConfigDisabled(),
+            System = "Write a short title (at most about 20 characters, or 6 words) that captures what this conversation is about, in the same language as the user's message. Output only the title, with no quotes, punctuation at the end, or preamble.",
             Messages = [new() { Role = NonBeta.Role.User, Content = $"ユーザー:\n{Excerpt(user)}\n\nアシスタント:\n{Excerpt(assistant)}" }],
         });
         await ledger.RecordAsync(new UsageRecord
@@ -615,5 +644,35 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         var title = string.Concat(response.Content.Select(b => b.Value).OfType<NonBeta.TextBlock>().Select(t => t.Text)).Trim();
         if (title.Length == 0 || title == Conversation.DefaultTitle) return null;
         return title.Length > 40 ? title[..40] : title;
+    }
+
+    // claude.ai の「スタイルを作る」。説明か見本の文章から、文体の指示を書き起こす
+    public async Task<(string Name, string Instructions)?> GenerateStyleAsync(string request)
+    {
+        var response = await client.Messages.Create(new NonBeta.MessageCreateParams
+        {
+            Model = TitleModel,
+            MaxTokens = 2048,
+            OutputConfig = new NonBeta.OutputConfig { Effort = NonBeta.Effort.Low },
+            Thinking = new NonBeta.ThinkingConfigDisabled(),
+            System = "The user describes a writing style, or pastes a sample of writing whose style they want. Write instructions that tell an AI assistant how to write in that style: tone, formality, sentence length, structure, formatting, and word choice. On the first line, write only a short name for the style in the user's language. Then a blank line, then the instructions (under 150 words, in English). No preamble.",
+            Messages = [new() { Role = NonBeta.Role.User, Content = request.Length > 20_000 ? request[..20_000] : request }],
+        });
+        await ledger.RecordAsync(new UsageRecord
+        {
+            At = DateTimeOffset.UtcNow,
+            Kind = "style",
+            Model = TitleModel,
+            Input = response.Usage.InputTokens,
+            Output = response.Usage.OutputTokens,
+            CacheWrite = response.Usage.CacheCreationInputTokens ?? 0,
+            CacheRead = response.Usage.CacheReadInputTokens ?? 0,
+        });
+        if (response.StopReason?.Raw() == "refusal") return null;
+        var text = string.Concat(response.Content.Select(b => b.Value).OfType<NonBeta.TextBlock>().Select(t => t.Text)).Trim().Replace("\r\n", "\n");
+        var newline = text.IndexOf('\n');
+        if (newline < 0) return null;
+        var name = text[..newline].Trim().Trim('#', '*', ' ');
+        return (name.Length > 30 ? name[..30] : name, text[(newline + 1)..].Trim());
     }
 }

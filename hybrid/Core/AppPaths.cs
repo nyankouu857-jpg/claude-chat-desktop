@@ -18,6 +18,8 @@ public sealed class AppPaths
     public string UsageDir => Path.Combine(DataDir, "usage");
     public string FoldersFile => Path.Combine(DataDir, "folders.json");
     public string MemoryDir => Path.Combine(DataDir, "memory");
+    public string ProjectMemoryDir => Path.Combine(DataDir, "project-memory");
+    public string ProjectKnowledgeDir => Path.Combine(DataDir, "project-knowledge");
     public string FilesDir => Path.Combine(DataDir, "files");
     public string CheckpointsDir => Path.Combine(DataDir, "checkpoints");
     public string ExportsDir => Path.Combine(DataDir, "exports");

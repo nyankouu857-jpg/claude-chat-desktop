@@ -9,9 +9,10 @@ public sealed class ProfileSettings
     public string Nickname { get; set; } = "";
     // claude.ai の個人設定と同じく、全会話のシステムプロンプトに入る
     public string Preferences { get; set; } = "";
-    // null は未選択、空文字は入力に合わせる
+    // null は未選択、空文字は入力に合わせる。どちらも書かれた言語で答える
     public string? Language { get; set; }
-    public const string DefaultLanguage = "Japanese";
+    // claude.ai の「あなたの仕事に最も近いものは?」
+    public string Occupation { get; set; } = "";
 }
 
 public sealed class AppearanceSettings
@@ -54,8 +55,11 @@ public sealed class AgentSettings
 public sealed class FeatureSettings
 {
     public bool Memory { get; set; } = true;
+    public bool ConfirmMemoryWrites { get; set; }
     public bool Artifacts { get; set; } = true;
     public bool ChatSearch { get; set; } = true;
+    // claude.ai と同じく Skills を 1 つずつ止められる
+    public List<string> DisabledSkills { get; set; } = [];
     // 確認なしモードは誤操作が怖いので、ここでオンにしたときだけ選べる
     public bool AllowBypassMode { get; set; }
 }

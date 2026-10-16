@@ -1,6 +1,6 @@
-import { ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, GitBranch, ListTree, LoaderCircle, Pencil, Square, Star, Trash, Workflow } from "lucide-react";
+import { ArrowDown, ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, Ghost, GitBranch, ListTree, LoaderCircle, Pencil, Square, Star, Trash, Workflow, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { compact, deleteConversation, exportConversation, navigate, starConversation, stopWorkflow } from "../actions";
+import { askConfirm, compact, deleteConversation, exportConversation, navigate, starConversation, stop, stopWorkflow } from "../actions";
 import { setState, useStore } from "../store";
 import { Composer } from "./Composer";
 import { MessageList } from "./Messages";
@@ -39,6 +39,7 @@ export function ChatView({ id }: { id: string }) {
   const status = useStore((s) => s.statuses[id]);
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
 
   useEffect(() => {
     pinned.current = true;
@@ -52,7 +53,7 @@ export function ChatView({ id }: { id: string }) {
 
   const title = conversation?.title ?? "";
   return (
-    <div className="chat-view">
+    <div className={`chat-view${conversation?.incognito ? " incognito" : ""}`}>
       <header className="chat-header">
         {parent && (
           <button type="button" className="crumb" title="親のチャットへ" onClick={() => navigate({ name: "chat", id: parent.id })}>
@@ -60,11 +61,12 @@ export function ChatView({ id }: { id: string }) {
           </button>
         )}
         {!parent && folder && (
-          <button type="button" className="crumb" title="このフォルダで新しいチャット" onClick={() => navigate({ name: "new", folderId: folder.id })}>
+          <button type="button" className="crumb" title="プロジェクトを開く" onClick={() => navigate({ name: "project", id: folder.id })}>
             <FolderIcon size={14} /> {folder.name}
           </button>
         )}
-        {conversation && (
+        {conversation?.incognito && <span className="incognito-label"><Ghost size={15} /> シークレットチャット</span>}
+        {conversation && !conversation.incognito && (
           <Dropdown
             trigger={(open, toggle) => (
               <button type="button" className={`title-button${open ? " open" : ""}`} onClick={toggle}>
@@ -80,13 +82,13 @@ export function ChatView({ id }: { id: string }) {
                   {conversation.starred ? "スターを外す" : "スターを付ける"}
                 </MenuItem>
                 <MenuItem icon={<Pencil size={16} />} onClick={() => { close(); setRenaming(true); }}>名前を変更</MenuItem>
-                {!conversation.parentId && <MenuItem icon={<FolderInput size={16} />} onClick={() => { close(); setMoving(true); }}>フォルダへ移動</MenuItem>}
+                {!conversation.parentId && <MenuItem icon={<FolderInput size={16} />} onClick={() => { close(); setMoving(true); }}>プロジェクトへ移動</MenuItem>}
                 <MenuItem icon={<Workflow size={16} />} onClick={() => { close(); setState((s) => ({ ...s, dialog: { kind: "tasks", conversationId: id } })); }}>タスク一覧</MenuItem>
                 <MenuItem icon={<ListTree size={16} />} onClick={() => { close(); void compact(id); }}>ここまでを要約する</MenuItem>
                 <MenuItem icon={<FileDown size={16} />} onClick={() => { close(); void exportConversation(id); }}>Markdown に書き出す</MenuItem>
                 <MenuItem icon={<Trash size={16} />} danger onClick={() => {
                   close();
-                  if (confirm(`${title} を削除しますか?`)) void deleteConversation(id);
+                  void (async () => { if (await askConfirm("チャットを削除", `「${title}」を削除しますか? この操作は取り消せません。`)) await deleteConversation(id); })();
                 }}>削除</MenuItem>
               </>
             )}
@@ -103,6 +105,13 @@ export function ChatView({ id }: { id: string }) {
             {usd(conversation.usage.costUsd)}
           </span>
         )}
+        {conversation?.incognito && (
+          <button type="button" className="icon-button" title="閉じて消す" onClick={async () => {
+            if (live) await stop(id);
+            await deleteConversation(id);
+            navigate({ name: "new", incognito: true });
+          }}><X size={16} /></button>
+        )}
       </header>
       <div
         className="chat-scroll"
@@ -110,11 +119,19 @@ export function ChatView({ id }: { id: string }) {
         onScroll={(e) => {
           const el = e.currentTarget;
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+          setAwayFromBottom(!pinned.current);
         }}
       >
         <MessageList conversationId={id} />
       </div>
       <div className="composer-dock">
+        {awayFromBottom && (
+          <button type="button" className="scroll-bottom" aria-label="いちばん下へ" onClick={() => {
+            pinned.current = true;
+            setAwayFromBottom(false);
+            scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
+          }}><ArrowDown size={16} /></button>
+        )}
         <RunningWorkflows conversationId={id} />
         <Composer conversationId={id} autoFocus={!live} />
       </div>

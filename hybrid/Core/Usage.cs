@@ -16,6 +16,9 @@ public sealed class ModelPrice
     public long? LongContextThreshold { get; set; }
     public decimal? LongContextInput { get; set; }
     public decimal? LongContextOutput { get; set; }
+    // キャッシュの読み書きも長い入力の単価になる
+    public decimal? LongContextCacheWrite { get; set; }
+    public decimal? LongContextCacheRead { get; set; }
 }
 
 public sealed class PricingTable
@@ -32,11 +35,11 @@ public sealed class PricingTable
         {
             ["claude-opus-5-5"] = new() { Input = 4m, Output = 20m, CacheWrite = 5m, CacheRead = 0.2m },
             ["claude-fable-5-1"] = new() { Input = 10m, Output = 50m, CacheWrite = 12.5m, CacheRead = 0.25m },
-            ["claude-sonnet-5-5"] = new() { Input = 2m, Output = 10m, CacheWrite = 2.5m, CacheRead = 0.2m },
+            ["claude-sonnet-5-5"] = new() { Input = 2m, Output = 10m, CacheWrite = 2.5m, CacheRead = 0.1m },
             ["claude-haiku-5-5"] = new()
             {
                 Input = 0.1m, Output = 0.5m, CacheWrite = 0.125m, CacheRead = 0.01m,
-                LongContextThreshold = 100_000, LongContextInput = 0.5m, LongContextOutput = 2.5m,
+                LongContextThreshold = 100_000, LongContextInput = 0.5m, LongContextOutput = 2.5m, LongContextCacheWrite = 0.625m, LongContextCacheRead = 0.05m,
             },
             // 回答拒否時にサーバー側で切り替わる先のモデル
             ["claude-opus-5"] = new() { Input = 5m, Output = 25m, CacheWrite = 6.25m, CacheRead = 0.5m },
@@ -52,7 +55,9 @@ public sealed class PricingTable
         var isLong = price.LongContextThreshold is long threshold && promptTokens > threshold;
         var inputRate = isLong ? price.LongContextInput ?? price.Input : price.Input;
         var outputRate = isLong ? price.LongContextOutput ?? price.Output : price.Output;
-        var tokens = r.Input * inputRate + r.Output * outputRate + r.CacheWrite * price.CacheWrite + r.CacheRead * price.CacheRead;
+        var cacheWriteRate = isLong ? price.LongContextCacheWrite ?? price.CacheWrite : price.CacheWrite;
+        var cacheReadRate = isLong ? price.LongContextCacheRead ?? price.CacheRead : price.CacheRead;
+        var tokens = r.Input * inputRate + r.Output * outputRate + r.CacheWrite * cacheWriteRate + r.CacheRead * cacheReadRate;
         return tokens / 1_000_000m + r.WebSearches * WebSearchPer1000 / 1000m;
     }
 }
@@ -98,10 +103,32 @@ public sealed class UsageLedger(AppPaths paths)
             pricing = PricingTable.Default();
             await Json.WriteAtomicAsync(paths.PricingFile, pricing);
         }
+        else if (CorrectOldDefaults(pricing))
+        {
+            await Json.WriteAtomicAsync(paths.PricingFile, pricing);
+        }
         return pricing;
     }
 
     public void ReloadPricing() => pricing = null;
+
+    // 前の版が書いた誤った初期値だけを直す。手で変えた値には触らない
+    static bool CorrectOldDefaults(PricingTable table)
+    {
+        var changed = false;
+        if (table.Models.TryGetValue("claude-sonnet-5-5", out var sonnet) && sonnet.CacheRead == 0.2m)
+        {
+            sonnet.CacheRead = 0.1m;
+            changed = true;
+        }
+        if (table.Models.TryGetValue("claude-haiku-5-5", out var haiku) && haiku.LongContextThreshold is not null && haiku.LongContextCacheRead is null)
+        {
+            haiku.LongContextCacheWrite = 0.625m;
+            haiku.LongContextCacheRead = 0.05m;
+            changed = true;
+        }
+        return changed;
+    }
 
     // 1か月1ファイルの追記型。後から料金表を直しても、トークン数から計算し直せるよう生の数も残す
     public async Task<UsageRecord> RecordAsync(UsageRecord record)

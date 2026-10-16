@@ -1,6 +1,6 @@
-import { BookOpen, Code, Coffee, Folder as FolderIcon, PenLine, Settings2, Sparkles } from "lucide-react";
+import { BookOpen, Code, Coffee, Folder as FolderIcon, Ghost, PenLine, Settings2, Sparkles } from "lucide-react";
 import { useState } from "react";
-import { openSettings, updateSettings } from "../actions";
+import { navigate, openSettings, updateSettings } from "../actions";
 import { LANGUAGES } from "../languages";
 import { setState, useStore } from "../store";
 import { Composer } from "./Composer";
@@ -44,30 +44,43 @@ export function NewChat() {
   const name = profile?.nickname || profile?.fullName;
   const [prefill, setPrefill] = useState<{ text: string; nonce: number }>();
   const folder = useStore((s) => (s.view.name === "new" && s.view.folderId ? s.folders.find((f) => f.id === (s.view as { folderId?: string }).folderId) : undefined));
+  const incognito = useStore((s) => s.view.name === "new" && !s.view.folderId && !!s.view.incognito);
   return (
-    <div className="new-chat-view">
+    <div className={`new-chat-view${incognito ? " incognito" : ""}`}>
+      {!folder && (
+        <button type="button" className={`incognito-toggle${incognito ? " on" : ""}`} title={incognito ? "シークレットチャットをやめる" : "シークレットチャット"} onClick={() => navigate({ name: "new", incognito: !incognito })}>
+          <Ghost size={18} />
+        </button>
+      )}
       <div className="new-chat-center">
-        <h1 className="greeting">
-          <span className="greeting-spark"><Spark size={36} /></span>
-          {greeting()}{name ? `、${name}さん` : ""}
-        </h1>
-        {profile && profile.language == null && <LanguagePicker />}
+        {incognito ? (
+          <div className="incognito-intro">
+            <h1 className="greeting"><Ghost size={32} /> シークレットチャット</h1>
+            <p>このチャットは履歴に残らず、メモリにも使われません。アプリを閉じると消えます。</p>
+          </div>
+        ) : (
+          <h1 className="greeting">
+            <span className="greeting-spark"><Spark size={36} /></span>
+            {greeting()}{name ? `、${name}さん` : ""}
+          </h1>
+        )}
+        {!incognito && profile && profile.language == null && <LanguagePicker />}
         {folder && (
           <div className="folder-banner">
             <FolderIcon size={15} />
-            <span>フォルダ「{folder.name}」の中にチャットを作ります</span>
-            <button type="button" className="icon-button tiny" title="フォルダの設定" onClick={() => setState((s) => ({ ...s, dialog: { kind: "folder", folderId: folder.id } }))}><Settings2 size={14} /></button>
+            <span>プロジェクト「{folder.name}」の中にチャットを作ります</span>
+            <button type="button" className="icon-button tiny" title="プロジェクトの設定" onClick={() => setState((s) => ({ ...s, dialog: { kind: "folder", folderId: folder.id } }))}><Settings2 size={14} /></button>
           </div>
         )}
         <Composer conversationId={null} autoFocus prefill={prefill} />
-        <div className="suggestions">
+        {!incognito && <div className="suggestions">
           {SUGGESTIONS.map((s) => (
             <button key={s.label} type="button" className="suggestion" onClick={() => setPrefill({ text: s.text, nonce: Date.now() })}>
               {s.icon}
               {s.label}
             </button>
           ))}
-        </div>
+        </div>}
       </div>
     </div>
   );

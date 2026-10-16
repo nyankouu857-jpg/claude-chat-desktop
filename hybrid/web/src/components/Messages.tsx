@@ -1,17 +1,19 @@
-import { Bell, Bot, CalendarClock, ChevronRight, Code, Copy, Download, ExternalLink, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, MessageSquare, PanelsTopLeft, Pencil, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
+import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, MessageSquare, PanelsTopLeft, Pencil, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
-import { approve, edit, navigate, openArtifact, openFile, retry, stopWorkflow, textOf, toast } from "../actions";
+import { approve, edit, navigate, openArtifact, openFile, retry, setQuote, stopWorkflow, switchBranch, textOf } from "../actions";
+import { MODELS } from "../models";
 import { findBuiltin } from "../builtins";
 import { renderMarkdown } from "../markdown";
 import { setState, useStore } from "../store";
 import type { Approval, LiveReply, WireBlock, WireMessage } from "../types";
 import { FileChip } from "./Composer";
 import { STATUS_LABELS, StatusDot } from "./Sidebar";
-import { Spark } from "./ui";
+import { Dropdown, MenuItem, Spark } from "./ui";
 
 export type Turn =
   | { kind: "human"; index: number; content: WireMessage["content"] }
-  | { kind: "assistant"; blocks: WireBlock[]; results: Record<string, WireBlock>; live: LiveReply | null };
+  // start は返事の最初のメッセージの位置。やり直しで分かれた版はここに付く
+  | { kind: "assistant"; start: number; human: number; blocks: WireBlock[]; results: Record<string, WireBlock>; live: LiveReply | null };
 
 const isToolResults = (m: WireMessage) =>
   m.role === "user" && Array.isArray(m.content) && m.content.length > 0 && m.content.every((b) => b.type === "tool_result");
@@ -19,14 +21,16 @@ const isToolResults = (m: WireMessage) =>
 export function buildTurns(messages: WireMessage[], live: LiveReply | undefined): Turn[] {
   const turns: Turn[] = [];
   let group: Extract<Turn, { kind: "assistant" }> | null = null;
+  let lastHuman = -1;
   messages.forEach((message, index) => {
     if (message.role === "user" && !isToolResults(message)) {
       group = null;
+      lastHuman = index;
       turns.push({ kind: "human", index, content: message.content });
       return;
     }
     if (!group) {
-      group = { kind: "assistant", blocks: [], results: {}, live: null };
+      group = { kind: "assistant", start: index, human: lastHuman, blocks: [], results: {}, live: null };
       turns.push(group);
     }
     if (message.role === "assistant") {
@@ -37,7 +41,7 @@ export function buildTurns(messages: WireMessage[], live: LiveReply | undefined)
   });
   if (live) {
     if (!group) {
-      group = { kind: "assistant", blocks: [], results: {}, live: null };
+      group = { kind: "assistant", start: messages.length, human: lastHuman, blocks: [], results: {}, live: null };
       turns.push(group);
     }
     const current: Extract<Turn, { kind: "assistant" }> = group;
@@ -48,22 +52,61 @@ export function buildTurns(messages: WireMessage[], live: LiveReply | undefined)
   return turns;
 }
 
-async function copyText(text: string) {
-  await navigator.clipboard.writeText(text);
-  toast("コピーしました");
+export interface Cite {
+  url?: string;
+  title?: string;
+  citedText?: string;
 }
 
-export const Markdown = memo(function Markdown({ text }: { text: string }) {
-  const html = useMemo(() => renderMarkdown(text), [text]);
+// 本文中の引用の位置の印。Markdown として解釈されない私用領域の文字で挟む
+const citeMark = (n: number) => `\uE000${n}\uE001`;
+const escapeAttr = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+
+export const ARTIFACT_TYPE_LABELS: Record<string, string> = { html: "HTML", react: "React", markdown: "文書", svg: "画像", mermaid: "図", code: "コード" };
+
+function citeChip(cites: Cite[]) {
+  const first = cites[0];
+  let label = first.title ?? "出典";
+  try { if (first.url) label = new URL(first.url).hostname.replace(/^www\./, ""); } catch { /* 表示用なので壊れた URL は題名で出す */ }
+  const tip = cites.map((c) => [c.title, c.citedText && `「${c.citedText}」`].filter(Boolean).join(" ")).join("\n");
+  const more = cites.length > 1 ? ` +${cites.length - 1}` : "";
+  return first.url
+    ? `<a class="cite-chip" href="${escapeAttr(first.url)}" title="${escapeAttr(tip)}">${escapeAttr(label)}${more}</a>`
+    : `<span class="cite-chip" title="${escapeAttr(tip)}">${escapeAttr(label)}${more}</span>`;
+}
+
+// 同じ出典を同じ文の後ろに何度も並べない
+function uniqueCites(citations: WireBlock[]): Cite[] {
+  const seen = new Set<string>();
+  const cites: Cite[] = [];
+  for (const c of citations) {
+    const key = c.url ?? c.document_title ?? c.title ?? "";
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cites.push({ url: c.url, title: c.title ?? c.document_title, citedText: c.cited_text });
+  }
+  return cites;
+}
+
+export const Markdown = memo(function Markdown({ text, cites }: { text: string; cites?: Cite[][] }) {
+  const html = useMemo(() => {
+    const rendered = renderMarkdown(text);
+    return cites?.length ? rendered.replace(/\uE000(\d+)\uE001/g, (_, n) => (cites[Number(n)] ? citeChip(cites[Number(n)]) : "")) : rendered;
+  }, [text, cites]);
   return (
     <div
       className="markdown"
       dangerouslySetInnerHTML={{ __html: html }}
       onClick={(e) => {
         const target = e.target as HTMLElement;
-        if (target.closest("[data-copy]")) {
+        const copyButton = target.closest<HTMLElement>("[data-copy]");
+        if (copyButton) {
           const code = target.closest(".code-block")?.querySelector("code");
-          if (code) void copyText(code.textContent ?? "");
+          if (code) void navigator.clipboard.writeText(code.textContent ?? "");
+          copyButton.textContent = "コピーしました";
+          // 押せたと分かる程度の時間
+          setTimeout(() => { copyButton.textContent = "コピー"; }, 2000);
           return;
         }
         const link = target.closest("a");
@@ -353,7 +396,7 @@ function ArtifactCard({ block, result, conversationId }: { block: WireBlock; res
       <PanelsTopLeft size={20} />
       <span className="artifact-card-text">
         <span className="artifact-card-title">{title}</span>
-        <span className="artifact-card-sub">{artifact ? `${artifact.type} ・ 版 ${artifact.version}` : result?.is_error ? "失敗しました" : "作っています..."}</span>
+        <span className="artifact-card-sub">{artifact ? `${ARTIFACT_TYPE_LABELS[artifact.type] ?? artifact.type} ・ 版 ${artifact.version}` : result?.is_error ? "失敗しました" : "作っています..."}</span>
       </span>
       {artifact && <span className="artifact-open">開く</span>}
     </button>
@@ -489,6 +532,54 @@ function GenericToolBlock({ block, result, conversationId, live }: { block: Wire
   );
 }
 
+// 編集ややり直しで分かれた版を行き来する「‹ 1/2 ›」
+function BranchNav({ conversationId, index, fork }: { conversationId: string; index: number; fork: { count: number; active: number } }) {
+  const running = useStore((s) => !!s.live[conversationId]);
+  return (
+    <span className="branch-nav">
+      <button type="button" className="icon-button tiny" aria-label="前の版" disabled={running || fork.active === 0} onClick={() => void switchBranch(conversationId, index, fork.active - 1)}><ChevronLeft size={14} /></button>
+      <span className="branch-count">{fork.active + 1} / {fork.count}</span>
+      <button type="button" className="icon-button tiny" aria-label="次の版" disabled={running || fork.active === fork.count - 1} onClick={() => void switchBranch(conversationId, index, fork.active + 1)}><ChevronRight size={14} /></button>
+    </span>
+  );
+}
+
+// claude.ai と同じく、コピーしたらしばらくチェックの印にする
+function CopyButton({ text, size = 15 }: { text: string; size?: number }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button type="button" className="icon-button small" title="コピー" onClick={async () => {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      // 押せたと分かる程度の時間
+      setTimeout(() => setCopied(false), 2000);
+    }}>{copied ? <Check size={size} /> : <Copy size={size} />}</button>
+  );
+}
+
+function RetryMenu({ conversationId, human }: { conversationId: string; human: number }) {
+  const current = useStore((s) => s.choice.model);
+  return (
+    <Dropdown
+      direction="auto"
+      trigger={(open, toggle) => (
+        <button type="button" className={`icon-button small${open ? " open" : ""}`} title="やり直す" onClick={toggle}><RotateCcw size={15} /></button>
+      )}
+    >
+      {(close) => (
+        <>
+          <MenuItem onClick={() => { close(); void retry(conversationId, { messageIndex: human }); }}>変更せずにやり直す</MenuItem>
+          <div className="menu-separator" />
+          <div className="menu-heading">モデルを変えてやり直す</div>
+          {MODELS.filter((m) => m.id !== current).map((m) => (
+            <MenuItem key={m.id} hint={m.description} onClick={() => { close(); void retry(conversationId, { messageIndex: human, model: m.id }); }}>{m.label}</MenuItem>
+          ))}
+        </>
+      )}
+    </Dropdown>
+  );
+}
+
 // useStore の戻り値が毎回別の配列だと再描画が止まらなくなるので、空は使い回す
 const NO_NOTICES: string[] = [];
 
@@ -505,14 +596,24 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
 
   const elements: ReactElement[] = [];
   let textBuffer = "";
+  let cites: Cite[][] = [];
+  const sources = new Map<string, string>();
   const flushText = (key: string) => {
-    if (textBuffer) elements.push(<Markdown key={key} text={textBuffer} />);
+    if (textBuffer) elements.push(<Markdown key={key} text={textBuffer} cites={cites} />);
     textBuffer = "";
+    cites = [];
   };
   const lastIndex = turn.blocks.length - 1;
   turn.blocks.forEach((block, i) => {
     if (block.type === "text") {
       textBuffer += block.text ?? "";
+      // claude.ai と同じく、出典を使った文のすぐ後ろに出典を付ける
+      if (Array.isArray(block.citations) && block.citations.length > 0) {
+        const unique = uniqueCites(block.citations);
+        for (const c of unique) if (c.url) sources.set(c.url, c.title ?? c.url);
+        textBuffer += citeMark(cites.length);
+        cites.push(unique);
+      }
       return;
     }
     flushText(`text-${i}`);
@@ -534,6 +635,9 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
       case "compaction":
         elements.push(<CompactionBlock key={i} block={block} active={active} />);
         break;
+      case "redacted_thinking":
+        if (showThinking) elements.push(<div key={i} className="notice">一部の思考は安全上の理由で表示できません</div>);
+        break;
       case "fallback":
         elements.push(<div key={i} className="notice">{block.from?.model} が応答を断ったため {block.to?.model} が続きを書きました</div>);
         break;
@@ -541,7 +645,10 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
   });
   flushText("text-end");
 
-  const fullText = turn.blocks.filter((b) => b.type === "text").map((b) => b.text).join("");
+  const body = turn.blocks.filter((b) => b.type === "text").map((b) => b.text).join("");
+  // コピーしたときにも出典が残るように
+  const fullText = sources.size > 0 ? `${body}\n\n${[...sources].map(([url, title]) => `- [${title}](${url})`).join("\n")}` : body;
+  const forkView = useStore((s) => s.conversations[conversationId]?.forkView?.[String(turn.start)]);
   return (
     <div className="assistant-turn">
       {elements}
@@ -550,9 +657,10 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
         {/* claude.ai と同じく、マークは最新の回答の下にだけ出す */}
         {(isLast || live) && <span className={`footer-spark${live ? " live" : ""}`}><Spark size={live ? 22 : 18} spinning={!!live} /></span>}
         {!live && (
-          <div className={`message-actions${isLast ? " visible" : ""}`}>
-            <button type="button" className="icon-button small" title="コピー" onClick={() => void copyText(fullText)}><Copy size={15} /></button>
-            {isLast && <button type="button" className="icon-button small" title="やり直す" onClick={() => void retry(conversationId)}><RotateCcw size={15} /></button>}
+          <div className={`message-actions${isLast || forkView ? " visible" : ""}`}>
+            {forkView && <BranchNav conversationId={conversationId} index={turn.start} fork={forkView} />}
+            <CopyButton text={fullText} />
+            {turn.human >= 0 && <RetryMenu conversationId={conversationId} human={turn.human} />}
           </div>
         )}
         {isLast && !live && <span className="disclaimer">Claude は間違えることがあります。回答内容は必ずご確認ください。</span>}
@@ -563,6 +671,7 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
 
 function UserTurn({ turn, conversationId, running }: { turn: Extract<Turn, { kind: "human" }>; conversationId: string; running: boolean }) {
   const [editing, setEditing] = useState(false);
+  const fork = useStore((s) => s.conversations[conversationId]?.forkView?.[String(turn.index)]);
   const textBlocks: string[] = typeof turn.content === "string" ? [turn.content] : turn.content.filter((b) => b.type === "text").map((b) => b.text ?? "");
   const peers = textBlocks.map(parsePeer);
   // フックの補足のように本文に添えられたものは、本文と分けて小さく出す
@@ -619,12 +728,53 @@ function UserTurn({ turn, conversationId, running }: { turn: Extract<Turn, { kin
         {text && <div className="user-text">{text}</div>}
       </div>
       {peers.some(Boolean) && <div className="peer-turn attached">{peers.filter(Boolean).map((peer, i) => <PeerCard key={i} peer={peer!} />)}</div>}
-      <div className="user-actions">
-        <button type="button" className="icon-button small" title="コピー" onClick={() => void copyText(text)}><Copy size={14} /></button>
+      <div className={`user-actions${fork ? " visible" : ""}`}>
+        {fork && <BranchNav conversationId={conversationId} index={turn.index} fork={fork} />}
+        <CopyButton text={text} size={14} />
         {!running && <button type="button" className="icon-button small" title="編集" onClick={() => { setDraft(text); setKept([...documents, ...images]); setEditing(true); }}><Pencil size={14} /></button>}
         {!running && <button type="button" className="icon-button small" title="ここまで巻き戻す" onClick={() => setState((s) => ({ ...s, dialog: { kind: "rewind", conversationId, messageIndex: turn.index } }))}><History size={14} /></button>}
       </div>
     </div>
+  );
+}
+
+// claude.ai と同じく、回答の一部を選ぶと「返信」ボタンが出て、その部分を引用して返信できる
+function QuoteReply({ conversationId }: { conversationId: string }) {
+  const [selection, setSelection] = useState<{ text: string; x: number; y: number } | null>(null);
+  useEffect(() => {
+    const onUp = () => {
+      // クリックで選択が消えるのを待ってから読む
+      setTimeout(() => {
+        const current = window.getSelection();
+        const text = current?.toString().trim() ?? "";
+        const anchor = current?.anchorNode?.parentElement;
+        if (!text || !current || current.rangeCount === 0 || !anchor?.closest(".assistant-turn")) {
+          setSelection(null);
+          return;
+        }
+        const rect = current.getRangeAt(0).getBoundingClientRect();
+        setSelection({ text, x: rect.left + rect.width / 2, y: rect.top });
+      }, 0);
+    };
+    document.addEventListener("mouseup", onUp);
+    return () => document.removeEventListener("mouseup", onUp);
+  }, []);
+  if (!selection) return null;
+  return (
+    <button
+      type="button"
+      className="quote-reply"
+      style={{ left: selection.x, top: selection.y }}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => {
+        setQuote(conversationId, selection.text);
+        setSelection(null);
+        window.getSelection()?.removeAllRanges();
+        document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
+      }}
+    >
+      <Quote size={13} /> 返信
+    </button>
   );
 }
 
@@ -637,6 +787,7 @@ export function MessageList({ conversationId }: { conversationId: string }) {
   const lastAssistant = turns.map((t) => t.kind).lastIndexOf("assistant");
   return (
     <div className="message-list">
+      <QuoteReply conversationId={conversationId} />
       {turns.map((turn, i) =>
         turn.kind === "human"
           ? <UserTurn key={`h${turn.index}`} turn={turn} conversationId={conversationId} running={!!live} />

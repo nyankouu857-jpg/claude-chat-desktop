@@ -121,6 +121,7 @@ public sealed class ChatHub(
         var enabled = source["enabledSources"] is JsonArray list ? list.Select(n => (string?)n).OfType<string>().ToHashSet() : null;
         // サブエージェントはさらに子を作ったり、ほかのチャットを動かしたりしない
         if (depth > 0) enabled = (enabled ?? Tools.SourceNames().ToHashSet()).Where(s => s != AgentToolProvider.Source).ToHashSet();
+        if (conversation.Incognito) enabled = (enabled ?? Tools.SourceNames().ToHashSet()).Where(s => s is not (MemoryToolProvider.Source or ChatSearchToolProvider.Source)).ToHashSet();
         var folder = await folders.GetAsync(conversation.FolderId);
         string BuildPrompt() => SystemPrompt.Build(current, new PromptContext
         {
@@ -129,8 +130,13 @@ public sealed class ChatHub(
             Folder = folder,
             Conversation = conversation,
             Skills = enabled is null || enabled.Contains(SkillToolProvider.Source) ? extensions.ListSkills() : [],
-            OutputStyle = extensions.OutputStyleText(defaults.OutputStyle),
+            OutputStyle = extensions.OutputStyleText((string?)source["style"] ?? defaults.OutputStyle),
             IsAgent = depth > 0,
+            Model = (string?)source["model"] ?? conversation.Model ?? defaults.Model,
+            MemoryListing = current.Features.Memory && (enabled is null || enabled.Contains(MemoryToolProvider.Source))
+                ? MemoryToolProvider.PromptListing(MemoryToolProvider.RootFor(paths, conversation.FolderId))
+                : null,
+            ProjectKnowledge = folder is null ? null : ProjectKnowledge.PromptBlock(ProjectKnowledge.DirFor(paths, folder.Id)),
         }, DateTime.Now);
         return new ChatOptions
         {
@@ -533,6 +539,7 @@ public sealed class ChatHub(
         child.Kind = kind;
         child.ParentId = parent.Id;
         child.FolderId = parent.FolderId;
+        child.Incognito = parent.Incognito;
         child.WorkflowId = workflowId;
         child.WorktreePath = parent.WorktreePath;
         child.PermissionMode = parent.PermissionMode == "plan" ? "plan" : "default";

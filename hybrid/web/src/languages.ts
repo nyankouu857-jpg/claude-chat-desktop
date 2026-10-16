@@ -16,5 +16,3 @@ export const LANGUAGES: { value: string; label: string }[] = [
   { value: "Indonesian", label: "Bahasa Indonesia" },
   { value: "", label: "入力した言語に合わせる" },
 ];
-
-export const DEFAULT_LANGUAGE = "Japanese";

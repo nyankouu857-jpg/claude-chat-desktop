@@ -4,8 +4,11 @@ namespace ClaudeChat.Core;
 public sealed class Folder
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
-    public string Name { get; set; } = "新しいフォルダ";
+    public string Name { get; set; } = "新しいプロジェクト";
+    public string Description { get; set; } = "";
     public string Instructions { get; set; } = "";
+    public bool Starred { get; set; }
+    public bool Archived { get; set; }
     // folder: 同じフォルダの中だけ / all: どのチャットとも / none: 通信しない
     public string MessagingScope { get; set; } = "folder";
     public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -41,8 +44,10 @@ public sealed class FolderStore(AppPaths paths)
 
     public async Task<Folder> SaveAsync(Folder folder)
     {
-        if (string.IsNullOrWhiteSpace(folder.Name)) throw new InvalidOperationException("フォルダ名を入れてください");
+        if (string.IsNullOrWhiteSpace(folder.Name)) throw new InvalidOperationException("プロジェクト名を入れてください");
         if (!Scopes.Contains(folder.MessagingScope)) throw new InvalidOperationException("通信の範囲が不正です");
+        // ID はナレッジとメモリのフォルダ名になる。画面から来た値で外へ出られないようにする
+        if (!Guid.TryParseExact(folder.Id, "N", out _)) throw new InvalidOperationException("プロジェクトの ID が不正です");
         await gate.WaitAsync();
         try
         {
@@ -81,7 +86,10 @@ public sealed class FolderStore(AppPaths paths)
     {
         Id = f.Id,
         Name = f.Name,
+        Description = f.Description,
         Instructions = f.Instructions,
+        Starred = f.Starred,
+        Archived = f.Archived,
         MessagingScope = f.MessagingScope,
         CreatedAt = f.CreatedAt,
     };

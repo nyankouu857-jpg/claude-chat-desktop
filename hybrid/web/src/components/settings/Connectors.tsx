@@ -1,6 +1,6 @@
 import { Braces, ChevronRight, FileText, Pencil, Plus, RefreshCw, Trash } from "lucide-react";
 import { useState } from "react";
-import { openMcpLog, restartMcp, saveMcpServers, toast } from "../../actions";
+import { askConfirm, openMcpLog, restartMcp, saveMcpServers, toast } from "../../actions";
 import { useStore } from "../../store";
 import type { McpServerConfig, McpServerStatus, Settings } from "../../types";
 import { Dialog, Toggle } from "../ui";
@@ -181,8 +181,8 @@ function ServerCard({ status, config, servers, onEdit }: {
         <button type="button" className="icon-button small" title="再起動" disabled={!!config.disabled} onClick={() => void restartMcp(name)}><RefreshCw size={15} /></button>
         <button type="button" className="icon-button small" title="ログを開く" onClick={() => void openMcpLog(name)}><FileText size={15} /></button>
         <button type="button" className="icon-button small" title="編集" onClick={onEdit}><Pencil size={15} /></button>
-        <button type="button" className="icon-button small" title="削除" onClick={() => {
-          if (!confirm(`${name} を削除しますか?`)) return;
+        <button type="button" className="icon-button small" title="削除" onClick={async () => {
+          if (!(await askConfirm("コネクタを削除", `${name} を削除しますか?`))) return;
           const { [name]: _, ...rest } = servers;
           void saveMcpServers(rest);
         }}><Trash size={15} /></button>

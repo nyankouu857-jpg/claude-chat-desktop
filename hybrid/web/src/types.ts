@@ -30,9 +30,21 @@ export interface Todo {
 export interface Artifact {
   id: string;
   title: string;
-  type: "html" | "markdown" | "svg" | "mermaid" | "code";
+  type: "html" | "react" | "markdown" | "svg" | "mermaid" | "code";
   language?: string | null;
   content: string;
+  version: number;
+  updatedAt: number;
+  // 前の版。history[n] が版 n + 1
+  history?: { title: string; content: string; updatedAt: number }[];
+}
+
+export interface ArtifactListItem {
+  conversationId: string;
+  conversationTitle: string;
+  id: string;
+  title: string;
+  type: Artifact["type"];
   version: number;
   updatedAt: number;
 }
@@ -57,6 +69,9 @@ export interface Conversation {
   worktreePath?: string | null;
   lastRunStatus?: string | null;
   files: Record<string, string>;
+  // 編集ややり直しで分かれた位置ごとの版の数と、表示中の版
+  forkView?: Record<string, { count: number; active: number }>;
+  incognito?: boolean;
 }
 
 export interface ConversationSummary {
@@ -74,7 +89,10 @@ export interface ConversationSummary {
 export interface Folder {
   id: string;
   name: string;
+  description: string;
   instructions: string;
+  starred: boolean;
+  archived: boolean;
   messagingScope: "folder" | "all" | "none";
   createdAt: number;
 }
@@ -109,6 +127,7 @@ export interface CommandInfo {
 export interface Extensions {
   commands: CommandInfo[];
   outputStyles: { id: string; label: string; builtin: boolean }[];
+  skills: { name: string; description: string; enabled: boolean }[];
 }
 
 export interface Schedule {
@@ -152,7 +171,7 @@ export interface McpServerConfig {
 }
 
 export interface Settings {
-  profile: { fullName: string; nickname: string; preferences: string; language?: string | null };
+  profile: { fullName: string; nickname: string; occupation: string; preferences: string; language?: string | null };
   appearance: { theme: "light" | "dark" | "system"; chatFont: "default" | "sans" | "large" };
   chat: {
     model: string;
@@ -175,10 +194,16 @@ export interface Settings {
   programs: { enabled: boolean };
   browser: { enabled: boolean; executablePath?: string | null };
   agents: { enabled: boolean; maxConcurrent: number; maxWorkflowAgents: number; maxMessageHops: number };
-  features: { memory: boolean; artifacts: boolean; chatSearch: boolean; allowBypassMode: boolean };
+  features: { memory: boolean; confirmMemoryWrites: boolean; artifacts: boolean; chatSearch: boolean; disabledSkills: string[]; allowBypassMode: boolean };
   hooks: Record<string, HookEntry[]>;
   mcpServers: Record<string, McpServerConfig>;
   toolPermissions: Record<string, string>;
+}
+
+export interface KnowledgeFile {
+  name: string;
+  size: number;
+  updatedAt: number;
 }
 
 export interface FolderAccess {
@@ -248,14 +273,18 @@ export type ChatEvent =
   | { type: "tool-result"; toolUseId: string; result: WireBlock }
   | { type: "notice"; text: string }
   | { type: "inbound"; message: WireMessage }
+  | { type: "discard" }
   | { type: "state"; state: Pick<Conversation, "permissionMode" | "todos" | "artifacts"> }
   | { type: "file"; fileId: string; name: string; path: string }
   | { type: "done"; status: "done" | "aborted" | "failed"; error?: string; conversation: Conversation };
 
 export type View =
-  | { name: "new"; folderId?: string }
+  | { name: "new"; folderId?: string; incognito?: boolean }
   | { name: "chat"; id: string }
   | { name: "recents" }
+  | { name: "projects" }
+  | { name: "artifacts" }
+  | { name: "project"; id: string }
   | { name: "settings"; tab: SettingsTab };
 
 export type SettingsTab = "general" | "appearance" | "api" | "features" | "files" | "computer" | "agents" | "extensions" | "schedules" | "connectors" | "permissions" | "usage" | "data";

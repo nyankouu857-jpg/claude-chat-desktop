@@ -46,16 +46,28 @@ export function Dropdown({
   trigger: (open: boolean, toggle: () => void) => ReactNode;
   children: (close: () => void) => ReactNode;
   align?: "left" | "right";
-  direction?: "up" | "down";
+  // auto は下に入りきらなければ上に開く。会話の途中に置くメニュー向け
+  direction?: "up" | "down" | "auto";
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [up, setUp] = useState(false);
   const close = () => setOpen(false);
   const ref = useOutsideClick<HTMLDivElement>(open, close);
+  const toggle = () => {
+    if (!open && direction === "auto" && ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      const below = window.innerHeight - rect.bottom;
+      // 長めのメニューが収まる高さ
+      setUp(below < 360 && rect.top > below);
+    }
+    setOpen((o) => !o);
+  };
+  const side = direction === "auto" ? (up ? "up" : "down") : direction;
   return (
     <div className="dropdown" ref={ref}>
-      {trigger(open, () => setOpen((o) => !o))}
-      {open && <div className={`menu menu-${align} menu-${direction} ${className}`}>{children(close)}</div>}
+      {trigger(open, toggle)}
+      {open && <div className={`menu menu-${align} menu-${side} ${className}`}>{children(close)}</div>}
     </div>
   );
 }

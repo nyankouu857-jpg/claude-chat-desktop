@@ -62,7 +62,7 @@ public sealed class ArtifactToolProvider(SettingsStore settings) : IToolProvider
 {
     public const string Source = "artifacts";
     const string Prefix = "artifacts__";
-    static readonly string[] Types = ["html", "markdown", "svg", "mermaid", "code"];
+    static readonly string[] Types = ["html", "react", "markdown", "svg", "mermaid", "code"];
     // 1 つのアーティファクトの上限
     const int MaxChars = 500_000;
 
@@ -72,8 +72,8 @@ public sealed class ArtifactToolProvider(SettingsStore settings) : IToolProvider
         return
         [
             new(Prefix + "create", Source, "create", "アーティファクトを作る",
-                "Create an artifact shown in a panel beside the chat: a self-contained piece the user will reuse or view on its own, such as an HTML page or small app (type html, with inline CSS and JS; external scripts only from cdnjs.cloudflare.com), a document (markdown), an image (svg), a diagram (mermaid), or a long code file (code, with language). Do not use it for short answers or snippets.",
-                Schema(("title", "string", "Short title", true), ("type", "string", "html, markdown, svg, mermaid, or code", true), ("content", "string", "The full content", true), ("language", "string", "Programming language when type is code", false)),
+                "Create an artifact shown in a panel beside the chat: a self-contained piece the user will reuse or view on its own, such as an HTML page (type html, with inline CSS and JS; external scripts only from cdnjs.cloudflare.com), a React component (type react: one file with a default export, Tailwind classes, and imports only from react, recharts, lodash, papaparse, mathjs, d3, three, or chart.js), a document (markdown), an image (svg), a diagram (mermaid), or a long code file (code, with language). Do not use it for short answers or snippets.",
+                Schema(("title", "string", "Short title", true), ("type", "string", "html, react, markdown, svg, mermaid, or code", true), ("content", "string", "The full content", true), ("language", "string", "Programming language when type is code", false)),
                 AutoApprove: true, ReadOnly: true),
             new(Prefix + "update", Source, "update", "アーティファクトを直す",
                 "Change an existing artifact by id: either replace old_str with new_str (old_str must appear exactly once), or pass content to rewrite it entirely.",
@@ -121,6 +121,7 @@ public sealed class ArtifactToolProvider(SettingsStore settings) : IToolProvider
                 updated = string.Concat(target.Content.AsSpan(0, at), newStr, target.Content.AsSpan(at + oldStr.Length));
             }
             if (updated.Length > MaxChars) throw new ToolException("内容が大きすぎます");
+            target.History.Add(new ArtifactRevision { Title = target.Title, Content = target.Content, UpdatedAt = target.UpdatedAt });
             target.Content = updated;
             if ((string?)input["title"] is { Length: > 0 } title) target.Title = title;
             target.Version++;
@@ -143,10 +144,47 @@ public sealed class MemoryToolProvider(AppPaths paths, SettingsStore settings) :
         if (settings.Current?.Features.Memory != true || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
         return
         [
-            // 書き込みは全部の会話に残り続けるので、読むとき以外は確認する
+            // claude.ai のメモリは確認なしで書く。設定で確認を出すこともできる
             new("memory", Source, "memory", "メモリ", "Persistent memory across chats.", new JsonObject(),
+                AutoApprove: settings.Current?.Features.ConfirmMemoryWrites != true,
                 Native: new JsonObject { ["type"] = "memory_20250818", ["name"] = "memory" }, ReadOnlyCall: input => (string?)input["command"] == "view"),
         ];
+    }
+
+    // claude.ai と同じく、プロジェクトの会話はプロジェクトごとのメモリを使う
+    public static string RootFor(AppPaths paths, string? folderId) =>
+        folderId is null ? paths.MemoryDir : Path.Combine(paths.ProjectMemoryDir, folderId);
+
+    string MemoryRoot => RootFor(paths, ToolContext.Current?.Conversation.FolderId);
+
+    // 指示文に載せる分の上限。超えた分は名前だけ載せて、必要なら Claude が開く
+    const int MaxInlineChars = 12_000;
+
+    // 毎回ディレクトリを見に行かなくて済むよう、ファイル一覧と小さな中身を先に渡す
+    public static string? PromptListing(string root)
+    {
+        if (!Directory.Exists(root)) return null;
+        var files = Directory.EnumerateFiles(root, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.Hidden | FileAttributes.ReparsePoint })
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var builder = new StringBuilder("<memory>\nYour memory files from earlier chats (read and update them with the memory tool; save lasting facts and preferences about the user, not task progress; don't mention the memory system unless asked):\n");
+        if (files.Count == 0) builder.Append("(empty)\n");
+        var budget = MaxInlineChars;
+        foreach (var file in files)
+        {
+            var name = Root + "/" + Path.GetRelativePath(root, file).Replace('\\', '/');
+            var text = File.ReadAllText(file);
+            if (text.Length <= budget)
+            {
+                budget -= text.Length;
+                builder.Append($"<file path=\"{name}\">\n{text.TrimEnd()}\n</file>\n");
+            }
+            else
+            {
+                builder.Append($"<file path=\"{name}\" size=\"{text.Length}\" />\n");
+            }
+        }
+        return builder.Append("</memory>").ToString();
     }
 
     string Resolve(string? path)
@@ -154,8 +192,8 @@ public sealed class MemoryToolProvider(AppPaths paths, SettingsStore settings) :
         path = (path ?? "").Replace('\\', '/');
         if (path != Root && !path.StartsWith(Root + "/")) throw new ToolException($"パスは {Root} から始めてください");
         var relative = path[Root.Length..].TrimStart('/');
-        var full = Path.GetFullPath(Path.Combine(paths.MemoryDir, relative));
-        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(paths.MemoryDir));
+        var full = Path.GetFullPath(Path.Combine(MemoryRoot, relative));
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(MemoryRoot));
         if (full != root && !full.StartsWith(root + Path.DirectorySeparatorChar)) throw new ToolException($"{Root} の外は使えません");
         // リンクで外へ出させない
         for (var current = full; current.Length > root.Length; current = Path.GetDirectoryName(current)!)
@@ -166,11 +204,11 @@ public sealed class MemoryToolProvider(AppPaths paths, SettingsStore settings) :
         return full;
     }
 
-    string Virtual(string full) => Root + "/" + Path.GetRelativePath(paths.MemoryDir, full).Replace('\\', '/').TrimStart('.', '/');
+    string Virtual(string full) => Root + "/" + Path.GetRelativePath(MemoryRoot, full).Replace('\\', '/').TrimStart('.', '/');
 
     public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(paths.MemoryDir);
+        Directory.CreateDirectory(MemoryRoot);
         var command = Required(input, "command");
         return Task.FromResult(command switch
         {
@@ -243,7 +281,7 @@ public sealed class MemoryToolProvider(AppPaths paths, SettingsStore settings) :
     ToolCallResult Delete(JsonObject input)
     {
         var full = Resolve((string?)input["path"]);
-        if (full == Path.TrimEndingDirectorySeparator(Path.GetFullPath(paths.MemoryDir))) throw new ToolException("メモリ全体は消せません");
+        if (full == Path.TrimEndingDirectorySeparator(Path.GetFullPath(MemoryRoot))) throw new ToolException("メモリ全体は消せません");
         if (Directory.Exists(full)) Directory.Delete(full, recursive: true);
         else if (File.Exists(full)) File.Delete(full);
         else throw new ToolException($"{input["path"]} はありません");

@@ -1,10 +1,13 @@
 import { LoaderCircle } from "lucide-react";
 import { useEffect } from "react";
-import { useStore } from "../store";
+import { navigate, toggleSidebar } from "../actions";
+import { setState, useStore } from "../store";
 import { ArtifactPanel } from "./ArtifactPanel";
+import { ArtifactsPage } from "./Artifacts";
 import { ChatView } from "./ChatView";
 import { GlobalDialog } from "./Dialogs";
 import { NewChat } from "./NewChat";
+import { ProjectPage, ProjectsPage } from "./Projects";
 import { Recents } from "./Recents";
 import { SettingsPage } from "./settings/Settings";
 import { Sidebar } from "./Sidebar";
@@ -27,6 +30,31 @@ function useTheme() {
   }, [font]);
 }
 
+// claude.ai のキーボードショートカットにならう
+function useShortcuts() {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key.toLowerCase();
+      if (e.shiftKey && key === "o") {
+        e.preventDefault();
+        navigate({ name: "new" });
+      } else if (!e.shiftKey && key === "k") {
+        e.preventDefault();
+        navigate({ name: "recents" });
+      } else if (e.shiftKey && key === "s") {
+        e.preventDefault();
+        toggleSidebar();
+      } else if (key === "/") {
+        e.preventDefault();
+        setState((s) => ({ ...s, dialog: { kind: "shortcuts" } }));
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+}
+
 export function App() {
   const ready = useStore((s) => s.ready);
   const view = useStore((s) => s.view);
@@ -34,6 +62,7 @@ export function App() {
   // 開いているチャットのアーティファクトだけ横に出す
   const showArtifact = useStore((s) => !!s.artifact && s.view.name === "chat" && s.view.id === s.artifact.conversationId);
   useTheme();
+  useShortcuts();
 
   if (!ready) {
     return <div className="boot"><LoaderCircle className="spin" /></div>;
@@ -46,6 +75,9 @@ export function App() {
         {view.name === "new" && <NewChat />}
         {view.name === "chat" && <ChatView key={view.id} id={view.id} />}
         {view.name === "recents" && <Recents />}
+        {view.name === "projects" && <ProjectsPage />}
+        {view.name === "artifacts" && <ArtifactsPage />}
+        {view.name === "project" && <ProjectPage key={view.id} id={view.id} />}
         {view.name === "settings" && <SettingsPage tab={view.tab} />}
       </main>
       {showArtifact && <ArtifactPanel />}

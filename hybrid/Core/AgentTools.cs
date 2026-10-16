@@ -128,11 +128,11 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
     async Task<ToolCallResult> ListChatsAsync(Conversation me)
     {
         var folder = await folders.GetAsync(me.FolderId);
-        var scope = folder is null ? "このチャットはフォルダに入っていないため、自分が始めたサブエージェントとしか通信できません" : folder.MessagingScope switch
+        var scope = folder is null ? "このチャットはプロジェクトに入っていないため、自分が始めたサブエージェントとしか通信できません" : folder.MessagingScope switch
         {
             "all" => "通信できる範囲: すべてのチャット",
-            "folder" => $"通信できる範囲: フォルダ「{folder.Name}」の中",
-            _ => $"フォルダ「{folder.Name}」は通信しない設定です。自分が始めたサブエージェントとだけ通信できます",
+            "folder" => $"通信できる範囲: プロジェクト「{folder.Name}」の中",
+            _ => $"プロジェクト「{folder.Name}」は通信しない設定です。自分が始めたサブエージェントとだけ通信できます",
         };
         var chats = await ReachableAsync(me);
         var lines = chats.Select(c => $"{c.Id}  [{hub.StatusOf(c)}]  {c.Title}{(c.Kind != "chat" ? $"  ({c.Kind})" : "")}");

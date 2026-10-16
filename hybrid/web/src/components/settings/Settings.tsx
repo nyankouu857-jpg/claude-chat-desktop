@@ -2,7 +2,7 @@ import { ExternalLink, FolderOpen, RefreshCw, TriangleAlert } from "lucide-react
 import { useEffect, useState, type ReactNode } from "react";
 import { navigate, openPath, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
 import { findBuiltin } from "../../builtins";
-import { DEFAULT_LANGUAGE, LANGUAGES } from "../../languages";
+import { LANGUAGES } from "../../languages";
 import { EFFORTS, MODELS } from "../../models";
 import { useStore } from "../../store";
 import type { Settings, SettingsTab } from "../../types";
@@ -52,6 +52,9 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
+// claude.ai のプロフィールの選択肢にならう
+const OCCUPATIONS = ["ソフトウェア開発", "データ分析", "デザイン", "プロダクトマネジメント", "マーケティング", "営業", "経営・管理", "教育", "研究", "学生", "医療", "法務", "金融", "ライティング・編集", "カスタマーサポート"];
+
 function General({ settings }: { settings: Settings }) {
   const [profile, setProfile] = useState(settings.profile);
   useEffect(() => setProfile(settings.profile), [settings.profile]);
@@ -67,9 +70,15 @@ function General({ settings }: { settings: Settings }) {
             <input className="input" value={profile.nickname} placeholder="例: たろう" onChange={(e) => setProfile({ ...profile, nickname: e.target.value })} />
           </Field>
         </div>
+        <Field label="あなたの仕事に最も近いものは?">
+          <input className="input" list="occupations" value={profile.occupation ?? ""} placeholder="選ぶか入力してください" onChange={(e) => setProfile({ ...profile, occupation: e.target.value })} />
+          <datalist id="occupations">
+            {OCCUPATIONS.map((o) => <option key={o} value={o} />)}
+          </datalist>
+        </Field>
       </Section>
       <Section title="Claude が答える言語" description="すべての会話で、この言語で答えるように Claude へ伝えます。">
-        <select className="input" value={profile.language ?? DEFAULT_LANGUAGE} onChange={(e) => setProfile({ ...profile, language: e.target.value })}>
+        <select className="input" value={profile.language ?? ""} onChange={(e) => setProfile({ ...profile, language: e.target.value })}>
           {LANGUAGES.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
           {profile.language && !LANGUAGES.some((l) => l.value === profile.language) && <option value={profile.language}>{profile.language}</option>}
         </select>

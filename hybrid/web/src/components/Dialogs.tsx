@@ -1,8 +1,8 @@
 import { LoaderCircle, Square } from "lucide-react";
 import { useEffect, useState } from "react";
-import { btw, navigate, rewind, rewindTurns, saveFolder, stop, stopWorkflow, textOf } from "../actions";
+import { answerConfirm, btw, generateStyle, getStyle, navigate, rewind, rewindTurns, saveFolder, saveStyle, setChoice, stop, stopWorkflow, textOf } from "../actions";
 import { allCommands } from "../commands";
-import { setState, useStore, type DialogState } from "../store";
+import { getState, setState, useStore, type DialogState } from "../store";
 import type { Folder } from "../types";
 import { Markdown, parsePeer } from "./Messages";
 import { STATUS_LABELS, StatusDot } from "./Sidebar";
@@ -136,21 +136,27 @@ function HelpDialog() {
 }
 
 const SCOPES: { id: Folder["messagingScope"]; label: string; hint: string }[] = [
-  { id: "folder", label: "このフォルダの中だけ", hint: "同じフォルダのチャット同士で通信できます" },
-  { id: "all", label: "すべてのチャット", hint: "フォルダの外のチャットにも送れます" },
+  { id: "folder", label: "このプロジェクトの中だけ", hint: "同じプロジェクトのチャット同士で通信できます" },
+  { id: "all", label: "すべてのチャット", hint: "プロジェクトの外のチャットにも送れます" },
   { id: "none", label: "通信しない", hint: "自分が始めたサブエージェントとだけやり取りします" },
 ];
 
 function FolderDialog({ dialog }: { dialog: Extract<DialogState, { kind: "folder" }> }) {
   const existing = useStore((s) => s.folders.find((f) => f.id === dialog.folderId));
-  const [draft, setDraft] = useState<Partial<Folder>>(existing ?? { name: "", instructions: "", messagingScope: "folder" });
+  const [draft, setDraft] = useState<Partial<Folder>>(existing ?? { name: "", description: "", instructions: "", messagingScope: "folder" });
   const save = async () => {
     if (!draft.name?.trim()) return;
-    if (await saveFolder(draft)) closeDialog();
+    const before = new Set(getState().folders.map((f) => f.id));
+    const folders = await saveFolder(draft);
+    if (!folders) return;
+    closeDialog();
+    // claude.ai と同じく、作ったらそのプロジェクトを開く
+    const created = folders.find((f) => !before.has(f.id));
+    if (created) navigate({ name: "project", id: created.id });
   };
   return (
     <Dialog
-      title={existing ? "フォルダの設定" : "新しいフォルダ"}
+      title={existing ? "プロジェクトの設定" : "新しいプロジェクト"}
       onClose={closeDialog}
       wide
       footer={
@@ -162,12 +168,16 @@ function FolderDialog({ dialog }: { dialog: Extract<DialogState, { kind: "folder
     >
       <label className="field">
         <span className="field-label">名前</span>
-        <input className="input" autoFocus value={draft.name ?? ""} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+        <input className="input" autoFocus value={draft.name ?? ""} placeholder="何に取り組んでいますか?" onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
       </label>
       <label className="field">
-        <span className="field-label">このフォルダのチャットへの指示</span>
-        <textarea className="input" rows={6} value={draft.instructions ?? ""} placeholder="例: このフォルダでは家計簿アプリを作っています。技術スタックは..." onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} />
-        <span className="field-hint">claude.ai のプロジェクトの指示と同じく、このフォルダのすべてのチャットに渡します</span>
+        <span className="field-label">説明 (省略可)</span>
+        <input className="input" value={draft.description ?? ""} placeholder="何を目指すプロジェクトですか?" onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+      </label>
+      <label className="field">
+        <span className="field-label">指示</span>
+        <textarea className="input" rows={6} value={draft.instructions ?? ""} placeholder="例: 家計簿アプリを作っています。技術スタックは..." onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} />
+        <span className="field-hint">このプロジェクトのすべてのチャットに渡します</span>
       </label>
       <div className="field-label">チャット同士の通信</div>
       <div className="radio-list">
@@ -183,6 +193,123 @@ function FolderDialog({ dialog }: { dialog: Extract<DialogState, { kind: "folder
   );
 }
 
+function ConfirmDialog({ dialog }: { dialog: Extract<DialogState, { kind: "confirm" }> }) {
+  return (
+    <Dialog
+      title={dialog.title}
+      onClose={() => answerConfirm(false)}
+      footer={
+        <>
+          <button type="button" className="button ghost" onClick={() => answerConfirm(false)}>キャンセル</button>
+          <button type="button" className="button danger" autoFocus onClick={() => answerConfirm(true)}>{dialog.confirmLabel}</button>
+        </>
+      }
+    >
+      <p className="settings-desc">{dialog.message}</p>
+    </Dialog>
+  );
+}
+
+const SHORTCUTS: [string, string][] = [
+  ["Ctrl + Shift + O", "新しいチャット"],
+  ["Ctrl + K", "チャットを検索"],
+  ["Ctrl + Shift + S", "サイドバーを開く・閉じる"],
+  ["Ctrl + /", "ショートカットの一覧"],
+  ["Esc", "応答を止める (入力欄で)"],
+  ["Enter / Shift + Enter", "送信 / 改行"],
+  ["/", "コマンドの候補"],
+];
+
+function ShortcutsDialog() {
+  return (
+    <Dialog title="キーボードショートカット" onClose={closeDialog} footer={<button type="button" className="button primary" onClick={closeDialog}>閉じる</button>}>
+      <div className="help-list">
+        {SHORTCUTS.map(([keys, label]) => (
+          <div key={keys} className="help-row"><kbd>{keys}</kbd><span>{label}</span></div>
+        ))}
+      </div>
+    </Dialog>
+  );
+}
+
+function StyleDialog({ dialog }: { dialog: Extract<DialogState, { kind: "style" }> }) {
+  const [source, setSource] = useState<"describe" | "sample">("describe");
+  const [request, setRequest] = useState("");
+  const [name, setName] = useState("");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const editing = !!dialog.styleId;
+
+  useEffect(() => {
+    if (!dialog.styleId) return;
+    void (async () => {
+      const style = await getStyle(dialog.styleId!);
+      if (!style) return;
+      setName(style.name);
+      setText(style.text);
+    })();
+  }, [dialog.styleId]);
+
+  const generate = async () => {
+    setBusy(true);
+    const prefix = source === "sample" ? "この文章の書き方をまねたスタイル:\n\n" : "";
+    const style = await generateStyle(prefix + request.trim());
+    setBusy(false);
+    if (!style) return;
+    setName(style.name);
+    setText(style.text);
+  };
+  const save = async () => {
+    const id = await saveStyle(dialog.styleId, name, text);
+    if (!id) return;
+    setChoice({ style: id });
+    closeDialog();
+  };
+
+  return (
+    <Dialog
+      title={editing ? "スタイルを編集" : "スタイルを作る"}
+      onClose={closeDialog}
+      wide
+      footer={
+        <>
+          <button type="button" className="button ghost" onClick={closeDialog}>キャンセル</button>
+          <button type="button" className="button primary" disabled={!name.trim() || !text.trim()} onClick={save}>保存して使う</button>
+        </>
+      }
+    >
+      {!editing && (
+        <>
+          <div className="segmented">
+            <button type="button" className={source === "describe" ? "on" : ""} onClick={() => setSource("describe")}>説明から作る</button>
+            <button type="button" className={source === "sample" ? "on" : ""} onClick={() => setSource("sample")}>見本の文章から作る</button>
+          </div>
+          <textarea
+            className="input"
+            rows={source === "sample" ? 8 : 3}
+            value={request}
+            placeholder={source === "sample" ? "まねしたい文章を貼り付けてください" : "例: 結論から先に、敬語で、箇条書きを多めに"}
+            onChange={(e) => setRequest(e.target.value)}
+          />
+          <div className="button-row">
+            <button type="button" className="button" disabled={!request.trim() || busy} onClick={generate}>
+              {busy ? <LoaderCircle size={14} className="spin" /> : null} Claude に書いてもらう
+            </button>
+          </div>
+        </>
+      )}
+      <label className="field">
+        <span className="field-label">名前</span>
+        <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label className="field">
+        <span className="field-label">指示</span>
+        <textarea className="input" rows={8} value={text} placeholder="Claude にどう書いてほしいか" onChange={(e) => setText(e.target.value)} />
+      </label>
+    </Dialog>
+  );
+}
+
 export function GlobalDialog() {
   const dialog = useStore((s) => s.dialog);
   if (!dialog) return null;
@@ -192,5 +319,8 @@ export function GlobalDialog() {
     case "tasks": return <TasksDialog dialog={dialog} />;
     case "help": return <HelpDialog />;
     case "folder": return <FolderDialog key={dialog.folderId ?? "new"} dialog={dialog} />;
+    case "confirm": return <ConfirmDialog dialog={dialog} />;
+    case "shortcuts": return <ShortcutsDialog />;
+    case "style": return <StyleDialog key={dialog.styleId ?? "new"} dialog={dialog} />;
   }
 }

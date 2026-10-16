@@ -16,12 +16,38 @@ public sealed class Artifact
 {
     public string Id { get; set; } = "";
     public string Title { get; set; } = "";
-    // html / markdown / svg / mermaid / code
+    // html / react / markdown / svg / mermaid / code
     public string Type { get; set; } = "markdown";
     public string? Language { get; set; }
     public string Content { get; set; } = "";
     public int Version { get; set; } = 1;
     public long UpdatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    // claude.ai と同じく前の版に戻って見られるよう、直す前の中身を残す。History[n] が版 n + 1
+    public List<ArtifactRevision> History { get; set; } = [];
+
+    public string? ContentOf(int version) =>
+        version == Version ? Content : version >= 1 && version <= History.Count ? History[version - 1].Content : null;
+}
+
+public sealed class ArtifactRevision
+{
+    public string Title { get; set; } = "";
+    public string Content { get; set; } = "";
+    public long UpdatedAt { get; set; }
+}
+
+// 編集ややり直しで分かれた先の 1 本。その時点より後の履歴と、その中でさらに分かれた先を持つ
+public sealed class BranchVersion
+{
+    public List<JsonObject> Messages { get; set; } = [];
+    public Dictionary<int, Fork> Forks { get; set; } = [];
+}
+
+// 同じ位置から分かれた版の束。表示中の版は会話の本体にあるので、その枠は null にしておく
+public sealed class Fork
+{
+    public List<BranchVersion?> Versions { get; set; } = [];
+    public int Active { get; set; }
 }
 
 public sealed class Conversation
@@ -59,6 +85,10 @@ public sealed class Conversation
     public string? LastRunStatus { get; set; }
     // コード実行で作られたファイル。API のファイル ID -> 手元に保存した場所
     public Dictionary<string, string> Files { get; set; } = [];
+    // claude.ai と同じく、編集ややり直しの前の版を消さずに残す。キーは分かれた位置
+    public Dictionary<int, Fork> Forks { get; set; } = [];
+    // claude.ai のシークレットチャット。ディスクにも一覧にも残さず、メモリにも書かせない
+    public bool Incognito { get; set; }
 
     // 応答中のスレッドと画面からの読み出しが同時に触るので、触るときは必ずこのロックを通す
     readonly Lock sync = new();
@@ -74,7 +104,57 @@ public sealed class Conversation
         {
             if (index < Messages.Count) Messages.RemoveRange(index, Messages.Count - index);
             if (ApiStart > Messages.Count) ApiStart = 0;
+            // 消した範囲で分かれていた版も一緒に捨てる
+            foreach (var key in Forks.Keys.Where(k => k >= index).ToList()) Forks.Remove(key);
         }
+    }
+
+    // index から後を今の版として取っておき、新しい空の版に切り替える。後に何も無ければ分けない
+    public void BranchFrom(int index)
+    {
+        lock (sync)
+        {
+            if (index >= Messages.Count)
+            {
+                foreach (var key in Forks.Keys.Where(k => k >= index).ToList()) Forks.Remove(key);
+                return;
+            }
+            var current = TakeTail(index);
+            if (!Forks.TryGetValue(index, out var fork)) Forks[index] = fork = new Fork { Versions = [null] };
+            fork.Versions[fork.Active] = current;
+            fork.Versions.Add(null);
+            fork.Active = fork.Versions.Count - 1;
+        }
+    }
+
+    public void SwitchBranch(int index, int version)
+    {
+        lock (sync)
+        {
+            if (!Forks.TryGetValue(index, out var fork) || version < 0 || version >= fork.Versions.Count) throw new InvalidOperationException("その版はありません");
+            if (version == fork.Active) return;
+            var target = fork.Versions[version] ?? throw new InvalidOperationException("その版はありません");
+            fork.Versions[fork.Active] = TakeTail(index);
+            Messages.AddRange(target.Messages);
+            foreach (var (key, nested) in target.Forks) Forks[key] = nested;
+            fork.Versions[version] = null;
+            fork.Active = version;
+        }
+    }
+
+    // index から後の履歴と、その中で分かれていた版を外して返す
+    BranchVersion TakeTail(int index)
+    {
+        var tail = new BranchVersion { Messages = Messages.GetRange(index, Messages.Count - index) };
+        Messages.RemoveRange(index, Messages.Count - index);
+        foreach (var key in Forks.Keys.Where(k => k > index).ToList())
+        {
+            tail.Forks[key] = Forks[key];
+            Forks.Remove(key);
+        }
+        // 要約がその先にあったら、要約前から送り直す
+        if (ApiStart >= index) ApiStart = 0;
+        return tail;
     }
 
     public bool HasFile(string fileId)
@@ -137,11 +217,12 @@ public sealed class Conversation
         }
     }
 
-    public JsonObject ToWire()
+    // 保存するときは分かれた版の中身まで。画面には版の数だけ送る
+    public JsonObject ToWire(bool includeBranches = false)
     {
         lock (sync)
         {
-            return new JsonObject
+            var wire = new JsonObject
             {
                 ["id"] = Id,
                 ["title"] = Title,
@@ -164,7 +245,11 @@ public sealed class Conversation
                 ["worktreePath"] = WorktreePath,
                 ["lastRunStatus"] = LastRunStatus,
                 ["files"] = new JsonObject(Files.Select(f => KeyValuePair.Create(f.Key, (JsonNode?)f.Value))),
+                ["incognito"] = Incognito,
+                ["forkView"] = new JsonObject(Forks.Select(f => KeyValuePair.Create(f.Key.ToString(), (JsonNode?)new JsonObject { ["count"] = f.Value.Versions.Count, ["active"] = f.Value.Active }))),
             };
+            if (includeBranches) wire["forks"] = Json.ToNode(Forks);
+            return wire;
         }
     }
 }
@@ -241,7 +326,8 @@ public sealed class ConversationStore(AppPaths paths)
         {
             if (deletedIds.Contains(conversation.Id)) return;
             if (touch) conversation.UpdatedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            await Json.WriteAtomicAsync(FilePath(conversation.Id), conversation.ToWire(), Json.Wire);
+            if (conversation.Incognito) return;
+            await Json.WriteAtomicAsync(FilePath(conversation.Id), conversation.ToWire(includeBranches: true), Json.Wire);
             var index = await LoadIndexAsync();
             index.RemoveAll(s => s.Id == conversation.Id);
             index.Add(new ConversationSummary

@@ -1,9 +1,9 @@
-import { FolderOpen, Plus, RefreshCw, Trash } from "lucide-react";
-import { useEffect, useState } from "react";
-import { openPath, refreshExtensions, saveHooks, toast } from "../../actions";
+import { FolderOpen, Plus, RefreshCw, Trash, Upload } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { importSkill, openPath, refreshExtensions, saveHooks, toast, updateSettings } from "../../actions";
 import { useStore } from "../../store";
 import type { HookEntry, Settings } from "../../types";
-import { NumberField } from "../ui";
+import { NumberField, Toggle } from "../ui";
 import { Section } from "./Settings";
 
 const HOOK_EVENTS: { id: string; label: string; hint: string; matcher: boolean }[] = [
@@ -41,17 +41,35 @@ export function Extensions({ settings }: { settings: Settings }) {
   useEffect(() => setHooks(settings.hooks), [settings.hooks]);
   useEffect(() => void refreshExtensions(), []);
   const dirty = JSON.stringify(hooks) !== JSON.stringify(settings.hooks);
-  const skills = commands.filter((c) => c.kind === "skill");
+  const skills = useStore((s) => s.extensions.skills);
+  const zipInput = useRef<HTMLInputElement>(null);
   const custom = commands.filter((c) => c.kind === "command");
   return (
     <>
       <Section title="Skills" description={<>Claude Code と同じ形の Skills です。<code>config/skills/名前/SKILL.md</code> に、name と description の front matter と手順を書きます。Claude は必要なときに自分で読み込みます。入力欄で <code>/名前</code> と打っても使えます。</>}>
         {skills.length === 0 ? <div className="empty-note">まだありません</div> : (
           <div className="list-card">
-            {skills.map((s) => <div key={s.name} className="list-row"><code>/{s.name}</code><span className="field-hint">{s.description}</span></div>)}
+            {skills.map((s) => (
+              <div key={s.name} className="list-row">
+                <code>/{s.name}</code>
+                <span className="field-hint">{s.description}</span>
+                <span className="spacer" />
+                <Toggle checked={s.enabled} label={`${s.name} を使う`} onChange={async (on) => {
+                  const disabled = settings.features.disabledSkills.filter((n) => n !== s.name);
+                  await updateSettings({ features: { disabledSkills: on ? disabled : [...disabled, s.name] } });
+                  await refreshExtensions();
+                }} />
+              </div>
+            ))}
           </div>
         )}
         <div className="button-row">
+          <button type="button" className="button" onClick={() => zipInput.current?.click()}><Upload size={14} /> ZIP から追加</button>
+          <input ref={zipInput} type="file" hidden accept=".zip,.skill" onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = "";
+            if (file) void importSkill(file);
+          }} />
           <button type="button" className="button" onClick={() => void openPath("skills")}><FolderOpen size={14} /> skills のフォルダを開く</button>
           <button type="button" className="button" onClick={() => void refreshExtensions()}><RefreshCw size={14} /> 読み直す</button>
         </div>
