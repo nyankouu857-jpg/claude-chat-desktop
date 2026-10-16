@@ -1,5 +1,5 @@
 import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, Mail, MessageSquare, PanelsTopLeft, Pencil, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
-import { memo, useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { Fragment, memo, useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
 import { answer, approve, edit, navigate, openArtifact, openFile, openMail, retry, setQuote, stopWorkflow, switchBranch, textOf } from "../actions";
 import { MODELS } from "../models";
 import { findBuiltin } from "../builtins";
@@ -389,6 +389,23 @@ function ApprovalCard({ conversationId, approval }: { conversationId: string; ap
         <button type="button" className="button ghost" onClick={() => approve(conversationId, approval.requestId, "deny")}>拒否</button>
       </div>
       {approval.allowAlways === false && !approval.autoReason && <div className="approval-note">内容によって何でもできる操作なので、毎回確認します</div>}
+    </div>
+  );
+}
+
+// 送る前の料金の確認。ツールに結び付かないので、会話の末尾に出す
+function CostApproval({ conversationId, approval }: { conversationId: string; approval: Approval }) {
+  return (
+    <div className="approval cost-approval">
+      <div className="approval-title"><TriangleAlert size={16} /><span>この送信は約 <b>${(approval.costUsd ?? 0).toFixed(2)}</b> かかる見込みです</span></div>
+      <div className="approval-desc">
+        送る量はおよそ {Math.round((approval.tokens ?? 0) / 10_000)} 万トークンです。{approval.cached ? "前回までの分はキャッシュから安く読まれる見込みです。" : "キャッシュが使えないので、全体を書き込みの単価で見積もっています。"}
+        ${approval.limitUsd} を超えそうな送信は確認しています。金額は設定の「使用量と料金」で変えられます。
+      </div>
+      <div className="approval-actions">
+        <button type="button" className="button primary" onClick={() => approve(conversationId, approval.requestId, "once")}>送る</button>
+        <button type="button" className="button ghost" onClick={() => approve(conversationId, approval.requestId, "deny")}>やめる</button>
+      </div>
     </div>
   );
 }
@@ -956,6 +973,16 @@ function QuoteReply({ conversationId }: { conversationId: string }) {
   );
 }
 
+// 要約の境目より後の最初のやり取りの位置。境目が返答の途中なら、その返答の位置
+function compactionPosition(turns: Turn[], apiStart: number, messageCount: number) {
+  const position = (t: Turn) => (t.kind === "human" ? t.index : t.start);
+  let at = turns.findIndex((t) => position(t) >= apiStart);
+  if (at === -1) at = turns.length;
+  const previous = turns[at - 1];
+  const insideReply = previous?.kind === "assistant" && position(previous) < apiStart && apiStart < messageCount && (at === turns.length || position(turns[at]) > apiStart);
+  return insideReply ? at - 1 : at;
+}
+
 export function MessageList({ conversationId }: { conversationId: string }) {
   const conversation = useStore((s) => s.conversations[conversationId]);
   const live = useStore((s) => s.live[conversationId]);
@@ -963,14 +990,24 @@ export function MessageList({ conversationId }: { conversationId: string }) {
   const turns = useMemo(() => buildTurns(conversation?.messages ?? [], live), [conversation?.messages, live]);
   if (!conversation) return <div className="loading"><LoaderCircle className="spin" /></div>;
   const lastAssistant = turns.map((t) => t.kind).lastIndexOf("assistant");
+  // /compact の要約は履歴の外にあるので、要約した境目に出す。応答の途中で要約したときは、その応答の前に出す
+  const compaction = conversation.compactionBlock;
+  const compactedAt = compaction ? compactionPosition(turns, conversation.apiStart, conversation.messages.length) : -1;
   return (
     <div className="message-list">
       <QuoteReply conversationId={conversationId} />
-      {turns.map((turn, i) =>
-        turn.kind === "human"
-          ? <UserTurn key={`h${turn.index}`} turn={turn} conversationId={conversationId} running={!!live} />
-          : <AssistantTurn key={`a${i}`} turn={turn} conversationId={conversationId} isLast={i === lastAssistant} />,
-      )}
+      {turns.map((turn, i) => (
+        <Fragment key={turn.kind === "human" ? `h${turn.index}` : `a${i}`}>
+          {compaction && i === compactedAt && <CompactionBlock block={compaction} active={false} />}
+          {turn.kind === "human"
+            ? <UserTurn turn={turn} conversationId={conversationId} running={!!live} />
+            : <AssistantTurn turn={turn} conversationId={conversationId} isLast={i === lastAssistant} />}
+        </Fragment>
+      ))}
+      {compaction && compactedAt === turns.length && <CompactionBlock block={compaction} active={false} />}
+      {live?.approvals.filter((a) => a.kind === "cost").map((a) => <CostApproval key={a.requestId} conversationId={conversationId} approval={a} />)}
+      {/* 送る前に止まって返答が無いときは、知らせを付ける返答も無い */}
+      {turns.at(-1)?.kind === "human" && ((conversation as any)._notices ?? []).map((n: string, i: number) => <div key={`n${i}`} className="notice">{n}</div>)}
       {error && (
         <div className="error-box">
           <TriangleAlert size={16} />

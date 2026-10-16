@@ -77,6 +77,8 @@ public sealed class Conversation
     public string PermissionMode { get; set; } = "default";
     // /compact で要約した後は、ここより前を API に送らない
     public int ApiStart { get; set; }
+    // API の「その場で要約」が返した塊。画面の履歴には入れず、API に送るときだけ先頭に付ける
+    public JsonObject? CompactionBlock { get; set; }
     public JsonArray? Todos { get; set; }
     public List<Artifact> Artifacts { get; set; } = [];
     // コード実行のコンテナ。続けて使うと前の計算結果やファイルが残る
@@ -104,7 +106,7 @@ public sealed class Conversation
         lock (sync)
         {
             if (index < Messages.Count) Messages.RemoveRange(index, Messages.Count - index);
-            if (ApiStart > Messages.Count) ApiStart = 0;
+            if (ApiStart > Messages.Count) (ApiStart, CompactionBlock) = (0, null);
             // 消した範囲で分かれていた版も一緒に捨てる
             foreach (var key in Forks.Keys.Where(k => k >= index).ToList()) Forks.Remove(key);
         }
@@ -153,8 +155,8 @@ public sealed class Conversation
             tail.Forks[key] = Forks[key];
             Forks.Remove(key);
         }
-        // 要約がその先にあったら、要約前から送り直す
-        if (ApiStart >= index) ApiStart = 0;
+        // 要約がその先にあったら、要約前から送り直す。塊の要約はその手前までを畳んだものなので、ちょうど境目なら使い続けられる
+        if (ApiStart > index || (ApiStart == index && CompactionBlock is null)) (ApiStart, CompactionBlock) = (0, null);
         return tail;
     }
 
@@ -195,7 +197,21 @@ public sealed class Conversation
     // API に送る分。手動の要約より前は送らない
     public List<JsonObject> CopyApiMessages()
     {
-        lock (sync) return Messages.Skip(Math.Min(ApiStart, Messages.Count)).Select(m => (JsonObject)m.DeepClone()).ToList();
+        lock (sync)
+        {
+            var messages = Messages.Skip(Math.Min(ApiStart, Messages.Count)).Select(m => (JsonObject)m.DeepClone()).ToList();
+            if (CompactionBlock is { } block) messages.Insert(0, new JsonObject { ["role"] = "assistant", ["content"] = new JsonArray(block.DeepClone()) });
+            return messages;
+        }
+    }
+
+    public void ApplyCompaction(JsonObject? block, int apiStart)
+    {
+        lock (sync)
+        {
+            CompactionBlock = block;
+            ApiStart = apiStart;
+        }
     }
 
     // アーティファクトのツールはリストそのものをロックして書き換える
@@ -240,6 +256,7 @@ public sealed class Conversation
                 ["options"] = Options?.DeepClone(),
                 ["permissionMode"] = PermissionMode,
                 ["apiStart"] = ApiStart,
+                ["compactionBlock"] = CompactionBlock?.DeepClone(),
                 ["todos"] = Todos?.DeepClone(),
                 ["artifacts"] = ArtifactsView(),
                 ["containerId"] = ContainerId,

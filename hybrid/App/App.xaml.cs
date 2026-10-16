@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -11,6 +12,22 @@ namespace ClaudeChat.App;
 public partial class App : Application
 {
     Mutex? singleInstance;
+    public const string UpdatedFlag = "--updated";
+    // 更新で起動し直したときは、前のプロセスが片付けを終えるまで待つ
+    static readonly TimeSpan UpdateHandoverWait = TimeSpan.FromSeconds(30);
+
+    static bool TryAcquire(Mutex mutex, TimeSpan wait)
+    {
+        try
+        {
+            return mutex.WaitOne(wait);
+        }
+        catch (AbandonedMutexException)
+        {
+            // 前のプロセスが手放さずに終わった。持ち主はもういない
+            return true;
+        }
+    }
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -18,8 +35,8 @@ public partial class App : Application
         var paths = AppPaths.Resolve();
         // 同じフォルダのデータを2つのプロセスが同時に書くと履歴が壊れる
         var mutexName = "ClaudeChat-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(paths.Root.ToLowerInvariant())))[..16];
-        singleInstance = new Mutex(true, mutexName, out var createdNew);
-        if (!createdNew)
+        singleInstance = new Mutex(false, mutexName);
+        if (!TryAcquire(singleInstance, e.Args.Contains(UpdatedFlag) ? UpdateHandoverWait : TimeSpan.Zero))
         {
             MessageBox.Show("ClaudeChat はすでに起動しています。", "ClaudeChat");
             Shutdown();
@@ -30,6 +47,7 @@ public partial class App : Application
             MessageBox.Show(args.Exception.Message, "ClaudeChat", MessageBoxButton.OK, MessageBoxImage.Error);
             args.Handled = true;
         };
+        WindowsPlatform.DeleteReplacedExe();
         CreateShortcutsOnFirstRun(paths);
         new MainWindow(paths).Show();
     }
@@ -68,6 +86,48 @@ sealed class DpapiProtector : ISecretProtector
 sealed partial class WindowsPlatform : IPlatform
 {
     public string Version => typeof(WindowsPlatform).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+
+    // CI が SourceRevisionId で埋めた「版+コミット」の後ろ半分
+    public string? Commit =>
+        typeof(WindowsPlatform).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+') is [_, var commit, ..] && commit.Length > 0 ? commit : null;
+
+    static string ReplacedExe(string exe) => exe + ".old";
+
+    // 動いている exe は消せないが名前は変えられる。名前を変えて新しい exe を置き、起動し直してから閉じる
+    public string? InstallUpdate(string newExePath)
+    {
+        var exe = Environment.ProcessPath;
+        if (exe is null) return "今の exe の場所が分かりません";
+        var old = ReplacedExe(exe);
+        try
+        {
+            if (File.Exists(old)) File.Delete(old);
+            File.Move(exe, old);
+            File.Move(newExePath, exe);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            if (!File.Exists(exe) && File.Exists(old)) File.Move(old, exe);
+            return $"exe を入れ替えられませんでした。書き込めないフォルダに置いているかもしれません: {e.Message}";
+        }
+        Process.Start(new ProcessStartInfo(exe, App.UpdatedFlag) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) });
+        Application.Current.Dispatcher.BeginInvoke(() => Application.Current.MainWindow?.Close());
+        return null;
+    }
+
+    // 前の版の exe は、そのプロセスが終わってからでないと消せない
+    public static void DeleteReplacedExe()
+    {
+        if (Environment.ProcessPath is not { } exe || !File.Exists(ReplacedExe(exe))) return;
+        try
+        {
+            File.Delete(ReplacedExe(exe));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // 次の起動で消す
+        }
+    }
 
     public void OpenPath(string path)
     {

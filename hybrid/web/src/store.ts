@@ -12,6 +12,7 @@ import type {
   SecretsView,
   Settings,
   SettingsTab,
+  UpdateInfo,
   View,
   WorkflowRun,
 } from "./types";
@@ -53,6 +54,9 @@ export interface AppState {
   secrets: SecretsView | null;
   paths: { root: string; isFallback: boolean } | null;
   version: string;
+  commit: string | null;
+  // 新しい版。installing は入れ替えて再起動するまでの間
+  update: (UpdateInfo & { installing?: boolean }) | null;
   summaries: ConversationSummary[];
   conversations: Record<string, Conversation>;
   live: Record<string, LiveReply>;
@@ -93,6 +97,8 @@ let state: AppState = {
   secrets: null,
   paths: null,
   version: "",
+  commit: null,
+  update: null,
   summaries: [],
   conversations: {},
   live: {},

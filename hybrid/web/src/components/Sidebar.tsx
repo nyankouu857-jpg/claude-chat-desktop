@@ -1,6 +1,6 @@
-import { Bot, ChartColumn, Shapes, Keyboard, ChevronRight, EllipsisVertical, Folder as FolderIcon, FolderInput, FolderOpen, MessagesSquare, PanelLeft, Pencil, Plug, Plus, Settings, Star, Trash, Workflow } from "lucide-react";
+import { Bot, ChartColumn, Shapes, Keyboard, ChevronRight, CircleArrowUp, EllipsisVertical, Folder as FolderIcon, FolderInput, FolderOpen, LoaderCircle, MessagesSquare, PanelLeft, Pencil, Plug, Plus, Settings, Star, Trash, Workflow, X } from "lucide-react";
 import { useState } from "react";
-import { askConfirm, deleteConversation, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
+import { askConfirm, deleteConversation, installUpdate, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
 import { setState, useStore } from "../store";
 import type { ChatStatus, ConversationSummary } from "../types";
 import { Dialog, Dropdown, MenuItem } from "./ui";
@@ -148,6 +148,7 @@ export function Sidebar() {
   const settingsTab = useStore((s) => s.settingsOverlay?.tab);
   const folders = useStore((s) => s.folders);
   const profile = useStore((s) => s.settings?.profile);
+  const update = useStore((s) => s.update);
   const secrets = useStore((s) => s.secrets);
   const activeId = view.name === "chat" ? view.id : null;
   const known = new Set(summaries.map((s) => s.id));
@@ -162,6 +163,24 @@ export function Sidebar() {
   // claude.ai と同じく、プロジェクトのチャットも最近の項目に並べる
   const recents = roots.filter((s) => !s.starred);
   const displayName = profile?.fullName || profile?.nickname || "あなた";
+
+  const updateBanner = update && (
+    <div className="update-banner" title={update.changes.length > 0 ? `変更点:\n${update.changes.join("\n")}` : undefined}>
+      <div className="update-banner-head">
+        {update.installing ? <LoaderCircle size={15} className="spin" /> : <CircleArrowUp size={15} />}
+        <span>{update.installing ? "更新しています。終わると起動し直します" : "新しい版があります"}</span>
+        {!update.installing && <button type="button" className="icon-button small" aria-label="閉じる" onClick={() => setState((s) => ({ ...s, update: null }))}><X size={14} /></button>}
+      </div>
+      {!update.installing && (
+        <>
+          {update.changes.length > 0 && <ul className="update-changes">{update.changes.slice(0, 3).map((c) => <li key={c}>{c}</li>)}</ul>}
+          <button type="button" className="button primary small" onClick={async () => {
+            if (await askConfirm("更新して起動し直しますか?", "新しい版をダウンロードして入れ替え、アプリを起動し直します。応答中のチャットは止まります。", "更新する")) await installUpdate();
+          }}>更新して起動し直す</button>
+        </>
+      )}
+    </div>
+  );
 
   const userMenu = (
     <Dropdown
@@ -247,6 +266,7 @@ export function Sidebar() {
         {recents.length > 0 && <div className="sidebar-section">最近の項目</div>}
         {recents.map((s) => <ConversationTree key={s.id} summary={s} depth={0} activeId={activeId} childrenOf={childrenOf} />)}
       </div>
+      {updateBanner}
       {userMenu}
     </nav>
   );

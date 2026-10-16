@@ -93,7 +93,7 @@ export function MenuItem({ icon, children, onClick, danger, checked, hint }: {
 }
 
 // 1 文字ごとに保存すると、消して打ち直す途中の値が保存されてしまう
-export function NumberField({ value, min, max, onCommit }: { value: number; min: number; max: number; onCommit: (value: number) => void }) {
+export function NumberField({ value, min, max, step = 1, onCommit }: { value: number; min: number; max: number; step?: number; onCommit: (value: number) => void }) {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
   const commit = () => {
@@ -102,12 +102,13 @@ export function NumberField({ value, min, max, onCommit }: { value: number; min:
       setDraft(String(value));
       return;
     }
-    const clamped = Math.min(max, Math.max(min, Math.round(parsed)));
+    // 小数の刻みで 0.1 + 0.2 のような誤差を残さない
+    const clamped = Number(Math.min(max, Math.max(min, Math.round(parsed / step) * step)).toFixed(2));
     setDraft(String(clamped));
     if (clamped !== value) onCommit(clamped);
   };
   return (
-    <input className="input number" type="number" min={min} max={max} value={draft}
+    <input className="input number" type="number" min={min} max={max} step={step} value={draft}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />

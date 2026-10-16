@@ -1,9 +1,9 @@
 import { RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { localUsage, openPath, orgUsage, reloadPricing, setSecret, toast } from "../../actions";
+import { localUsage, openPath, orgUsage, reloadPricing, setSecret, toast, updateSettings } from "../../actions";
 import { modelLabel } from "../../models";
 import { useStore } from "../../store";
-import { tokens, usd } from "../ui";
+import { NumberField, tokens, usd } from "../ui";
 import { Section } from "./Settings";
 
 interface Totals {
@@ -248,9 +248,40 @@ function OrgUsage() {
   );
 }
 
+function Budget() {
+  const budget = useStore((s) => s.settings?.budget);
+  if (!budget) return null;
+  return (
+    <Section title="料金の歯止め" description="金額は米ドルで、このアプリで記録した料金から数えます。0 にするとその歯止めは使いません。">
+      <div className="switch-row">
+        <div>
+          <div>この金額を超えそうな送信は確認する</div>
+          <div className="field-hint">送る量から入力の料金を見積もり、超えそうなら送る前にチャットに確認を出します。サブエージェントには出しません</div>
+        </div>
+        <NumberField value={budget.confirmRequestUsd} min={0} max={1000} step={0.01} onCommit={(v) => void updateSettings({ budget: { confirmRequestUsd: v } })} />
+      </div>
+      <div className="switch-row">
+        <div>
+          <div>1 日の上限</div>
+          <div className="field-hint">今日の合計が届いたら、明日まで送りません。サブエージェントや予定の実行も止まります</div>
+        </div>
+        <NumberField value={budget.dailyLimitUsd} min={0} max={100000} step={0.01} onCommit={(v) => void updateSettings({ budget: { dailyLimitUsd: v } })} />
+      </div>
+      <div className="switch-row">
+        <div>
+          <div>1 か月の上限</div>
+          <div className="field-hint">今月の合計が届いたら、来月まで送りません</div>
+        </div>
+        <NumberField value={budget.monthlyLimitUsd} min={0} max={1000000} step={0.01} onCommit={(v) => void updateSettings({ budget: { monthlyLimitUsd: v } })} />
+      </div>
+    </Section>
+  );
+}
+
 export function Usage() {
   return (
     <>
+      <Budget />
       <LocalUsage />
       <OrgUsage />
     </>

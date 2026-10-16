@@ -22,7 +22,8 @@ jobs:
         working-directory: hybrid/web
       - run: npm run typecheck
         working-directory: hybrid/web
-      - run: dotnet publish hybrid/App -c Release -o publish/ClaudeChat
+      # アプリが latest リリースと比べて更新を知らせるため、コミットを版に埋め込む
+      - run: dotnet publish hybrid/App -c Release -o publish/ClaudeChat -p:SourceRevisionId=${{ github.sha }}
       - uses: actions/upload-artifact@v4
         with:
           name: ClaudeChat

@@ -56,6 +56,23 @@ public sealed class AgentSettings
     public bool DeleteFinishedChildren { get; set; } = true;
 }
 
+public sealed class UpdateSettings
+{
+    public bool CheckOnStartup { get; set; } = true;
+    // 起動時に新しい版があれば、確認せずに入れ替えて再起動する
+    public bool AutoInstall { get; set; }
+}
+
+// 金額は米ドル。0 はその歯止めを使わない
+public sealed class BudgetSettings
+{
+    // 1 回の送信の見込みがこれを超えたら、送る前に確認する
+    public decimal ConfirmRequestUsd { get; set; } = 1m;
+    // その日 (その月) の合計がこれに届いたら、もう送らない
+    public decimal DailyLimitUsd { get; set; }
+    public decimal MonthlyLimitUsd { get; set; }
+}
+
 public sealed class FeatureSettings
 {
     public bool Memory { get; set; } = true;
@@ -136,6 +153,8 @@ public sealed class AppSettings
     public BrowserSettings Browser { get; set; } = new();
     public AgentSettings Agents { get; set; } = new();
     public FeatureSettings Features { get; set; } = new();
+    public BudgetSettings Budget { get; set; } = new();
+    public UpdateSettings Updates { get; set; } = new();
     // PreToolUse / PostToolUse / UserPromptSubmit / Stop / Notification
     public Dictionary<string, List<HookEntry>> Hooks { get; set; } = [];
     public Dictionary<string, McpServerConfig> McpServers { get; set; } = [];

@@ -116,7 +116,11 @@ public sealed class UsageLedger(AppPaths paths)
         return pricing;
     }
 
-    public void ReloadPricing() => pricing = null;
+    public void ReloadPricing()
+    {
+        pricing = null;
+        recent = null;
+    }
 
     // 前の版が書いた誤った初期値だけを直し、後から増えたモデルを足す。手で変えた値には触らない
     static bool CorrectOldDefaults(PricingTable table)
@@ -149,6 +153,7 @@ public sealed class UsageLedger(AppPaths paths)
         try
         {
             await File.AppendAllTextAsync(file, JsonSerializer.Serialize(record, Json.Wire) + "\n");
+            recent?.Add(record);
         }
         finally
         {
@@ -157,10 +162,49 @@ public sealed class UsageLedger(AppPaths paths)
         return record;
     }
 
-    async Task<List<UsageRecord>> ReadAllAsync()
+    // 料金の上限は送るたびに確かめるので、今月と先月の分だけ手元に持っておく。ファイルは UTC の月ごとなので、日本時間の月初めのために先月も読む
+    List<UsageRecord>? recent;
+
+    async Task<List<UsageRecord>> RecentAsync()
+    {
+        await gate.WaitAsync();
+        try
+        {
+            if (recent is null)
+            {
+                var now = DateTimeOffset.UtcNow;
+                var months = new[] { now, now.AddMonths(-1) }.Select(m => Path.Combine(paths.UsageDir, $"{m.UtcDateTime:yyyy-MM}.jsonl")).Where(File.Exists);
+                recent = await ReadFilesAsync(months);
+                var table = await GetPricingAsync();
+                foreach (var r in recent) r.CostUsd = table.Cost(r);
+            }
+            return recent.ToList();
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public async Task<(decimal Today, decimal Month)> SpentAsync()
+    {
+        var records = await RecentAsync();
+        var now = DateTimeOffset.Now;
+        var local = records.Select(r => (At: r.At.ToLocalTime(), Cost: r.CostUsd ?? 0)).ToList();
+        var today = local.Where(r => r.At.Date == now.Date).Sum(r => r.Cost);
+        var month = local.Where(r => r.At.Year == now.Year && r.At.Month == now.Month).Sum(r => r.Cost);
+        return (today, month);
+    }
+
+    public async Task<DateTimeOffset?> LastChatRequestAsync(string conversationId) =>
+        (await RecentAsync()).LastOrDefault(r => r.ConversationId == conversationId && r.Kind == "chat")?.At;
+
+    Task<List<UsageRecord>> ReadAllAsync() => ReadFilesAsync(Directory.EnumerateFiles(paths.UsageDir, "*.jsonl"));
+
+    static async Task<List<UsageRecord>> ReadFilesAsync(IEnumerable<string> files)
     {
         var records = new List<UsageRecord>();
-        foreach (var file in Directory.EnumerateFiles(paths.UsageDir, "*.jsonl"))
+        foreach (var file in files)
         {
             foreach (var line in await File.ReadAllLinesAsync(file))
             {

@@ -66,6 +66,7 @@ export interface Conversation {
   workflowId?: string | null;
   permissionMode: PermissionMode;
   apiStart: number;
+  compactionBlock?: WireBlock | null;
   todos?: Todo[] | null;
   artifacts: Artifact[];
   worktreePath?: string | null;
@@ -196,6 +197,8 @@ export interface Settings {
   programs: { enabled: boolean };
   browser: { enabled: boolean; executablePath?: string | null; mode: "dedicated" | "extension" };
   agents: { enabled: boolean; maxConcurrent: number; maxWorkflowAgents: number; maxMessageHops: number; autoApproveChildren: boolean; deleteFinishedChildren: boolean };
+  updates: { checkOnStartup: boolean; autoInstall: boolean };
+  budget: { confirmRequestUsd: number; dailyLimitUsd: number; monthlyLimitUsd: number };
   features: { memory: boolean; confirmMemoryWrites: boolean; artifacts: boolean; chatSearch: boolean; disabledSkills: string[]; allowBypassMode: boolean };
   hooks: Record<string, HookEntry[]>;
   mcpServers: Record<string, McpServerConfig>;
@@ -242,9 +245,17 @@ export interface McpServerStatus {
   tools: McpTool[];
 }
 
+export interface UpdateInfo {
+  available: boolean;
+  current: string | null;
+  latest: string;
+  publishedAt: string | null;
+  changes: string[];
+}
+
 export interface Approval {
   requestId: string;
-  kind?: "question";
+  kind?: "question" | "cost";
   toolUseId: string;
   apiName: string;
   source: string;
@@ -254,6 +265,11 @@ export interface Approval {
   allowAlways?: boolean;
   autoReason?: string;
   input: unknown;
+  // 料金の確認のときだけ
+  costUsd?: number;
+  tokens?: number;
+  cached?: boolean;
+  limitUsd?: number;
 }
 
 export interface LiveReply {
@@ -279,6 +295,7 @@ export type ChatEvent =
   | { type: "tool-running"; toolUseId: string }
   | { type: "tool-result"; toolUseId: string; result: WireBlock }
   | { type: "notice"; text: string }
+  | { type: "compacted"; apiStart: number; compactionBlock: WireBlock | null }
   | { type: "usage"; output: number }
   | { type: "options"; model?: string; effort?: Effort }
   | { type: "inbound"; message: WireMessage }

@@ -17,6 +17,7 @@ import type {
   SecretsView,
   Settings,
   SettingsTab,
+  UpdateInfo,
   View,
   WireBlock,
   WireMessage,
@@ -79,6 +80,12 @@ export async function init() {
   on("chats.status", ({ id, status }) => setState((s) => ({ ...s, statuses: { ...s.statuses, [id]: status } })));
   on("workflow.changed", (run: WorkflowRun) => setState((s) => ({ ...s, workflows: { ...s.workflows, [run.id]: run } })));
   on("folders.changed", () => void refreshFolders());
+  on("update.available", (info: UpdateInfo) => setState((s) => ({ ...s, update: info })));
+  on("update.installing", (info: UpdateInfo) => setState((s) => ({ ...s, update: { ...info, installing: true } })));
+  on("update.failed", (message: string) => {
+    setState((s) => ({ ...s, update: s.update && { ...s.update, installing: false } }));
+    toast(`更新できませんでした: ${message}`, "error");
+  });
   const data = await call("app.init");
   setState((s) => ({
     ...s,
@@ -87,6 +94,7 @@ export async function init() {
     secrets: data.secrets,
     paths: data.paths,
     version: data.version,
+    commit: data.commit ?? null,
     summaries: data.conversations,
     mcp: data.mcp,
     folders: data.folders,
@@ -252,6 +260,12 @@ function applyChatEvent(id: string, event: ChatEvent) {
     case "notice":
       updateLive(id, (live) => ({ ...live, notices: [...live.notices, event.text] }));
       break;
+    case "compacted":
+      setState((s) => {
+        const conversation = s.conversations[id];
+        return conversation ? putConversation(s, { ...conversation, apiStart: event.apiStart, compactionBlock: event.compactionBlock }) : s;
+      });
+      break;
     case "inbound":
       // ほかのチャットや予定から届いた発言。開いていない会話は開いたときに読み込む
       setState((s) => {
@@ -392,6 +406,20 @@ export async function switchBranch(conversationId: string, index: number, versio
 export async function edit(conversationId: string, messageIndex: number, content: WireMessage["content"]) {
   const conversation = await guard(() => call<Conversation>("chat.edit", { conversationId, messageIndex, content, ...chatOptions() }));
   if (conversation) setState((s) => putConversation(s, conversation));
+}
+
+export async function checkUpdate() {
+  const info = await guard(() => call<UpdateInfo>("app.checkUpdate"));
+  if (!info) return;
+  setState((s) => ({ ...s, update: info.available ? info : null }));
+  if (!info.available) toast(info.current ? "最新版です" : "手元でビルドした版なので、更新を確かめられません");
+}
+
+// 入れ替えが済むとアプリが閉じて、新しい版が起動する
+export async function installUpdate() {
+  setState((s) => ({ ...s, update: s.update && { ...s.update, installing: true } }));
+  const ok = await guard(async () => { await call("app.installUpdate"); return true; });
+  if (!ok) setState((s) => ({ ...s, update: s.update && { ...s.update, installing: false } }));
 }
 
 export async function approve(conversationId: string, requestId: string, decision: "once" | "always" | "deny") {

@@ -119,6 +119,8 @@ static Dictionary<string, string> ParseArgs(string[] args)
 sealed class ConsolePlatform(string trashDir) : IPlatform
 {
     public string Version => "dev";
+    public string? Commit => null;
+    public string? InstallUpdate(string newExePath) => "開発用のホストは更新できません";
     public void OpenPath(string path) => Console.WriteLine($"開く: {path}");
 
     // ブラウザからはフォルダ選択ダイアログを出せない

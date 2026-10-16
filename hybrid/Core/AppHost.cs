@@ -19,6 +19,10 @@ public interface IPlatform
     string? CreateShortcuts();
     // デスクトップの通知を出す。できなかったら理由を返す
     string? Notify(string title, string message);
+    // この exe を作ったコミット。手元でのビルドなど分からないときは null
+    string? Commit { get; }
+    // 取り出した新しい exe と今の exe を入れ替えて再起動する。できなかったら理由を返す
+    string? InstallUpdate(string newExePath);
 }
 
 // 画面 (WebView2 やブラウザ) とのやり取りを一手に引き受ける。通信路には依存しない
@@ -50,6 +54,9 @@ public sealed class AppHost : IAsyncDisposable
     readonly BrowserBridge bridge;
     readonly OrgCostClient orgCost;
     readonly HttpClient http = new();
+    readonly Updater updater;
+    // 画面を読み直すたびに確かめ直さない
+    int updateChecked;
 
     public AppHost(AppPaths paths, ISecretProtector protector, IPlatform platform, Action<string> send)
     {
@@ -67,6 +74,7 @@ public sealed class AppHost : IAsyncDisposable
         hooks = new Hooks(settings, paths);
         hub = new ChatHub(paths, settings, secrets, conversations, folders, ledger, hooks, extensions, events);
         hub.DeleteConversation = async id => await DeleteConversationAsync(id);
+        updater = new Updater(platform, http);
         workflows = new WorkflowRunner(hub, settings, conversations, events);
         scheduler = new Scheduler(paths, hub, conversations, events);
         mcp = new McpHub(paths);
@@ -215,6 +223,8 @@ public sealed class AppHost : IAsyncDisposable
         "usage.org" => OrgUsageAsync(Str(p, "range")),
         "pricing.reload" => ReloadPricingAsync(),
         "app.open" => OpenTargetAsync(Str(p, "target")),
+        "app.checkUpdate" => CheckUpdateAsync(),
+        "app.installUpdate" => InstallUpdateAsync(),
         "app.openMail" => OpenMailAsync((string?)p["to"] ?? "", (string?)p["subject"] ?? "", (string?)p["body"] ?? ""),
         "app.pickFolder" => Task.FromResult<JsonNode?>(platform.PickFolder()),
         "app.createShortcuts" => Task.FromResult<JsonNode?>(platform.CreateShortcuts() is { } failed ? throw new InvalidOperationException(failed) : null),
@@ -243,9 +253,57 @@ public sealed class AppHost : IAsyncDisposable
     async Task<Conversation> RequireConversationAsync(string id) =>
         await conversations.GetAsync(id) ?? throw new InvalidOperationException("会話が見つかりません");
 
+    async Task<JsonNode?> CheckUpdateAsync()
+    {
+        using var timeout = new CancellationTokenSource(UpdateCheckTimeout);
+        return (await updater.CheckAsync(timeout.Token)).ToWire();
+    }
+
+    async Task<JsonNode?> InstallUpdateAsync()
+    {
+        if (await updater.InstallAsync(CancellationToken.None) is { } problem) throw new InvalidOperationException(problem);
+        return null;
+    }
+
+    static readonly TimeSpan UpdateCheckTimeout = TimeSpan.FromSeconds(20);
+
+    // 起動時の更新の確認。自動で入れる設定なら、まだ何も動いていないうちに入れ替えて再起動する
+    async Task CheckUpdateOnStartupAsync()
+    {
+        var updates = (await settings.GetAsync()).Updates;
+        if (!updates.CheckOnStartup || platform.Commit is null) return;
+        try
+        {
+            using var timeout = new CancellationTokenSource(UpdateCheckTimeout);
+            var info = await updater.CheckAsync(timeout.Token);
+            if (!info.Available) return;
+            // 予定の実行などで応答中のチャットがあれば、止めないよう知らせるだけにする
+            if (updates.AutoInstall && hub.RunningView().Count == 0)
+            {
+                Emit("update.installing", info.ToWire());
+                try
+                {
+                    var problem = await updater.InstallAsync(CancellationToken.None);
+                    if (problem is null) return;
+                    Emit("update.failed", problem);
+                }
+                catch (Exception e) when (e is HttpRequestException or InvalidOperationException or IOException or UnauthorizedAccessException)
+                {
+                    Emit("update.failed", e.Message);
+                }
+            }
+            Emit("update.available", info.ToWire());
+        }
+        catch (Exception e) when (e is HttpRequestException or InvalidOperationException or OperationCanceledException)
+        {
+            // ネットにつながっていない起動もある。次の起動でまた確かめる
+        }
+    }
+
     async Task<JsonNode?> InitAsync()
     {
         await settings.GetAsync();
+        if (Interlocked.Exchange(ref updateChecked, 1) == 0) _ = Task.Run(CheckUpdateOnStartupAsync);
         // 起動直後から拡張機能がつなぎに来られるように
         await bridge.SyncAsync();
         var current = settings.Current ?? await settings.GetAsync();
@@ -263,6 +321,7 @@ public sealed class AppHost : IAsyncDisposable
             // 画面を読み直しても、応答中の表示と承認待ちを取り戻せるように
             ["running"] = hub.RunningView(),
             ["version"] = platform.Version,
+            ["commit"] = platform.Commit,
         };
     }
 
@@ -278,6 +337,8 @@ public sealed class AppHost : IAsyncDisposable
         ["browser"] = Json.ToNode(s.Browser),
         ["agents"] = Json.ToNode(s.Agents),
         ["features"] = Json.ToNode(s.Features),
+        ["budget"] = Json.ToNode(s.Budget),
+        ["updates"] = Json.ToNode(s.Updates),
         ["hooks"] = JsonSerializer.SerializeToNode(s.Hooks, Json.Wire),
         ["mcpServers"] = JsonSerializer.SerializeToNode(s.McpServers, Json.Wire),
         ["toolPermissions"] = JsonSerializer.SerializeToNode(s.ToolPermissions, Json.Wire),
@@ -330,6 +391,8 @@ public sealed class AppHost : IAsyncDisposable
             }
             if (patch["agents"] is JsonObject agents) s.Agents = Merge(s.Agents, agents);
             if (patch["features"] is JsonObject features) s.Features = Merge(s.Features, features);
+            if (patch["budget"] is JsonObject budget) s.Budget = Merge(s.Budget, budget);
+            if (patch["updates"] is JsonObject updates) s.Updates = Merge(s.Updates, updates);
             if (hookPatch is not null)
             {
                 // 画面が扱うのは決まった 5 つだけ。settings.json に手で書いたほかの項目は消さずに残す
@@ -681,7 +744,8 @@ public sealed class AppHost : IAsyncDisposable
 
     const string CompactPrompt = "Summarize this conversation so far so it can continue in a fresh context. Include the user's goals and preferences, decisions made, facts and numbers established, file paths and commands used, and anything still pending. Write it in the language of the conversation. Respond with the summary only.";
 
-    // Claude Code の /compact。要約を会話に足し、それより前は API に送らない。画面には全部残す
+    // Claude Code の /compact。直近のやり取りを残して、それより前を API の「その場で要約」で畳む。画面には全部残す。
+    // 対応していないモデルや、要約が返らなかったときは、自前で要約を会話に足す
     async Task<JsonNode?> CompactAsync(string conversationId, string? instructions)
     {
         var conversation = await RequireConversationAsync(conversationId);
@@ -690,6 +754,18 @@ public sealed class AppHost : IAsyncDisposable
         var options = await hub.OptionsForAsync(conversation);
         await hub.ExclusiveAsync(conversation, async token =>
         {
+            try
+            {
+                if (await engine.CompactOnDemandAsync(conversation, options, instructions, midTurn: false, token))
+                {
+                    await conversations.SaveAsync(conversation);
+                    return 0;
+                }
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // 自前の要約でやり直す
+            }
             var prompt = string.IsNullOrWhiteSpace(instructions) ? CompactPrompt : $"{CompactPrompt}\nAdditional instructions from the user: {instructions.Trim()}";
             var summary = await engine.AskAsideAsync(conversation, options, prompt, "compact", token);
             conversation.Append(new JsonObject
@@ -698,6 +774,7 @@ public sealed class AppHost : IAsyncDisposable
                 ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = $"<compact-summary>\nThe earlier part of this conversation was summarized to save context:\n\n{summary}\n</compact-summary>" }),
             });
             conversation.ApiStart = conversation.MessageCount - 1;
+            conversation.CompactionBlock = null;
             await conversations.SaveAsync(conversation);
             return 0;
         });

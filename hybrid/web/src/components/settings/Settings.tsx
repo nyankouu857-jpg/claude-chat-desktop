@@ -1,6 +1,6 @@
 import { ArrowLeft, ExternalLink, FolderOpen, Link2, Maximize2, Minimize2, RefreshCw, TriangleAlert, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { closeSettings, createShortcuts, openPath, openSettings, setSettingsFull, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
+import { checkUpdate, closeSettings, createShortcuts, installUpdate, openPath, openSettings, setSettingsFull, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
 import { findBuiltin } from "../../builtins";
 import { LANGUAGES } from "../../languages";
 import { ALL_MODELS, EFFORTS } from "../../models";
@@ -97,7 +97,41 @@ function General({ settings }: { settings: Settings }) {
           if (await updateSettings({ profile })) toast("保存しました");
         }}>変更を保存</button>
       </div>
+      <Updates settings={settings} />
     </>
+  );
+}
+
+function Updates({ settings }: { settings: Settings }) {
+  const version = useStore((s) => s.version);
+  const commit = useStore((s) => s.commit);
+  const update = useStore((s) => s.update);
+  const [checking, setChecking] = useState(false);
+  return (
+    <Section title="更新" description={`今の版: ${version}${commit ? ` (${commit.slice(0, 7)})` : " (手元でビルドした版)"}`}>
+      <div className="switch-row">
+        <div>
+          <div>起動したときに新しい版を確かめる</div>
+          <div className="field-hint">新しい版があれば、左下にお知らせを出します</div>
+        </div>
+        <Toggle checked={settings.updates.checkOnStartup} onChange={(v) => void updateSettings({ updates: { checkOnStartup: v } })} label="起動したときに新しい版を確かめる" />
+      </div>
+      <div className="switch-row">
+        <div>
+          <div>新しい版があれば自動で更新する</div>
+          <div className="field-hint">起動したときに確認せずに入れ替えて、起動し直します。予定の実行などで応答中のチャットがあるときは、お知らせだけにします</div>
+        </div>
+        <Toggle checked={settings.updates.autoInstall} onChange={(v) => void updateSettings({ updates: { autoInstall: v, ...(v ? { checkOnStartup: true } : {}) } })} label="新しい版があれば自動で更新する" />
+      </div>
+      <div className="settings-actions">
+        {update?.available && <button type="button" className="button primary" disabled={update.installing} onClick={() => void installUpdate()}>{update.installing ? "更新しています..." : "更新して起動し直す"}</button>}
+        <button type="button" className="button" disabled={checking} onClick={async () => {
+          setChecking(true);
+          await checkUpdate();
+          setChecking(false);
+        }}>{checking ? "確かめています..." : "今すぐ確かめる"}</button>
+      </div>
+    </Section>
   );
 }
 

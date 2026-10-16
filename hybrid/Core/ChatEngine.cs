@@ -34,6 +34,10 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
     // ツールがあると要約中にツールを呼んで要約が空になることがあるため、既定の指示を差し替える
     const string CompactInstructions = "Summarize the transcript inside <summary></summary> tags. Include everything needed to continue the conversation in the next context window: the user's goals and preferences, decisions made, facts and numbers established, file paths and commands used, and anything still pending. Write the summary in the language of the conversation. Do not call any tools while writing this summary; respond with text only.";
 
+    const string CompactOnDemandBeta = "compact-2026-09-04";
+    // 直近のやり取りは要約せずにそのまま残す。続きの細部が伝わり、残した分の思考も使い続けられる
+    const int KeepRecentTurns = 2;
+
     static bool IsHaiku(string model) => model.StartsWith("claude-haiku");
     // コード実行のコンテナで Word / Excel / PowerPoint / PDF を作るための公式スキル
     static readonly string[] OfficeSkillIds = ["docx", "xlsx", "pptx", "pdf"];
@@ -108,8 +112,10 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         }
     }
 
-    static MessageCreateParams BuildRequest(Conversation conversation, ChatOptions options, IReadOnlyList<ToolSpec> toolSpecs, List<JsonObject>? messages = null)
+    static MessageCreateParams BuildRequest(Conversation conversation, ChatOptions options, IReadOnlyList<ToolSpec> toolSpecs, List<JsonObject>? messages = null, bool compacting = false)
     {
+        // その場で要約した塊を持つ会話には、サーバー側の自動要約を一緒に付けられない
+        var onDemand = compacting || conversation.CompactionBlock is not null;
         var parameters = new MessageCreateParams
         {
             Model = options.Model,
@@ -140,7 +146,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         {
             parameters = parameters with { OutputConfig = new BetaOutputConfig { Format = format } };
         }
-        if (ModelCatalog.SupportsCompaction(options.Model))
+        if (ModelCatalog.SupportsCompaction(options.Model) && !onDemand)
         {
             parameters = parameters with
             {
@@ -167,6 +173,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
         List<ApiEnum<string, AnthropicBeta>> betas = ["thinking-binding-controls-2026-08-01"];
         if (ModelCatalog.SupportsCompaction(options.Model)) betas.Add("compact-2026-01-12");
+        if (onDemand) betas.Add(CompactOnDemandBeta);
         // トークン数で思考する世代は、ツールの合間に考えるのにこの印が要る
         if (ModelCatalog.UsesThinkingBudget(options.Model)) betas.Add("interleaved-thinking-2025-05-14");
         if (options.CodeExecution && options.OfficeSkills)
@@ -216,6 +223,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         CancellationToken cancellationToken)
     {
         var partialText = new SortedDictionary<int, string>();
+        // 高くつく送信の確認は 1 回の応答で 1 度だけ。ツールを使うたびに聞かない
+        var costConfirmed = conversation.ParentId is not null;
         // 止めたときに、実行済みのツールの結果を捨てないため
         var finishedResults = new JsonArray();
         // 途中で止まったリクエストも課金されるので、届いた分の使用量を覚えておく
@@ -232,6 +241,17 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 {
                     mode = conversation.PermissionMode;
                     options = options with { SystemPrompt = rebuild() };
+                }
+                await CompactIfLargeAsync(conversation, options, emit, cancellationToken);
+                if (await BudgetLimitAsync() is { } limitReached) return new ChatRunResult(ChatStatus.Failed, limitReached);
+                if (!costConfirmed && await ConfirmCostAsync(conversation, options, gate, cancellationToken) is { } approved)
+                {
+                    if (!approved)
+                    {
+                        Notice(emit, "料金が高くなりそうなので、送るのをやめました");
+                        return new ChatRunResult(ChatStatus.Done);
+                    }
+                    costConfirmed = true;
                 }
                 var toolSpecs = tools.GetTools(options.EnabledSources);
                 var aggregator = new BetaMessageContentAggregator();
@@ -442,25 +462,35 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         JsonArray results,
         CancellationToken cancellationToken)
     {
-        // サブエージェントは並べて呼ばれたら同時に動かす。1 本ずつ待つと並べた意味がない
-        var spawning = new List<Task<JsonObject>>();
+        // 並べて呼ばれたら同時に動かす。1 つずつ待つと並べた意味がない。結果の並びは呼ばれた順のまま
+        var together = new List<Task<JsonObject>>();
         foreach (var toolUse in toolUses)
         {
-            if ((string?)toolUse["name"] == AgentToolProvider.SpawnAgent)
+            if (CanRunTogether(toolUse))
             {
-                spawning.Add(RunToolAsync(toolUse));
+                together.Add(RunToolAsync(toolUse));
                 continue;
             }
-            await CollectSpawnedAsync();
+            await CollectTogetherAsync();
             results.Add(await RunToolAsync(toolUse));
         }
-        await CollectSpawnedAsync();
+        await CollectTogetherAsync();
         return results;
 
-        async Task CollectSpawnedAsync()
+        async Task CollectTogetherAsync()
         {
-            foreach (var result in await Task.WhenAll(spawning)) results.Add(result);
-            spawning.Clear();
+            foreach (var result in await Task.WhenAll(together)) results.Add(result);
+            together.Clear();
+        }
+
+        // 読むだけで確認も出ないものとサブエージェント。確認を挟むものは、カードが同時に何枚も出ないよう順番に動かす。
+        // ブラウザは 1 つのタブを取り合うので、読むだけでも順番
+        bool CanRunTogether(JsonObject toolUse)
+        {
+            var name = (string?)toolUse["name"] ?? "";
+            if (name == AgentToolProvider.SpawnAgent) return true;
+            if (tools.Find(name, options.EnabledSources) is not { } spec || spec.Source is BrowserToolProvider.Source or BrowserToolProvider.HiddenSource) return false;
+            return (spec.ReadOnly && spec.AutoApprove) || spec.ReadOnlyCall?.Invoke(toolUse["input"] as JsonObject ?? []) == true;
         }
 
         async Task<JsonObject> RunToolAsync(JsonObject toolUse)
@@ -697,6 +727,150 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         }
     }
 
+    // 要約や脇道の質問は長くならない。トークン数で思考する世代は、思考の分より多くないと受け付けられない
+    static int AsideMaxTokens(ChatOptions options) =>
+        ModelCatalog.UsesThinkingBudget(options.Model) ? Math.Max(16000, ModelCatalog.ThinkingBudget(options.Effort) + 8000) : 16000;
+
+    static bool IsOnlyCompaction(JsonObject message) =>
+        message["content"] is JsonArray blocks && blocks.OfType<JsonObject>().All(b => (string?)b["type"] == "compaction");
+
+    static bool HasCompaction(JsonObject message) =>
+        (message["content"] as JsonArray)?.OfType<JsonObject>().Any(b => (string?)b["type"] == "compaction") == true;
+
+    // 要約する範囲の終わり。ツールの呼び出しと結果は同じ側に置く。
+    // 応答の途中なら、最後のツールの呼び出しとその結果 (または新しい発言) だけを残す
+    static int CompactCut(List<JsonObject> messages, int start, bool midTurn)
+    {
+        if (midTurn)
+        {
+            var endsWithResults = messages.Count > 0 && (string?)messages[^1]["role"] == "user" && !Conversation.IsHumanTurn(messages[^1]);
+            return Math.Max(start, messages.Count - (endsWithResults ? 2 : 1));
+        }
+        var humans = Enumerable.Range(start, messages.Count - start).Where(i => Conversation.IsHumanTurn(messages[i])).ToList();
+        return humans.Count > KeepRecentTurns ? humans[^KeepRecentTurns] : messages.Count;
+    }
+
+    // API の「その場で要約」。直近のやり取りを残して、それより前を要約の塊 1 つに置き換える。要約できなかったら false
+    public async Task<bool> CompactOnDemandAsync(Conversation conversation, ChatOptions options, string? instructions, bool midTurn, CancellationToken cancellationToken)
+    {
+        if (!ModelCatalog.SupportsCompaction(options.Model)) return false;
+        var all = conversation.CopyMessages();
+        var start = Math.Min(conversation.ApiStart, all.Count);
+        var cut = CompactCut(all, start, midTurn);
+        // 残す側に自動の要約の塊があると、送る塊が 2 つになって断られる。そのときは全部を畳む
+        if (all.Skip(cut).Any(HasCompaction)) cut = all.Count;
+        var older = new List<JsonObject>();
+        if (conversation.CompactionBlock is { } previous) older.Add(new JsonObject { ["role"] = "assistant", ["content"] = new JsonArray(previous.DeepClone()) });
+        older.AddRange(all.Skip(start).Take(cut - start));
+        // 自動の要約の塊が途中にあれば、API はそれより前を読んでいない。塊を先頭にして要約し直す
+        var latest = older.FindLastIndex(HasCompaction);
+        if (latest > 0) older.RemoveRange(0, latest);
+        if (latest >= 0 && older[0]["content"] is JsonArray head)
+        {
+            while (head.Count > 0 && (string?)head[0]?["type"] != "compaction") head.RemoveAt(0);
+        }
+        if (older.All(IsOnlyCompaction)) return false;
+
+        var prompt = string.IsNullOrWhiteSpace(instructions) ? CompactInstructions : $"{CompactInstructions}\nAdditional instructions from the user: {instructions.Trim()}";
+        var request = BuildRequest(conversation, options, tools.GetTools(options.EnabledSources), older, compacting: true) with
+        {
+            MaxTokens = AsideMaxTokens(options),
+            Compaction = new BetaCompactionConfig { Instructions = prompt },
+        };
+        var message = await client.Beta.Messages.Create(request, cancellationToken);
+        var usage = ToWire(message.Usage);
+        await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, "compact", usage);
+        var block = message.Content.Select(b => ToWire(b)).FirstOrDefault(b => (string?)b["type"] == "compaction");
+        if (message.StopReason?.Raw() != "compaction" || block is null) return false;
+        conversation.ApplyCompaction(block, cut);
+        // 次の見積もりが要約前の大きさのままだと、すぐまた要約してしまう
+        conversation.Usage.Context = (usage["iterations"] as JsonArray)?.OfType<JsonObject>().Sum(i => (long?)i["output_tokens"] ?? 0) ?? 0;
+        return true;
+    }
+
+    static readonly JsonSerializerOptions Unescaped = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    // 英数字はおよそ 4 文字で 1 トークン、日本語などはおよそ 1 文字で 1 トークン
+    static long EstimateTokens(string text)
+    {
+        long ascii = 0, other = 0;
+        foreach (var c in text)
+        {
+            if (c < 128) ascii++;
+            else other++;
+        }
+        return ascii / 4 + other;
+    }
+
+    // 次に送る大きさの見積もり。前回送った分と、そのあと増えた分 (前回の返答と、ツールの結果や新しい発言)
+    static (long Previous, long Added) PromptSize(Conversation conversation)
+    {
+        var messages = conversation.CopyApiMessages();
+        var lastAssistant = Math.Max(0, messages.FindLastIndex(m => (string?)m["role"] == "assistant"));
+        return (conversation.Usage.Context, messages.Skip(lastAssistant).Sum(m => EstimateTokens(m.ToJsonString(Unescaped))));
+    }
+
+    // プロンプトのキャッシュ (ephemeral) が残る時間
+    static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
+
+    // 今日や今月の合計が上限に届いていたら、その理由
+    async Task<string?> BudgetLimitAsync()
+    {
+        var budget = (await settings.GetAsync()).Budget;
+        if (budget.DailyLimitUsd <= 0 && budget.MonthlyLimitUsd <= 0) return null;
+        var (today, month) = await ledger.SpentAsync();
+        if (budget.DailyLimitUsd > 0 && today >= budget.DailyLimitUsd) return $"今日の料金 (${today:0.00}) が上限の ${budget.DailyLimitUsd:0.##} に達したので、送るのを止めました。設定の「使用量と料金」で上限を変えられます";
+        if (budget.MonthlyLimitUsd > 0 && month >= budget.MonthlyLimitUsd) return $"今月の料金 (${month:0.00}) が上限の ${budget.MonthlyLimitUsd:0.##} に達したので、送るのを止めました。設定の「使用量と料金」で上限を変えられます";
+        return null;
+    }
+
+    // 送る量から入力の料金を見積もり、設定の金額を超えそうなら確認する。null は聞かなかった、true は送ってよい
+    async Task<bool?> ConfirmCostAsync(Conversation conversation, ChatOptions options, IApprovalGate gate, CancellationToken cancellationToken)
+    {
+        var limit = (await settings.GetAsync()).Budget.ConfirmRequestUsd;
+        if (limit <= 0) return null;
+        var (previous, added) = PromptSize(conversation);
+        // 5 分以内に送った会話は、前回までの分がキャッシュから安く読まれる。それ以外は書き込みの単価
+        var warm = await ledger.LastChatRequestAsync(conversation.Id) is { } last && DateTimeOffset.UtcNow - last < CacheLifetime;
+        var cached = warm ? previous : 0;
+        var cost = (await ledger.GetPricingAsync()).Cost(new UsageRecord { Model = options.Model, CacheRead = cached, CacheWrite = previous + added - cached });
+        if (cost is not { } usd || usd < limit) return null;
+        var decision = await gate.RequestAsync(new JsonObject
+        {
+            ["kind"] = "cost",
+            ["title"] = "料金",
+            ["toolUseId"] = "",
+            ["costUsd"] = usd,
+            ["tokens"] = previous + added,
+            ["cached"] = warm,
+            ["limitUsd"] = limit,
+        }, cancellationToken);
+        return decision is "once" or "always";
+    }
+
+    // その場で要約した会話は、サーバー側の自動要約が使えない。送る前に大きさを見積もり、設定の長さを超えていたら要約する
+    async Task CompactIfLargeAsync(Conversation conversation, ChatOptions options, Action<JsonObject> emit, CancellationToken cancellationToken)
+    {
+        if (conversation.CompactionBlock is null || !ModelCatalog.SupportsCompaction(options.Model)) return;
+        var (previous, added) = PromptSize(conversation);
+        if (previous + added < Math.Max(MinCompactThreshold, options.CompactThreshold)) return;
+        try
+        {
+            if (await CompactOnDemandAsync(conversation, options, null, midTurn: true, cancellationToken))
+            {
+                emit(new JsonObject { ["type"] = "compacted", ["apiStart"] = conversation.ApiStart, ["compactionBlock"] = conversation.CompactionBlock?.DeepClone() });
+                Notice(emit, "会話が長くなったので、古い部分を要約しました");
+                return;
+            }
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            Notice(emit, $"会話の要約に失敗しました: {Describe(e)}");
+            return;
+        }
+        Notice(emit, "会話の要約に失敗しました。このまま続けます");
+    }
+
     // /btw と /compact 用。履歴には何も足さず、答えだけ返す
     public async Task<string> AskAsideAsync(Conversation conversation, ChatOptions options, string prompt, string kind, CancellationToken cancellationToken)
     {
@@ -709,8 +883,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         messages.Add(new JsonObject { ["role"] = "user", ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = prompt }) });
         var request = BuildRequest(conversation, options, tools.GetTools(options.EnabledSources), messages) with
         {
-            // 要約や脇道の質問は長くならない。トークン数で思考する世代は、思考の分より多くないと受け付けられない
-            MaxTokens = ModelCatalog.UsesThinkingBudget(options.Model) ? Math.Max(16000, ModelCatalog.ThinkingBudget(options.Effort) + 8000) : 16000,
+            MaxTokens = AsideMaxTokens(options),
             ToolChoice = FromJson<BetaToolChoice>(new JsonObject { ["type"] = "none" }),
         };
         var message = await client.Beta.Messages.Create(request, cancellationToken);
