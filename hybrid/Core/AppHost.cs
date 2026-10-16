@@ -38,6 +38,7 @@ public sealed class AppHost : IAsyncDisposable
     readonly McpHub mcp;
     readonly TerminalToolProvider terminal;
     readonly BrowserToolProvider browser;
+    readonly BrowserBridge bridge;
     readonly OrgCostClient orgCost;
     readonly HttpClient http = new();
 
@@ -60,7 +61,8 @@ public sealed class AppHost : IAsyncDisposable
         scheduler = new Scheduler(paths, hub, conversations, events);
         mcp = new McpHub(paths);
         terminal = new TerminalToolProvider(settings);
-        browser = new BrowserToolProvider(settings, paths);
+        bridge = new BrowserBridge(settings);
+        browser = new BrowserToolProvider(settings, paths, bridge);
         // 同じ名前があれば先に並べたものが勝つので、MCP は最後
         hub.Tools = new ToolRegistry(
         [
@@ -191,6 +193,9 @@ public sealed class AppHost : IAsyncDisposable
         "pricing.reload" => ReloadPricingAsync(),
         "app.open" => OpenTargetAsync(Str(p, "target")),
         "app.pickFolder" => Task.FromResult<JsonNode?>(platform.PickFolder()),
+        "browser.extensionStatus" => Task.FromResult<JsonNode?>(new JsonObject { ["connected"] = bridge.Connected, ["version"] = bridge.Version, ["error"] = bridge.ListenError }),
+        "browser.writeExtension" => WriteExtensionAsync(),
+        "browser.resetToken" => ResetBrowserTokenAsync(),
         "chat.systemPrompt" => PreviewSystemPromptAsync((string?)p["conversationId"]),
         _ => throw new InvalidOperationException($"未知のメソッドです: {method}"),
     };
@@ -214,7 +219,10 @@ public sealed class AppHost : IAsyncDisposable
 
     async Task<JsonNode?> InitAsync()
     {
-        var current = await settings.GetAsync();
+        await settings.GetAsync();
+        // 起動直後から拡張機能がつなぎに来られるように
+        await bridge.SyncAsync();
+        var current = settings.Current ?? await settings.GetAsync();
         return new JsonObject
         {
             ["settings"] = SettingsView(current),
@@ -289,7 +297,13 @@ public sealed class AppHost : IAsyncDisposable
             if (patch["files"] is JsonObject files) s.Files = Merge(s.Files, files);
             if (patch["terminal"] is JsonObject terminalPatch) s.Terminal = Merge(s.Terminal, terminalPatch);
             if (patch["programs"] is JsonObject programs) s.Programs = Merge(s.Programs, programs);
-            if (patch["browser"] is JsonObject browserPatch) s.Browser = Merge(s.Browser, browserPatch);
+            if (patch["browser"] is JsonObject browserPatch)
+            {
+                // 接続コードは作り直しの窓口からだけ変える
+                browserPatch.Remove("extensionToken");
+                s.Browser = Merge(s.Browser, browserPatch);
+                if (s.Browser.Mode is not ("dedicated" or "extension")) s.Browser.Mode = "dedicated";
+            }
             if (patch["agents"] is JsonObject agents) s.Agents = Merge(s.Agents, agents);
             if (patch["features"] is JsonObject features) s.Features = Merge(s.Features, features);
             if (hookPatch is not null)
@@ -300,7 +314,8 @@ public sealed class AppHost : IAsyncDisposable
                     .ToDictionary(h => h.Key, h => h.Value);
             }
         });
-        return SettingsView(updated);
+        await bridge.SyncAsync();
+        return SettingsView(settings.Current ?? updated);
     }
 
     static T Merge<T>(T current, JsonObject patch)
@@ -314,6 +329,7 @@ public sealed class AppHost : IAsyncDisposable
     {
         var current = await settings.ReloadAsync();
         await mcp.ApplyAsync(current.McpServers);
+        await bridge.SyncAsync();
         return await InitAsync();
     }
 
@@ -1011,6 +1027,23 @@ public sealed class AppHost : IAsyncDisposable
         return Task.FromResult<JsonNode?>(null);
     }
 
+    // 拡張機能は Chrome に「パッケージ化されていない拡張機能」として読み込んでもらう。アプリの版に合わせて毎回書き直す
+    Task<JsonNode?> WriteExtensionAsync()
+    {
+        var dir = Path.Combine(paths.Root, "chrome-extension");
+        ChromeExtension.Write(dir);
+        platform.OpenPath(dir);
+        return Task.FromResult<JsonNode?>(dir);
+    }
+
+    async Task<JsonNode?> ResetBrowserTokenAsync()
+    {
+        await settings.UpdateAsync(s => s.Browser.ExtensionToken = null);
+        await bridge.DisconnectAsync();
+        await bridge.SyncAsync();
+        return SettingsView(settings.Current!);
+    }
+
     Task<JsonNode?> OpenTargetAsync(string target) => OpenAsync(target switch
     {
         "root" => paths.Root,
@@ -1035,6 +1068,7 @@ public sealed class AppHost : IAsyncDisposable
         await mcp.DisposeAsync();
         terminal.Dispose();
         await browser.DisposeAsync();
+        await bridge.DisposeAsync();
         http.Dispose();
     }
 }

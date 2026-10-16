@@ -6,8 +6,8 @@ using static ClaudeChat.Core.ToolJson;
 
 namespace ClaudeChat.Core;
 
-// 専用プロファイルの Chrome (無ければ Edge) を DevTools プロトコルで動かす組み込みツール
-public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) : IToolProvider, IAsyncDisposable
+// Chrome を DevTools プロトコルで動かす組み込みツール。専用プロファイルの Chrome (無ければ Edge) か、拡張機能を通していつもの Chrome を使う
+public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, BrowserBridge bridge) : IToolProvider, IAsyncDisposable
 {
     public const string Source = "browser";
     const string Prefix = "browser__";
@@ -23,8 +23,10 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
     readonly SemaphoreSlim gate = new(1, 1);
     readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(5) };
     Process? browserProcess;
-    CdpSession? session;
+    IPageChannel? session;
     string? currentTargetId;
+    // 設定で接続先を変えたら、前の接続先のタブを使い続けない
+    string? sessionMode;
     int port;
 
     const string SnapshotScript = """
@@ -72,7 +74,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
     List<BrowserTool> Tools() => browserTools ??=
     [
         new("open", "ページを開く",
-            "Open a URL in the browser window that this app controls (a dedicated Chrome or Edge profile, separate from the user's everyday browser, so the user may need to sign in once). Starts the browser if needed. Returns a snapshot of the page.",
+            "Open a URL in the browser that this app controls. Starts the browser if needed. Returns a snapshot of the page.",
             Schema(("url", "string", "The URL to open", true), ("new_tab", "boolean", "Open in a new tab instead of the current one", false)),
             false, true, OpenAsync),
         new("snapshot", "ページを読む",
@@ -111,11 +113,17 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
     ];
 
     bool Enabled => settings.Current?.Browser.Enabled == true;
+    string Mode => settings.Current?.Browser.Mode == "extension" ? "extension" : "dedicated";
+
+    // どちらのブラウザかで、ログインの扱いが違う
+    string OpenNote => Mode == "extension"
+        ? " This is the user's own everyday Chrome, signed in to the user's accounts, so treat actions on sites as acting in the user's name. You only see and control tabs that this app opened, grouped as \"ClaudeChat\"."
+        : " It is a dedicated Chrome or Edge profile, separate from the user's everyday browser, so the user may need to sign in once.";
 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
         if (!Enabled || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
-        return Tools().Select(t => new ToolSpec(Prefix + t.Name, Source, t.Name, t.Title, t.Description, t.Schema, t.AutoApprove, t.AllowAlways)).ToList();
+        return Tools().Select(t => new ToolSpec(Prefix + t.Name, Source, t.Name, t.Title, t.Name == "open" ? t.Description + OpenNote : t.Description, t.Schema, t.AutoApprove, t.AllowAlways)).ToList();
     }
 
     public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
@@ -126,6 +134,12 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         await gate.WaitAsync(cancellationToken);
         try
         {
+            if (sessionMode != Mode)
+            {
+                await ResetSessionAsync();
+                currentTargetId = null;
+                sessionMode = Mode;
+            }
             var result = await tool.Run(input, cancellationToken);
             if (session?.TakeDialogNote() is { } note) result.Content.Add(new JsonObject { ["type"] = "text", ["text"] = $"(ページの{note})" });
             return result;
@@ -240,8 +254,9 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         session = null;
     }
 
-    async Task<CdpSession> PageAsync(CancellationToken cancellationToken, bool newTab = false)
+    async Task<IPageChannel> PageAsync(CancellationToken cancellationToken, bool newTab = false)
     {
+        if (Mode == "extension") return await ExtensionPageAsync(cancellationToken, newTab);
         await EnsureBrowserAsync(cancellationToken);
         if (session is { IsOpen: true } && !newTab) return session;
         await ResetSessionAsync();
@@ -249,33 +264,63 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         JsonObject? target;
         if (newTab)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:{port}/json/new?about:blank");
-            using var response = await http.SendAsync(request, cancellationToken);
-            target = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken);
+            target = await NewTargetAsync(cancellationToken);
         }
         else
         {
             var pages = (await ListTargetsAsync(cancellationToken)).OfType<JsonObject>().Where(t => (string?)t["type"] == "page").ToList();
-            target = pages.FirstOrDefault(t => (string?)t["id"] == currentTargetId) ?? pages.FirstOrDefault();
-            if (target is null)
-            {
-                using var request = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:{port}/json/new?about:blank");
-                using var response = await http.SendAsync(request, cancellationToken);
-                target = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken);
-            }
+            target = pages.FirstOrDefault(t => (string?)t["id"] == currentTargetId) ?? pages.FirstOrDefault() ?? await NewTargetAsync(cancellationToken);
         }
         var url = (string?)target?["webSocketDebuggerUrl"] ?? throw new ToolException("ブラウザのタブに接続できませんでした");
         currentTargetId = (string?)target!["id"];
-        session = await CdpSession.ConnectAsync(new Uri(url), cancellationToken);
+        var page = await CdpSession.ConnectAsync(new Uri(url), cancellationToken);
+        session = page;
         // ダイアログの通知を受け取る
-        await session.SendAsync("Page.enable", null, cancellationToken);
-        await session.SendAsync("Page.bringToFront", null, cancellationToken);
-        return session;
+        await page.SendAsync("Page.enable", null, cancellationToken);
+        await page.SendAsync("Page.bringToFront", null, cancellationToken);
+        return page;
+    }
+
+    async Task<JsonObject?> NewTargetAsync(CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:{port}/json/new?about:blank");
+        using var response = await http.SendAsync(request, cancellationToken);
+        return await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken);
+    }
+
+    // 拡張機能が見せるのは、このアプリが開いたタブだけ
+    async Task<IPageChannel> ExtensionPageAsync(CancellationToken cancellationToken, bool newTab)
+    {
+        if (!bridge.Connected) throw bridge.ListenError is { } error ? new ToolException(error) : BrowserBridge.NotConnected();
+        if (session is { IsOpen: true } && !newTab) return session;
+        await ResetSessionAsync();
+        var tabs = await ListTabsAsync(cancellationToken);
+        var tabId = newTab ? null : tabs.FirstOrDefault(t => t.Id == currentTargetId).Id ?? tabs.FirstOrDefault().Id;
+        tabId ??= (string?)(await bridge.CallAsync("newTab", [], cancellationToken))?["id"] ?? throw new ToolException("タブを開けませんでした");
+        currentTargetId = tabId;
+        var page = await ExtensionPage.AttachAsync(bridge, tabId, cancellationToken);
+        session = page;
+        await page.SendAsync("Page.enable", null, cancellationToken);
+        return page;
+    }
+
+    async Task<List<(string Id, string Title, string Url)>> ListTabsAsync(CancellationToken cancellationToken)
+    {
+        if (Mode == "extension")
+        {
+            var tabs = await bridge.CallAsync("listTabs", [], cancellationToken) as JsonArray ?? [];
+            return tabs.OfType<JsonObject>().Select(t => ((string?)t["id"] ?? "", (string?)t["title"] ?? "", (string?)t["url"] ?? "")).ToList();
+        }
+        await EnsureBrowserAsync(cancellationToken);
+        return (await ListTargetsAsync(cancellationToken)).OfType<JsonObject>()
+            .Where(t => (string?)t["type"] == "page")
+            .Select(t => ((string?)t["id"] ?? "", (string?)t["title"] ?? "", (string?)t["url"] ?? ""))
+            .ToList();
     }
 
     // Page helpers
 
-    static async Task<JsonNode?> EvalAsync(CdpSession page, string expression, CancellationToken cancellationToken)
+    static async Task<JsonNode?> EvalAsync(IPageChannel page, string expression, CancellationToken cancellationToken)
     {
         var result = await page.SendAsync("Runtime.evaluate", new JsonObject
         {
@@ -291,7 +336,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         return result["result"]?["value"]?.DeepClone();
     }
 
-    static async Task WaitForLoadAsync(CdpSession page, CancellationToken cancellationToken)
+    static async Task WaitForLoadAsync(IPageChannel page, CancellationToken cancellationToken)
     {
         var deadline = DateTime.UtcNow + LoadTimeout;
         // 遷移が始まる前の古いページを読んでしまわないように
@@ -310,7 +355,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         }
     }
 
-    async Task<string> DescribePageAsync(CdpSession page, CancellationToken cancellationToken)
+    async Task<string> DescribePageAsync(IPageChannel page, CancellationToken cancellationToken)
     {
         var raw = (string?)await EvalAsync(page, SnapshotScript.Replace("__MAX__", MaxElements.ToString()), cancellationToken) ?? "{}";
         var snapshot = JsonNode.Parse(raw)!.AsObject();
@@ -321,7 +366,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         return $"URL: {snapshot["url"]}\nタイトル: {snapshot["title"]}\nスクロール位置: {snapshot["scroll"]}\n\n## 本文\n{text}\n\n## 操作できる要素\n{string.Join("\n", elements)}{more}";
     }
 
-    static async Task<(double X, double Y)> LocateAsync(CdpSession page, int reference, CancellationToken cancellationToken)
+    static async Task<(double X, double Y)> LocateAsync(IPageChannel page, int reference, CancellationToken cancellationToken)
     {
         var box = await EvalAsync(page, $$"""
             (() => {
@@ -337,7 +382,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
         return ((double)box["x"]!, (double)box["y"]!);
     }
 
-    static async Task KeyAsync(CdpSession page, string key, int code, string? text, CancellationToken cancellationToken)
+    static async Task KeyAsync(IPageChannel page, string key, int code, string? text, CancellationToken cancellationToken)
     {
         // DOM の key は空白 1 文字。"Space" のままだとボタンやチェックボックスが反応しない
         var domKey = key == "Space" ? " " : key;
@@ -496,17 +541,17 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths) 
 
     async Task<ToolCallResult> TabsAsync(JsonObject input, CancellationToken cancellationToken)
     {
-        await EnsureBrowserAsync(cancellationToken);
-        var pages = (await ListTargetsAsync(cancellationToken)).OfType<JsonObject>().Where(t => (string?)t["type"] == "page").ToList();
+        var pages = await ListTabsAsync(cancellationToken);
         if ((string?)input["switch_to"] is { Length: > 0 } id)
         {
-            if (!pages.Any(t => (string?)t["id"] == id)) throw new ToolException($"id {id} のタブはありません");
+            if (!pages.Any(t => t.Id == id)) throw new ToolException($"id {id} のタブはありません");
             await ResetSessionAsync();
             currentTargetId = id;
             var page = await PageAsync(cancellationToken);
             return Text($"タブを切り替えました\n\n{await DescribePageAsync(page, cancellationToken)}");
         }
-        return Text(string.Join("\n", pages.Select(t => $"{((string?)t["id"] == currentTargetId ? "* " : "  ")}{t["id"]}  {t["title"]}  ({t["url"]})")));
+        if (pages.Count == 0) return Text("開いているタブはありません。open で開いてください");
+        return Text(string.Join("\n", pages.Select(t => $"{(t.Id == currentTargetId ? "* " : "  ")}{t.Id}  {t.Title}  ({t.Url})")));
     }
 
     async Task<ToolCallResult> EvaluateAsync(JsonObject input, CancellationToken cancellationToken)

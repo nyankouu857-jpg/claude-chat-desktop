@@ -1048,3 +1048,12 @@ kbd { font-family: var(--font-mono); font-size: 12px; padding: 1px 6px; border: 
 }
 .artifact-error { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--danger-bg); color: var(--danger); font-size: 13px; border-bottom: 0.5px solid var(--border); }
 .artifact-error span { flex: 1; }
+
+.extension-setup { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.extension-status { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-300); }
+.extension-status .status-dot-inline { width: 8px; height: 8px; border-radius: 50%; background: var(--text-400); }
+.extension-status.on { color: var(--ok); }
+.extension-status.on .status-dot-inline { background: var(--ok); }
+.extension-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 13.5px; }
+.extension-steps li > div { margin-bottom: 6px; }
+.field-hint.mono { font-family: var(--font-mono); }

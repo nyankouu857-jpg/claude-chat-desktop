@@ -5,8 +5,17 @@ using System.Text.Json.Nodes;
 
 namespace ClaudeChat.Core;
 
+// 1 つのタブに DevTools プロトコルの命令を送る道。専用の Chrome へは直接、いつもの Chrome へは拡張機能を通す
+public interface IPageChannel : IAsyncDisposable
+{
+    bool IsOpen { get; }
+    Task<JsonObject> SendAsync(string method, JsonObject? parameters, CancellationToken cancellationToken);
+    // 自動で閉じたダイアログの説明。1 回読むと消える
+    string? TakeDialogNote();
+}
+
 // Chrome DevTools Protocol の最小限のクライアント。1 つのタブにつなぐ
-public sealed class CdpSession : IAsyncDisposable
+public sealed class CdpSession : IPageChannel
 {
     readonly ClientWebSocket socket = new();
     readonly ConcurrentDictionary<int, TaskCompletionSource<JsonObject>> pending = new();
@@ -18,7 +27,6 @@ public sealed class CdpSession : IAsyncDisposable
     Task? receiveLoop;
     string? dialogNote;
 
-    // 自動で閉じたダイアログの説明。1 回読むと消える
     public string? TakeDialogNote() => Interlocked.Exchange(ref dialogNote, null);
 
     public bool IsOpen => socket.State == WebSocketState.Open;
@@ -67,20 +75,22 @@ public sealed class CdpSession : IAsyncDisposable
     }
 
     // 確認ダイアログは承認せずにキャンセルする。削除などをユーザーの知らないところで確定させない
-    async Task HandleDialogAsync(JsonObject parameters)
+    public static async Task<string> DismissDialogAsync(IPageChannel page, JsonObject parameters)
     {
         var type = (string?)parameters["type"];
         var accept = type is "alert" or "beforeunload";
-        dialogNote = $"{type} ダイアログ「{(string?)parameters["message"]}」を{(accept ? "閉じました" : "キャンセルしました")}";
         try
         {
-            await SendAsync("Page.handleJavaScriptDialog", new JsonObject { ["accept"] = accept }, CancellationToken.None);
+            await page.SendAsync("Page.handleJavaScriptDialog", new JsonObject { ["accept"] = accept }, CancellationToken.None);
         }
         catch (ToolException)
         {
             // 先に閉じられていた
         }
+        return $"{type} ダイアログ「{(string?)parameters["message"]}」を{(accept ? "閉じました" : "キャンセルしました")}";
     }
+
+    async Task HandleDialogAsync(JsonObject parameters) => dialogNote = await DismissDialogAsync(this, parameters);
 
     async Task ReceiveAsync()
     {

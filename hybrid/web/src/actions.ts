@@ -494,6 +494,14 @@ export const setQuote = (conversationId: string, text: string | null) =>
     return { ...s, quotes: text ? { ...quotes, [conversationId]: text } : quotes };
   });
 
+export const browserExtensionStatus = () => call<{ connected: boolean; version?: string | null; error?: string | null }>("browser.extensionStatus");
+export const writeBrowserExtension = () => guard(() => call<string>("browser.writeExtension"));
+
+export async function resetBrowserToken() {
+  const settings = await guard(() => call<Settings>("browser.resetToken"));
+  if (settings) setState((s) => ({ ...s, settings }));
+}
+
 export const extractDocumentText = (name: string, data: string) => call<string>("files.extractText", { name, data });
 
 export const listArtifacts = () => guard(() => call<ArtifactListItem[]>("artifacts.list"));
