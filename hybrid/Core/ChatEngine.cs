@@ -427,7 +427,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             {
                 outcome = await AskAsync(spec, id, input, gate, cancellationToken);
             }
-            else if (await DenialAsync(conversation, spec, id, input, gate, cancellationToken) is { } denial)
+            else if (await DenialAsync(conversation, spec, id, input, options, gate, cancellationToken) is { } denial)
             {
                 outcome = ToolRegistry.Error(denial);
             }
@@ -479,8 +479,15 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         return ToolJson.Text(AskToolProvider.FormatAnswers(input, JsonNode.Parse(reply) as JsonArray ?? []));
     }
 
+    // ワークフローは料金、予定は後で勝手に動く指示、メモリは今後のシステムプロンプト、ページの JavaScript は中身が読めないので、
+    // auto でも本人に決めてもらう。メモリの書き込みがここに来るのは、本人が確認するよう設定したときだけ
+    static bool AlwaysAskInAuto(ToolSpec spec) =>
+        spec.ApiName is AgentToolProvider.RunWorkflow or ScheduleToolProvider.Create
+        || spec.Source == MemoryToolProvider.Source
+        || spec.Name == "evaluate" && spec.Source is BrowserToolProvider.Source or BrowserToolProvider.HiddenSource;
+
     // 実行してよければ null、だめなら Claude に返す理由
-    async Task<string?> DenialAsync(Conversation conversation, ToolSpec spec, string toolUseId, JsonObject input, IApprovalGate gate, CancellationToken cancellationToken)
+    async Task<string?> DenialAsync(Conversation conversation, ToolSpec spec, string toolUseId, JsonObject input, ChatOptions options, IApprovalGate gate, CancellationToken cancellationToken)
     {
         var current = await settings.GetAsync();
         var readOnlyCall = spec.ReadOnlyCall?.Invoke(input) == true;
@@ -497,10 +504,10 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         if (spec.AutoApprove || readOnlyCall || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return null;
 
         string? autoReason = null;
-        // ワークフローは危なさでなく料金の問題なので、auto でも本人に決めてもらう
-        if (conversation.PermissionMode == "auto" && spec.ApiName != AgentToolProvider.RunWorkflow)
+        if (conversation.PermissionMode == "auto" && !AlwaysAskInAuto(spec))
         {
-            var verdict = await reviewer.ReviewAsync(conversation, spec, input, cancellationToken);
+            var target = await tools.DescribeTargetAsync(spec.ApiName, input, options.EnabledSources, cancellationToken);
+            var verdict = await reviewer.ReviewAsync(conversation, spec, input, target, cancellationToken);
             if (verdict.Allowed) return null;
             autoReason = verdict.Reason;
         }

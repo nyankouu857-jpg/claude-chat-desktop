@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using static ClaudeChat.Core.ToolJson;
@@ -8,7 +10,7 @@ namespace ClaudeChat.Core;
 
 // Chrome を DevTools プロトコルで動かす組み込みツール。専用プロファイルの Chrome (無ければ Edge) か、拡張機能を通していつもの Chrome を使う。
 // hidden は Claude が自分で調べるための内蔵ブラウザ。窓を出さず、ユーザーのログインも持たない
-public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, BrowserBridge bridge, IPlatform platform, bool hidden = false) : IToolProvider, IAsyncDisposable
+public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, BrowserBridge bridge, IPlatform platform, bool hidden = false) : IToolProvider, IActionTargetProvider, IAsyncDisposable
 {
     public const string Source = "browser";
     public const string HiddenSource = "browse";
@@ -138,8 +140,9 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         return Tools()
             // 内蔵ブラウザは画面に出ないので、本物のマウスでは押せない
             .Select(t => hidden && t.Name == "click" ? t with { Description = HiddenClickDescription, Schema = Schema(("ref", "integer", "Element number from the snapshot", true)) } : t)
-            // ログインの無い窓で公開ページを読むだけなら Web ページの取得と変わらない
-            .Select(t => new ToolSpec(Prefix + t.Name, ToolSource, t.Name, t.Title, t.Name == "open" ? t.Description + OpenNote : t.Description, t.Schema, t.AutoApprove || (hidden && t.Name == "open"), t.AllowAlways && allowAlways))
+            .Select(t => new ToolSpec(Prefix + t.Name, ToolSource, t.Name, t.Title, t.Name == "open" ? t.Description + OpenNote : t.Description, t.Schema, t.AutoApprove, t.AllowAlways && allowAlways,
+                // ログインの無い窓で公開ページを読むだけなら確認しない。家のルーターや社内のサーバーは PC の中から届いてしまうので本人に決めてもらう
+                ReadOnlyCall: hidden && t.Name == "open" ? input => IsPublicUrl((string?)input["url"]) : null))
             .ToList();
     }
 
@@ -217,9 +220,10 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         try
         {
             var lines = await File.ReadAllLinesAsync(file, cancellationToken);
-            if (lines.Length == 0 || !int.TryParse(lines[0], out var found)) return null;
-            await http.GetStringAsync($"http://127.0.0.1:{found}/json/version", cancellationToken);
-            return found;
+            if (lines.Length < 2 || !int.TryParse(lines[0], out var found)) return null;
+            var version = await http.GetFromJsonAsync<JsonObject>($"http://127.0.0.1:{found}/json/version", cancellationToken);
+            // 古いファイルの番号で、別のブラウザ (ログイン中のものなど) が待ち受けていることがある
+            return ((string?)version?["webSocketDebuggerUrl"])?.EndsWith(lines[1]) == true ? found : null;
         }
         // ユーザーの停止まで「ブラウザが無い」と扱うと、動いているブラウザの接続情報を消してしまう
         catch (Exception e) when (e is IOException or HttpRequestException || (e is TaskCanceledException && !cancellationToken.IsCancellationRequested))
@@ -232,11 +236,15 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
     {
         if (port != 0 && await ReadActivePortAsync(cancellationToken) == port) return;
         await ResetSessionAsync();
-        // 前回起動したブラウザが残っていればそれを使う
+        // 前回起動したブラウザが残っていればそれを使う。内蔵ブラウザは止め時を握れるよう、残りを閉じて起動し直す
         if (await ReadActivePortAsync(cancellationToken) is { } existing)
         {
-            port = existing;
-            return;
+            if (!hidden)
+            {
+                port = existing;
+                return;
+            }
+            await CloseBrowserAsync(existing, cancellationToken);
         }
         cancellationToken.ThrowIfCancellationRequested();
         Directory.CreateDirectory(ProfileDir);
@@ -268,6 +276,21 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
             await Task.Delay(200, cancellationToken);
         }
         throw new ToolException("ブラウザは起動しましたが、操作用の接続ができませんでした。いったんブラウザを閉じてからやり直してください");
+    }
+
+    async Task CloseBrowserAsync(int browserPort, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var version = await http.GetFromJsonAsync<JsonObject>($"http://127.0.0.1:{browserPort}/json/version", cancellationToken);
+            if ((string?)version?["webSocketDebuggerUrl"] is not { } url) return;
+            await using var browserSession = await CdpSession.ConnectAsync(new Uri(url), cancellationToken);
+            await browserSession.SendAsync("Browser.close", null, cancellationToken);
+        }
+        // 閉じる途中で接続が切れるのは、閉じられた印
+        catch (Exception e) when (e is HttpRequestException or ToolException or IOException or System.Net.WebSockets.WebSocketException || (e is OperationCanceledException && !cancellationToken.IsCancellationRequested))
+        {
+        }
     }
 
     async Task<JsonArray> ListTargetsAsync(CancellationToken cancellationToken) =>
@@ -389,10 +412,51 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
 
     async Task GuardHostAsync(IPageChannel page, CancellationToken cancellationToken)
     {
-        if (Mode != "extension") return;
+        if (Mode != "extension" && !hidden) return;
         var url = (string?)await EvalAsync(page, "location.href", cancellationToken) ?? "";
         if (url == "about:blank" || approvedHosts.Contains(HostKey(url))) return;
-        throw new ToolException($"このタブは {HostKey(url)} に移っています。いつもの Chrome では、確認なしに読めるのは open で開いたサイトだけです。中身が必要なら、open で {url} を開き直してください (ユーザーに確認が出ます)");
+        // 公開ページから家のルーターなどへ移されたら、本人が開くと決めるまで中身を渡さない
+        if (hidden && IsPublicUrl(url)) return;
+        throw new ToolException(hidden
+            ? $"このタブは PC やネットワークの中のページ ({HostKey(url)}) に移っています。中身が必要なら、open で {url} を開き直してください (ユーザーに確認が出ます)"
+            : $"このタブは {HostKey(url)} に移っています。いつもの Chrome では、確認なしに読めるのは open で開いたサイトだけです。中身が必要なら、open で {url} を開き直してください (ユーザーに確認が出ます)");
+    }
+
+    // 確認していないサイトの URL は、メールの件名などが入ることがあるので、サイト名だけにする
+    string Visible(string url) =>
+        Mode == "extension" && url != "about:blank" && !approvedHosts.Contains(HostKey(url)) ? $"{HostKey(url)} (確認していないサイト)" : url;
+
+    static bool IsPublicUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (!url.Contains("://")) url = "https://" + url;
+        return Uri.TryCreate(url, UriKind.Absolute, out var parsed) && parsed.Scheme is "http" or "https" && IsPublicHost(parsed.IdnHost);
+    }
+
+    static bool IsPublicHost(string host)
+    {
+        host = host.Trim('[', ']').ToLowerInvariant();
+        if (IPAddress.TryParse(host, out var literal)) return IsPublicAddress(literal);
+        if (!host.Contains('.') || host == "localhost" || new[] { ".localhost", ".local", ".lan", ".internal", ".intranet", ".corp", ".home.arpa" }.Any(host.EndsWith)) return false;
+        try
+        {
+            var addresses = Dns.GetHostAddresses(host);
+            return addresses.Length > 0 && addresses.All(IsPublicAddress);
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
+    }
+
+    static bool IsPublicAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) return false;
+        if (address.AddressFamily == AddressFamily.InterNetworkV6) return !(address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6UniqueLocal || address.IsIPv6Multicast);
+        var b = address.GetAddressBytes();
+        // 10/8, 172.16/12, 192.168/16, リンクローカル (クラウドのメタデータを含む), キャリアの NAT, 0/8, マルチキャスト以上
+        return !(b[0] is 0 or 10 || b[0] >= 224 || (b[0] == 172 && b[1] is >= 16 and <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254) || (b[0] == 100 && b[1] is >= 64 and <= 127));
     }
 
     async Task<string> DescribePageAsync(IPageChannel page, CancellationToken cancellationToken)
@@ -559,6 +623,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
     async Task<ToolCallResult> ClickAsync(JsonObject input, CancellationToken cancellationToken)
     {
         var page = await PageAsync(cancellationToken);
+        await GuardHostAsync(page, cancellationToken);
         var reference = Reference(input);
         var tabsBefore = (await ListTabsAsync(cancellationToken)).Select(t => t.Id).ToHashSet();
         var lines = new List<string> { $"要素 {reference} をクリックしました" };
@@ -577,17 +642,18 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
             }
             if (await MissedClickAsync(page, reference, cancellationToken) is { } cover)
             {
-                lines.Add(cover.Length > 0 ? $"画面上では別の要素 ({cover}) が重なっていて、クリックが要素に届きませんでした" : "座標でのクリックが要素に届きませんでした");
-                var realFailed = CanRealClick ? await RealClickAsync(page, reference, cancellationToken) : "";
-                if (realFailed is null && await MissedClickAsync(page, reference, cancellationToken) is null)
+                if (cover.Length > 0)
                 {
-                    lines.Add("画面上で本物のマウスを使って押し直しました");
+                    // 同じ位置を本物のマウスで押し直すと、重なった要素をもう一度押してしまう
+                    await ScriptClickAsync(page, reference, cancellationToken);
+                    lines.Add($"画面上では別の要素 ({cover}) が重なっていてクリックが届かなかったので、要素に直接クリックを送りました");
                 }
                 else
                 {
-                    if (realFailed is { Length: > 0 }) lines.Add($"本物のマウスでも押せませんでした ({realFailed})");
-                    await ScriptClickAsync(page, reference, cancellationToken);
-                    lines.Add("要素に直接クリックを送りました");
+                    // ページがクリックの受け取りを隠しているだけのこともある。押し直すと送信や購入が二重になりかねない
+                    lines.Add(CanRealClick
+                        ? "クリックが要素に届いたか確かめられませんでした。snapshot で結果を確かめ、効いていなければ real を指定して押し直してください"
+                        : "クリックが要素に届いたか確かめられませんでした。snapshot で結果を確かめてください");
                 }
             }
         }
@@ -607,13 +673,14 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         var url = (string?)info?[0] ?? "";
         // 確認していないサイトに移ったら、題名 (受信件数などが入る) も渡さない
         var pageTitle = Mode == "extension" && !approvedHosts.Contains(HostKey(url)) ? "" : $"{info?[1]} ";
-        lines.Add($"今のページ: {pageTitle}({url})");
+        lines.Add($"今のページ: {pageTitle}({Visible(url)})");
         return Text(string.Join("\n", lines));
     }
 
     async Task<ToolCallResult> TypeAsync(JsonObject input, CancellationToken cancellationToken)
     {
         var page = await PageAsync(cancellationToken);
+        await GuardHostAsync(page, cancellationToken);
         var reference = Reference(input);
         var text = (string?)input["text"] ?? "";
         var kind = (string?)await EvalAsync(page, $$"""
@@ -666,6 +733,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         var key = Required(input, "key");
         if (!Keys.TryGetValue(key, out var spec)) throw new ToolException($"{key} は押せないキーです。{string.Join(", ", Keys.Keys)} から選んでください");
         var page = await PageAsync(cancellationToken);
+        await GuardHostAsync(page, cancellationToken);
         await KeyAsync(page, Keys.Keys.First(k => k.Equals(key, StringComparison.OrdinalIgnoreCase)), spec.Code, spec.Text, cancellationToken);
         if (spec.Code == 13) await WaitForLoadAsync(page, cancellationToken);
         return Text($"{key} を押しました");
@@ -684,7 +752,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         var page = await PageAsync(cancellationToken);
         await EvalAsync(page, "history.back()", cancellationToken);
         await WaitForLoadAsync(page, cancellationToken);
-        return Text($"前のページに戻りました: {await EvalAsync(page, "location.href", cancellationToken)}");
+        return Text($"前のページに戻りました: {Visible((string?)await EvalAsync(page, "location.href", cancellationToken) ?? "")}");
     }
 
     async Task<ToolCallResult> TabsAsync(JsonObject input, CancellationToken cancellationToken)
@@ -701,7 +769,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         if (pages.Count == 0) return Text("開いているタブはありません。open で開いてください");
         // 確認していないサイトのタブは、題名にメールの件名などが出ることがあるので伏せる
         string TitleOf((string Id, string Title, string Url) tab) => Mode == "extension" && !approvedHosts.Contains(HostKey(tab.Url)) && tab.Url != "about:blank" ? "(確認していないサイト)" : tab.Title;
-        return Text(string.Join("\n", pages.Select(t => $"{(t.Id == currentTargetId ? "* " : "  ")}{t.Id}  {TitleOf(t)}  ({t.Url})")));
+        return Text(string.Join("\n", pages.Select(t => $"{(t.Id == currentTargetId ? "* " : "  ")}{t.Id}  {TitleOf(t)}  ({Visible(t.Url)})")));
     }
 
     async Task<ToolCallResult> EvaluateAsync(JsonObject input, CancellationToken cancellationToken)
@@ -713,6 +781,35 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         return Text(json.Length > MaxPageTextChars ? json[..MaxPageTextChars] + "\n... 長いので切りました" : json);
     }
 
+    // auto モードの判定用。クリックの入力は要素の番号だけなので、どのサイトの何を押すのかを添える
+    public async Task<string?> DescribeTargetAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
+    {
+        if (input["ref"] is not JsonValue value || !value.TryGetValue<int>(out var reference)) return null;
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (session is not { IsOpen: true } page) return "(the page is not open yet)";
+            var found = (string?)await EvalAsync(page, $$"""
+                (() => {
+                  const el = document.querySelector('[data-claude-ref="{{reference}}"]');
+                  const label = el ? String(el.getAttribute('aria-label') || el.innerText || el.value || el.title || el.getAttribute('placeholder') || '').replace(/\s+/g, ' ').trim().slice(0, 150) : '';
+                  return JSON.stringify([location.href, el ? el.tagName.toLowerCase() + (el.type ? '[' + el.type + ']' : '') : '', label, el?.closest('form')?.getAttribute('action') ?? '']);
+                })()
+                """, cancellationToken);
+            var info = JsonNode.Parse(found ?? "[]") as JsonArray;
+            var url = (string?)info?[0] ?? "";
+            return $"site: {HostKey(url)}\nelement: {info?[1]} \"{info?[2]}\"" + ((string?)info?[3] is { Length: > 0 } action ? $"\nform action: {action}" : "");
+        }
+        catch (Exception e) when (e is ToolException or System.Text.Json.JsonException or IOException)
+        {
+            return null;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     // ブラウザはユーザーがそのまま使えるように閉じない。内蔵ブラウザは見えないまま残るので閉じる
     public async ValueTask DisposeAsync()
     {
@@ -721,6 +818,11 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         {
             try { browserProcess.Kill(entireProcessTree: true); }
             catch (InvalidOperationException) { }
+        }
+        else if (hidden && port != 0)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await CloseBrowserAsync(port, timeout.Token);
         }
         await ResetSessionAsync();
         browserProcess?.Dispose();

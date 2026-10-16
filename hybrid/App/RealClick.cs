@@ -33,8 +33,21 @@ sealed partial class WindowsPlatform
 
             GetCursorPos(out var original);
             SetCursorPos(point.X, point.Y);
-            mouse_event(MouseLeftDown, 0, 0, 0, IntPtr.Zero);
-            mouse_event(MouseLeftUp, 0, 0, 0, IntPtr.Zero);
+            // 前面に出すまでの間に、ユーザーがタブを切り替えたりマウスを動かしたり、通知が出たりしていないか、押す直前に確かめ直す
+            if (GetForegroundWindow() != window || !TitleOf(window).Contains(titleMarker, StringComparison.Ordinal)
+                || !GetCursorPos(out var now) || now.X != point.X || now.Y != point.Y
+                || WindowFromPoint(point) is var target && target != view && !IsChild(view, target))
+            {
+                SetCursorPos(original.X, original.Y);
+                return "押す直前に画面が変わったので、押すのをやめました";
+            }
+            // 押すと離すを 1 回で送り、ユーザーのマウス操作が間に挟まらないようにする
+            var inputs = new[]
+            {
+                new Input { Type = InputMouse, Mouse = new MouseInput { Flags = MouseLeftDown } },
+                new Input { Type = InputMouse, Mouse = new MouseInput { Flags = MouseLeftUp } },
+            };
+            SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
             // ブラウザが押されたことを受け取ってから、カーソルを元の場所に戻す
             Thread.Sleep(50);
             SetCursorPos(original.X, original.Y);
@@ -121,6 +134,7 @@ sealed partial class WindowsPlatform
     }
 
     const int SwRestore = 9;
+    const uint InputMouse = 0;
     const uint MouseLeftDown = 0x0002;
     const uint MouseLeftUp = 0x0004;
     const byte VkMenu = 0x12;
@@ -143,6 +157,24 @@ sealed partial class WindowsPlatform
         public int Bottom;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct MouseInput
+    {
+        public int Dx;
+        public int Dy;
+        public uint MouseData;
+        public uint Flags;
+        public uint Time;
+        public IntPtr ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Input
+    {
+        public uint Type;
+        public MouseInput Mouse;
+    }
+
     delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
@@ -160,7 +192,7 @@ sealed partial class WindowsPlatform
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out Point point);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, int data, IntPtr extraInfo);
+    [DllImport("user32.dll")] static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("user32.dll")] static extern void keybd_event(byte key, byte scan, uint flags, IntPtr extraInfo);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 }

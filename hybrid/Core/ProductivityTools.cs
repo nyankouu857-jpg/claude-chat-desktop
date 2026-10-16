@@ -332,6 +332,7 @@ public sealed class ScheduleToolProvider(Scheduler scheduler) : IToolProvider
 {
     public const string Source = "schedule";
     const string Prefix = "schedule__";
+    public const string Create = Prefix + "create";
 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
@@ -339,7 +340,7 @@ public sealed class ScheduleToolProvider(Scheduler scheduler) : IToolProvider
         if (ToolContext.Current is { Depth: > 0 } || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
         return
         [
-            new(Prefix + "create", Source, "create", "予定を登録",
+            new(Create, Source, "create", "予定を登録",
                 "Schedule a prompt to run later while the app is open: every N minutes (interval_minutes), or every day at a time (daily_time, HH:mm, local time). target this_chat sends it to this chat; new_chat starts a fresh chat each time. Only when the user asks for something recurring or later.",
                 Schema(("title", "string", "Short name", true), ("prompt", "string", "What to do each time", true), ("interval_minutes", "integer", "Run every N minutes (at least 5)", false), ("daily_time", "string", "Run every day at HH:mm", false), ("target", "string", "this_chat or new_chat", false)),
                 AllowAlways: true),
@@ -450,18 +451,26 @@ public sealed class AskToolProvider : IToolProvider
     public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken) =>
         throw new ToolException("質問はチャットの画面からしか受け付けられません");
 
-    // 途中まで流れてきた入力もあり得るので、画面に出す前に形を確かめる
+    // 途中まで流れてきた入力や型違いもあり得るので、画面に出す前に形と長さを確かめる
     public static string? Validate(JsonObject input)
     {
         if (input["questions"] is not JsonArray { Count: > 0 and <= MaxQuestions } questions) return $"questions は 1 から {MaxQuestions} 個にしてください";
         foreach (var question in questions)
         {
-            if (question is not JsonObject q || (string?)q["question"] is not { Length: > 0 }) return "question が空の質問があります";
+            if (question is not JsonObject q || Str(q["question"]) is not { Length: > 0 and <= 1000 }) return "question は 1000 文字以内の文字列にしてください";
+            if (q["header"] is not null && Str(q["header"]) is not { Length: <= 50 }) return "header は短い文字列にしてください";
+            if (q["multi_select"] is not null && !(q["multi_select"] is JsonValue m && m.TryGetValue<bool>(out _))) return "multi_select は true か false にしてください";
             if (q["options"] is not JsonArray { Count: >= 2 and <= MaxOptions } options) return $"options は 2 から {MaxOptions} 個にしてください";
-            if (options.Any(o => (string?)o?["label"] is not { Length: > 0 })) return "label が空の選択肢があります";
+            foreach (var option in options)
+            {
+                if (option is not JsonObject o || Str(o["label"]) is not { Length: > 0 and <= 200 }) return "label は 200 文字以内の文字列にしてください";
+                if (o["description"] is not null && Str(o["description"]) is not { Length: <= 500 }) return "description は 500 文字以内の文字列にしてください";
+            }
         }
         return null;
     }
+
+    static string? Str(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
     // answers は質問と同じ順で、[{ selected: [label...], other: "..." }]
     public static string FormatAnswers(JsonObject input, JsonArray answers)
@@ -471,8 +480,8 @@ public sealed class AskToolProvider : IToolProvider
         for (var i = 0; i < questions.Count; i++)
         {
             var answer = i < answers.Count ? answers[i] as JsonObject : null;
-            var picked = (answer?["selected"] as JsonArray ?? []).Select(n => (string?)n).OfType<string>().ToList();
-            if ((string?)answer?["other"] is { } other && other.Trim().Length > 0) picked.Add($"(自由記述) {other.Trim()}");
+            var picked = (answer?["selected"] as JsonArray ?? []).Select(Str).OfType<string>().ToList();
+            if (Str(answer?["other"]) is { } other && other.Trim().Length > 0) picked.Add($"(自由記述) {other.Trim()}");
             text.Append($"\n{questions[i]?["question"]}\n→ {(picked.Count > 0 ? string.Join(" / ", picked) : "(回答なし)")}\n");
         }
         return text.ToString();

@@ -11,7 +11,7 @@ public static class ChromeExtension
           "manifest_version": 3,
           "key": "__KEY__",
           "name": "ClaudeChat 連携",
-          "version": "1.2.0",
+          "version": "1.3.0",
           "description": "ClaudeChat のブラウザ操作で、このブラウザを使えるようにします。",
           "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],
           "background": { "service_worker": "background.js" },
@@ -23,6 +23,8 @@ public static class ChromeExtension
         const PORT = __PORT__;
         let socket = null;
         let connecting = false;
+        // Claude がクリックやキー入力を送った時刻。この直後に開いたタブだけを Claude のものにする
+        let lastInputAt = 0;
 
         // ClaudeChat が開いたタブだけを動かす。ユーザーが自分で開いているタブ (メールや銀行など) には触れない
         const ownedTabs = async () => (await chrome.storage.session.get("tabs")).tabs ?? [];
@@ -131,6 +133,7 @@ public static class ChromeExtension
             const id = Number(tabId);
             await requireOwned(id);
             if (!ALLOWED_METHODS.has(method)) throw new Error(`${method} は使えない命令です`);
+            if (method.startsWith("Input.") || method === "Runtime.evaluate") lastInputAt = Date.now();
             // chrome:// や file:// を開かせない
             if (method === "Page.navigate" && !/^https?:\/\//i.test(params?.url ?? "") && params?.url !== "about:blank") throw new Error("開けるのは http と https のページだけです");
             return (await chrome.debugger.sendCommand({ tabId: id }, method, params ?? {})) ?? {};
@@ -156,10 +159,13 @@ public static class ChromeExtension
           send({ event: "detached", tabId: String(source.tabId) });
         });
         chrome.tabs.onRemoved.addListener(async (tabId) => setOwnedTabs((await ownedTabs()).filter((id) => id !== tabId)));
-        // Claude が開いたタブのリンクから開いた新しいタブも Claude のものにする。ユーザーが自分で開いたタブは含めない
+        // Claude のクリックで開いた新しいタブも Claude のものにする。
+        // ユーザーが Claude のタブから Ctrl+クリックなどで開いたタブも opener が付くので、Claude の操作の直後に限る
         chrome.tabs.onCreated.addListener(async (tab) => {
           const owned = await ownedTabs();
           if (tab.openerTabId === undefined || !owned.includes(tab.openerTabId) || owned.includes(tab.id)) return;
+          // クリックからタブが開くまでの猶予
+          if (Date.now() - lastInputAt > 3000) return;
           await setOwnedTabs([...owned, tab.id]);
           await addToGroup(tab.id).catch(() => {});
         });

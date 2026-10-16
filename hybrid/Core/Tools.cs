@@ -18,6 +18,12 @@ public interface IToolProvider
     Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken);
 }
 
+// auto モードの判定に、入力だけでは分からない操作の相手 (クリックする要素など) を見せる
+public interface IActionTargetProvider
+{
+    Task<string?> DescribeTargetAsync(string apiName, JsonObject input, CancellationToken cancellationToken);
+}
+
 public sealed class ToolRegistry(IEnumerable<IToolProvider> providers)
 {
     readonly List<IToolProvider> providers = providers.ToList();
@@ -27,6 +33,11 @@ public sealed class ToolRegistry(IEnumerable<IToolProvider> providers)
         providers.SelectMany(p => p.GetTools(enabledSources)).DistinctBy(t => t.ApiName).ToList();
 
     public IEnumerable<string> SourceNames() => GetTools(null).Select(t => t.Source).Distinct();
+
+    public Task<string?> DescribeTargetAsync(string apiName, JsonObject input, ISet<string>? enabledSources, CancellationToken cancellationToken) =>
+        providers.FirstOrDefault(p => p.GetTools(enabledSources).Any(t => t.ApiName == apiName)) is IActionTargetProvider provider
+            ? provider.DescribeTargetAsync(apiName, input, cancellationToken)
+            : Task.FromResult<string?>(null);
 
     public ToolSpec? Find(string apiName, ISet<string>? enabledSources) =>
         GetTools(enabledSources).FirstOrDefault(t => t.ApiName == apiName);
