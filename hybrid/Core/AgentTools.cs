@@ -9,6 +9,7 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
     public const string Source = "agents";
     const string Prefix = "agents__";
     public const string RunWorkflow = Prefix + "run_workflow";
+    public const string SpawnAgent = Prefix + "spawn_agent";
     // 子の最後の回答を親に返す量の上限
     const int MaxResultChars = 30_000;
     static readonly string ModelChoice = $"Model id: {string.Join(", ", ModelCatalog.Known)}";
@@ -21,8 +22,8 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
         if (ToolContext.Current is { Depth: > 0 }) return [];
         return
         [
-            new(Prefix + "spawn_agent", Source, "spawn_agent", "サブエージェントに任せる",
-                "Start a sub-agent: a fresh Claude chat that works on one self-contained task with the same tools as you, and reports back. It sees only your prompt, so include all needed context. With background=false (default) you wait and get its final answer as the result. With background=true it runs while you continue, and its result arrives later as a <task-notification> message. The sub-agent appears as a child chat the user can open.",
+            new(SpawnAgent, Source, "spawn_agent", "サブエージェントに任せる",
+                "Start a sub-agent: a fresh Claude chat that works on one self-contained task with the same tools as you, and reports back. It sees only your prompt, so include all needed context. With background=false (default) you wait and get its final answer as the result; several spawn_agent calls in one message run at the same time, so call them together for independent subtasks. With background=true it runs while you continue, and its result arrives later as a <task-notification> message. The sub-agent appears as a child chat the user can open.",
                 Schema(("prompt", "string", "The full task for the sub-agent", true), ("title", "string", "A short name shown to the user", true), ("background", "boolean", "Run without waiting", false),
                     ("model", "string", $"Optional; defaults to this chat's model. Set it only when the task clearly calls for it (a cheaper model for simple bulk work, a stronger one for hard reasoning). {ModelChoice}", false),
                     ("effort", "string", $"Optional; defaults to this chat's effort. {EffortChoice}", false)),
@@ -79,7 +80,7 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
         var title = (string?)input["title"] is { Length: > 0 } t ? t : "サブエージェント";
         var background = (bool?)input["background"] == true;
         var overrides = ModelCatalog.Overrides((string?)input["model"], (string?)input["effort"]);
-        var child = await hub.SpawnAsync(me, prompt, title, "agent", null, null, background, overrides: overrides);
+        var child = await hub.SpawnAsync(me, prompt, title, "agent", null, null, background, cancellationToken, overrides);
         if (background) return Text($"サブエージェント「{title}」(chat_id {child.Id}) をバックグラウンドで始めました。終わると <task-notification> が届きます");
         // 親を止めたら子も止める
         using var registration = cancellationToken.Register(() => hub.Stop(child.Id));

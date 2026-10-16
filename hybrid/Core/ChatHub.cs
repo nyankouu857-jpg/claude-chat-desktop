@@ -541,7 +541,7 @@ public sealed class ChatHub(
         }
     }
 
-    // ワークフローは空きが出るまで待ち、単発の呼び出しは待たずに断る
+    // 結果を待つ呼び出しは空きが出るまで待ち、バックグラウンドは待たずに断る
     public async Task<Conversation> SpawnAsync(Conversation parent, string prompt, string title, string kind, string? workflowId, Func<ChatOptions, ChatOptions>? customize, bool background, CancellationToken cancellationToken = default, JsonObject? overrides = null)
     {
         var limit = await AgentLimitAsync();
@@ -551,7 +551,7 @@ public sealed class ChatHub(
             // 止めたワークフローから、空きがあるからと新しい子を作らない
             cancellationToken.ThrowIfCancellationRequested();
             if (TryTakeSlot(child.Id, limit)) break;
-            if (workflowId is null) throw new ToolException($"同時に動かせるエージェントは {limit} 個までです。終わるのを待ってから呼んでください");
+            if (background) throw new ToolException($"同時に動かせるエージェントは {limit} 個までです。終わるのを待ってから呼んでください");
             await Task.Delay(500, cancellationToken);
         }
         child.Title = title;

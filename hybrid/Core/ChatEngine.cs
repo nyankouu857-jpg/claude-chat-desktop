@@ -436,7 +436,28 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         JsonArray results,
         CancellationToken cancellationToken)
     {
+        // サブエージェントは並べて呼ばれたら同時に動かす。1 本ずつ待つと並べた意味がない
+        var spawning = new List<Task<JsonObject>>();
         foreach (var toolUse in toolUses)
+        {
+            if ((string?)toolUse["name"] == AgentToolProvider.SpawnAgent)
+            {
+                spawning.Add(RunToolAsync(toolUse));
+                continue;
+            }
+            await CollectSpawnedAsync();
+            results.Add(await RunToolAsync(toolUse));
+        }
+        await CollectSpawnedAsync();
+        return results;
+
+        async Task CollectSpawnedAsync()
+        {
+            foreach (var result in await Task.WhenAll(spawning)) results.Add(result);
+            spawning.Clear();
+        }
+
+        async Task<JsonObject> RunToolAsync(JsonObject toolUse)
         {
             var id = (string?)toolUse["id"] ?? "";
             var apiName = (string?)toolUse["name"] ?? "";
@@ -490,9 +511,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             {
                 emit(new JsonObject { ["type"] = "state", ["state"] = conversation.StateView() });
             }
-            results.Add(result);
+            return result;
         }
-        return results;
     }
 
     // 承認と同じ待ち方で画面に質問を出す。答えは JSON の文字列、答えずに進めるなら deny が返る
