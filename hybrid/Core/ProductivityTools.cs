@@ -379,3 +379,102 @@ public sealed class ScheduleToolProvider(Scheduler scheduler) : IToolProvider
         }
     }
 }
+
+// Claude Code の AskUserQuestion にあたる。返答を終えずに、選択肢で答えてもらってから続ける
+public sealed class AskToolProvider : IToolProvider
+{
+    public const string Source = "ask";
+    public const string ApiName = "ask__user";
+    // 画面に並べて選べる量
+    const int MaxQuestions = 4;
+    const int MaxOptions = 4;
+
+    static readonly JsonObject InputSchema = new()
+    {
+        ["type"] = "object",
+        ["properties"] = new JsonObject
+        {
+            ["questions"] = new JsonObject
+            {
+                ["type"] = "array",
+                ["minItems"] = 1,
+                ["maxItems"] = MaxQuestions,
+                ["items"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["question"] = new JsonObject { ["type"] = "string", ["description"] = "The full question, ending with a question mark" },
+                        ["header"] = new JsonObject { ["type"] = "string", ["description"] = "A very short label shown as a chip, at most 12 characters" },
+                        ["options"] = new JsonObject
+                        {
+                            ["type"] = "array",
+                            ["minItems"] = 2,
+                            ["maxItems"] = MaxOptions,
+                            ["items"] = new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["properties"] = new JsonObject
+                                {
+                                    ["label"] = new JsonObject { ["type"] = "string", ["description"] = "The choice, in a few words" },
+                                    ["description"] = new JsonObject { ["type"] = "string", ["description"] = "What this choice means or what happens next" },
+                                },
+                                ["required"] = new JsonArray("label"),
+                                ["additionalProperties"] = false,
+                            },
+                        },
+                        ["multi_select"] = new JsonObject { ["type"] = "boolean", ["description"] = "Let the user pick more than one option" },
+                    },
+                    ["required"] = new JsonArray("question", "header", "options"),
+                    ["additionalProperties"] = false,
+                },
+            },
+        },
+        ["required"] = new JsonArray("questions"),
+        ["additionalProperties"] = false,
+    };
+
+    public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
+    {
+        // サブエージェントの質問は、ユーザーが開いていないチャットで止まったままになる
+        if (ToolContext.Current is { Depth: > 0 } || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
+        return
+        [
+            new(ApiName, Source, "user", "質問する",
+                "Ask the user 1-4 multiple-choice questions and wait for the answers, then continue your work in the same turn. Use it only when you are blocked on a decision that is genuinely the user's to make and that changes what you do next, such as which of several approaches to take or what an ambiguous request means. Don't use it for things you can find out yourself, for choices with a sensible default, or to ask whether to proceed. Each question has 2-4 distinct options. The user can always type their own answer instead, so don't add an \"Other\" option. If you recommend one, put it first and say so in its label, in the user's language.",
+                InputSchema, AutoApprove: true, ReadOnly: true),
+        ];
+    }
+
+    // 答えは画面で受け取るので、ここには来ない
+    public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken) =>
+        throw new ToolException("質問はチャットの画面からしか受け付けられません");
+
+    // 途中まで流れてきた入力もあり得るので、画面に出す前に形を確かめる
+    public static string? Validate(JsonObject input)
+    {
+        if (input["questions"] is not JsonArray { Count: > 0 and <= MaxQuestions } questions) return $"questions は 1 から {MaxQuestions} 個にしてください";
+        foreach (var question in questions)
+        {
+            if (question is not JsonObject q || (string?)q["question"] is not { Length: > 0 }) return "question が空の質問があります";
+            if (q["options"] is not JsonArray { Count: >= 2 and <= MaxOptions } options) return $"options は 2 から {MaxOptions} 個にしてください";
+            if (options.Any(o => (string?)o?["label"] is not { Length: > 0 })) return "label が空の選択肢があります";
+        }
+        return null;
+    }
+
+    // answers は質問と同じ順で、[{ selected: [label...], other: "..." }]
+    public static string FormatAnswers(JsonObject input, JsonArray answers)
+    {
+        var questions = (JsonArray)input["questions"]!;
+        var text = new StringBuilder("ユーザーの回答です。\n");
+        for (var i = 0; i < questions.Count; i++)
+        {
+            var answer = i < answers.Count ? answers[i] as JsonObject : null;
+            var picked = (answer?["selected"] as JsonArray ?? []).Select(n => (string?)n).OfType<string>().ToList();
+            if ((string?)answer?["other"] is { } other && other.Trim().Length > 0) picked.Add($"(自由記述) {other.Trim()}");
+            text.Append($"\n{questions[i]?["question"]}\n→ {(picked.Count > 0 ? string.Join(" / ", picked) : "(回答なし)")}\n");
+        }
+        return text.ToString();
+    }
+}

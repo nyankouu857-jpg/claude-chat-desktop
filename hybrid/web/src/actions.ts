@@ -25,7 +25,7 @@ import type {
 // C# 側の FileToolProvider.Source と同じ
 export const FILES_SOURCE = "files";
 // 組み込みツールの持ち主。サーバー側の Source と同じ名前
-export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser", "agents", "chats", "todo", "artifacts", "memory", "schedule", "skills"];
+export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser", "agents", "chats", "todo", "artifacts", "memory", "schedule", "skills", "ask"];
 
 let toastId = 0;
 
@@ -352,6 +352,11 @@ export async function approve(conversationId: string, requestId: string, decisio
   await guard(() => call("tools.approve", { requestId, decision }));
   // 中身側で権限が書き足されるので、取り消せるように設定を取り直す
   if (decision === "always") await updateSettings({});
+}
+
+export async function answer(conversationId: string, requestId: string, answers: { selected: string[]; other: string }[]) {
+  updateLive(conversationId, (live) => ({ ...live, approvals: live.approvals.filter((a) => a.requestId !== requestId) }));
+  await guard(() => call("tools.answer", { requestId, answers }));
 }
 
 export const searchConversations = (query: string) => guard(() => call<{ id: string; snippet: string }[]>("conversations.search", { query }));

@@ -422,6 +422,10 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             {
                 outcome = ToolRegistry.Error($"PreToolUse フックが止めました: {blocked.Message}");
             }
+            else if (spec.ApiName == AskToolProvider.ApiName)
+            {
+                outcome = await AskAsync(spec, id, input, gate, cancellationToken);
+            }
             else if (await DenialAsync(conversation, spec, id, input, gate, cancellationToken) is { } denial)
             {
                 outcome = ToolRegistry.Error(denial);
@@ -454,6 +458,24 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             results.Add(result);
         }
         return results;
+    }
+
+    // 承認と同じ待ち方で画面に質問を出す。答えは JSON の文字列、答えずに進めるなら deny が返る
+    static async Task<ToolCallResult> AskAsync(ToolSpec spec, string toolUseId, JsonObject input, IApprovalGate gate, CancellationToken cancellationToken)
+    {
+        if (AskToolProvider.Validate(input) is { } problem) return ToolRegistry.Error(problem);
+        var reply = await gate.RequestAsync(new JsonObject
+        {
+            ["kind"] = "question",
+            ["toolUseId"] = toolUseId,
+            ["apiName"] = spec.ApiName,
+            ["source"] = spec.Source,
+            ["tool"] = spec.Name,
+            ["title"] = spec.Title,
+            ["input"] = input.DeepClone(),
+        }, cancellationToken);
+        if (reply == "deny") return ToolJson.Text("ユーザーは質問に答えずに進めるよう選びました。分かっている範囲で妥当な判断をして続けてください");
+        return ToolJson.Text(AskToolProvider.FormatAnswers(input, JsonNode.Parse(reply) as JsonArray ?? []));
     }
 
     // 実行してよければ null、だめなら Claude に返す理由

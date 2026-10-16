@@ -82,6 +82,7 @@ public sealed class AppHost : IAsyncDisposable
             new ArtifactToolProvider(settings),
             new MemoryToolProvider(paths, settings),
             new PlanToolProvider(),
+            new AskToolProvider(),
             new ScheduleToolProvider(scheduler),
             new SkillToolProvider(extensions),
             mcp,
@@ -157,6 +158,7 @@ public sealed class AppHost : IAsyncDisposable
         "chat.rewindInfo" => RewindInfoAsync(Str(p, "conversationId")),
         "chat.switchBranch" => SwitchBranchAsync(Str(p, "conversationId"), (int?)p["index"] ?? -1, (int?)p["version"] ?? -1),
         "tools.approve" => ApproveAsync(Str(p, "requestId"), Str(p, "decision")),
+        "tools.answer" => AnswerAsync(Str(p, "requestId"), p["answers"] as JsonArray ?? throw new InvalidOperationException("answers がありません")),
         "artifacts.export" => ExportArtifactAsync(Str(p, "conversationId"), Str(p, "id")),
         "artifacts.list" => ListArtifactsAsync(),
         "files.extractText" => Task.FromResult<JsonNode?>(DocumentText.Extract(Str(p, "name"), Convert.FromBase64String(Str(p, "data")))),
@@ -213,6 +215,7 @@ public sealed class AppHost : IAsyncDisposable
         FileToolProvider.Source, TerminalToolProvider.Source, ProgramToolProvider.Source, BrowserToolProvider.Source,
         AgentToolProvider.Source, ChatSearchToolProvider.Source, TodoToolProvider.Source, ArtifactToolProvider.Source,
         MemoryToolProvider.Source, PlanToolProvider.Source, ScheduleToolProvider.Source, SkillToolProvider.Source,
+        AskToolProvider.Source,
     ];
 
     static readonly string[] PermissionModes = ["default", "acceptEdits", "plan", "bypass"];
@@ -643,6 +646,12 @@ public sealed class AppHost : IAsyncDisposable
     Task<JsonNode?> ApproveAsync(string requestId, string decision)
     {
         hub.Approve(requestId, decision);
+        return Task.FromResult<JsonNode?>(null);
+    }
+
+    Task<JsonNode?> AnswerAsync(string requestId, JsonArray answers)
+    {
+        hub.Answer(requestId, answers);
         return Task.FromResult<JsonNode?>(null);
     }
 

@@ -1,6 +1,6 @@
 import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, MessageSquare, PanelsTopLeft, Pencil, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
-import { approve, edit, navigate, openArtifact, openFile, retry, setQuote, stopWorkflow, switchBranch, textOf } from "../actions";
+import { answer, approve, edit, navigate, openArtifact, openFile, retry, setQuote, stopWorkflow, switchBranch, textOf } from "../actions";
 import { MODELS } from "../models";
 import { findBuiltin } from "../builtins";
 import { renderMarkdown } from "../markdown";
@@ -527,9 +527,10 @@ function GenericToolBlock({ block, result, conversationId, live }: { block: Wire
   const [source, ...rest] = String(block.name).split("__");
   const tool = rest.join("__");
   const builtin = findBuiltin(source);
-  const toolName = (builtin ? builtin.titles[tool] : undefined) ?? (tool || source);
+  const asking = approval?.kind === "question";
+  const toolName = asking ? "Claude からの質問" : (builtin ? builtin.titles[tool] : undefined) ?? (tool || source);
   const subject = builtin ? builtin.subject(tool, block.input ?? {}) : rest.length ? source : "";
-  const status = approval ? "承認待ち" : running ? "実行中" : result ? (result.is_error ? "エラー" : "完了") : live ? "準備中" : "";
+  const status = asking ? "回答待ち" : approval ? "承認待ち" : running ? "実行中" : result ? (result.is_error ? "エラー" : "完了") : live ? "準備中" : "";
   const Icon = builtin?.icon ?? Plug;
   const images = resultImages(result);
   return (
@@ -543,18 +544,76 @@ function GenericToolBlock({ block, result, conversationId, live }: { block: Wire
       </button>
       {open && (
         <div className="tool-card-body">
-          <div className="tool-section-label">入力</div>
-          <pre>{JSON.stringify(block.input ?? {}, null, 2)}</pre>
+          {/* 質問は結果に問いと答えが並ぶので、入力の JSON は見せない */}
+          {source !== "ask" && <><div className="tool-section-label">入力</div><pre>{JSON.stringify(block.input ?? {}, null, 2)}</pre></>}
           {result && (
             <>
-              <div className="tool-section-label">結果</div>
+              {source !== "ask" && <div className="tool-section-label">結果</div>}
               {images.map((img, i) => <img key={i} className="tool-image" src={`data:${img.source.media_type};base64,${img.source.data}`} alt="" />)}
               {(images.length === 0 || resultText(result).replace(/\[image\]/g, "").trim()) && <pre className={result.is_error ? "error" : ""}>{resultText(result)}</pre>}
             </>
           )}
         </div>
       )}
-      {approval && <ApprovalCard conversationId={conversationId} approval={approval} />}
+      {approval && (asking ? <QuestionForm conversationId={conversationId} approval={approval} /> : <ApprovalCard conversationId={conversationId} approval={approval} />)}
+    </div>
+  );
+}
+
+interface Question {
+  question: string;
+  header?: string;
+  options: { label: string; description?: string }[];
+  multi_select?: boolean;
+}
+
+function QuestionForm({ conversationId, approval }: { conversationId: string; approval: Approval }) {
+  const questions = ((approval.input as { questions?: Question[] })?.questions ?? []);
+  const [picked, setPicked] = useState<string[][]>(() => questions.map(() => []));
+  const [others, setOthers] = useState<string[]>(() => questions.map(() => ""));
+  const complete = questions.every((_, i) => picked[i].length > 0 || others[i].trim());
+  // 1 つだけ選ぶ質問は、選択肢と自由記述のどちらか一方を答えにする
+  const pick = (i: number, label: string, multi: boolean) => {
+    setPicked((p) => p.map((list, j) => (j !== i ? list : multi ? (list.includes(label) ? list.filter((l) => l !== label) : [...list, label]) : [label])));
+    if (!multi) setOthers((o) => o.map((text, j) => (j === i ? "" : text)));
+  };
+  const write = (i: number, text: string, multi: boolean) => {
+    setOthers((o) => o.map((t, j) => (j === i ? text : t)));
+    if (!multi && text) setPicked((p) => p.map((list, j) => (j === i ? [] : list)));
+  };
+  const submit = () => {
+    if (complete) void answer(conversationId, approval.requestId, questions.map((_, i) => ({ selected: picked[i], other: others[i] })));
+  };
+  return (
+    <div className="approval question-form">
+      {questions.map((q, i) => (
+        <div key={i} className="question">
+          <div className="question-head">
+            {q.header && <span className="question-chip">{q.header}</span>}
+            <span>{q.question}</span>
+          </div>
+          {q.multi_select && <div className="approval-note">いくつでも選べます</div>}
+          <div className="question-options">
+            {q.options.map((o) => (
+              <button key={o.label} type="button" aria-pressed={picked[i].includes(o.label)} className={`question-option${picked[i].includes(o.label) ? " on" : ""}`} onClick={() => pick(i, o.label, !!q.multi_select)}>
+                <span className="question-option-label">{o.label}</span>
+                {o.description && <span className="question-option-desc">{o.description}</span>}
+              </button>
+            ))}
+          </div>
+          <input
+            className="question-other"
+            placeholder="その他 (自由に入力)"
+            value={others[i]}
+            onChange={(e) => write(i, e.target.value, !!q.multi_select)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) submit(); }}
+          />
+        </div>
+      ))}
+      <div className="approval-actions">
+        <button type="button" className="button primary" disabled={!complete} onClick={submit}>回答する</button>
+        <button type="button" className="button ghost" onClick={() => void approve(conversationId, approval.requestId, "deny")}>答えずに進める</button>
+      </div>
     </div>
   );
 }

@@ -585,7 +585,7 @@ public sealed class ChatHub(
             hub.EmitStatus(conversation);
             using var registration = cancellationToken.Register(() => decision.TrySetCanceled(cancellationToken));
             // 通知のフックが遅くても、確認と停止は待たせない
-            _ = hub.NotifyAsync(conversation, $"{request["title"] ?? request["tool"]} の確認待ち");
+            _ = hub.NotifyAsync(conversation, (string?)request["kind"] == "question" ? "Claude からの質問" : $"{request["title"] ?? request["tool"]} の確認待ち");
             try
             {
                 return await decision.Task;
@@ -606,8 +606,19 @@ public sealed class ChatHub(
     public void Approve(string requestId, string decision)
     {
         if (decision is not ("once" or "always" or "deny")) throw new InvalidOperationException("decision が不正です");
-        if (approvals.TryGetValue(requestId, out var pending)) pending.Decision.TrySetResult(decision);
+        if (!approvals.TryGetValue(requestId, out var pending)) return;
+        // 質問を「許可」で抜けると、答えの代わりに once が届いてしまう
+        if (IsQuestion(pending.Request) && decision != "deny") throw new InvalidOperationException("質問には回答で答えてください");
+        pending.Decision.TrySetResult(decision);
     }
+
+    public void Answer(string requestId, JsonArray answers)
+    {
+        if (!approvals.TryGetValue(requestId, out var pending) || !IsQuestion(pending.Request)) return;
+        pending.Decision.TrySetResult(answers.ToJsonString());
+    }
+
+    static bool IsQuestion(JsonObject request) => (string?)request["kind"] == "question";
 
     public int RunHopsOf(string conversationId) => runHops.GetValueOrDefault(conversationId);
 }

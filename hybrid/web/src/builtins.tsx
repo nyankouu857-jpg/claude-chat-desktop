@@ -1,4 +1,4 @@
-import { AppWindow, Bot, Brain, CalendarClock, FolderOpen, ListChecks, MessagesSquare, MousePointerClick, NotebookPen, PanelsTopLeft, SquareTerminal, type LucideIcon } from "lucide-react";
+import { AppWindow, Bot, Brain, CalendarClock, CircleQuestionMark, FolderOpen, ListChecks, MessagesSquare, MousePointerClick, NotebookPen, PanelsTopLeft, SquareTerminal, type LucideIcon } from "lucide-react";
 import type { Settings } from "./types";
 
 // 組み込みツールの表示情報。ツール名の接頭辞が id
@@ -170,6 +170,16 @@ export const BUILTIN_SOURCES: BuiltinSource[] = [
     hint: () => "config/skills の手順書",
     titles: { use: "Skill を読み込む", read_file: "Skill のファイルを読む" },
     subject: (_, input) => [input.name, input.path].filter(Boolean).join(" / "),
+  },
+  {
+    id: "ask",
+    group: "claude",
+    label: "質問",
+    icon: CircleQuestionMark,
+    isAvailable: () => true,
+    hint: () => "迷ったときに選択肢で尋ねる",
+    titles: { user: "質問しました" },
+    subject: (_, input) => (Array.isArray(input.questions) ? input.questions.map((q: any) => q?.header).filter(Boolean).join(" / ") : ""),
   },
 ];
 

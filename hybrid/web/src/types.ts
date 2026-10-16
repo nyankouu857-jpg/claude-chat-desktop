@@ -242,6 +242,7 @@ export interface McpServerStatus {
 
 export interface Approval {
   requestId: string;
+  kind?: "question";
   toolUseId: string;
   apiName: string;
   source: string;
