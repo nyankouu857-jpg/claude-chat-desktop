@@ -78,6 +78,7 @@ export interface Conversation {
   // 編集ややり直しで分かれた位置ごとの版の数と、表示中の版
   forkView?: Record<string, { count: number; active: number }>;
   incognito?: boolean;
+  options?: Record<string, unknown> | null;
   topEffort?: string | null;
   tags?: string[];
 }

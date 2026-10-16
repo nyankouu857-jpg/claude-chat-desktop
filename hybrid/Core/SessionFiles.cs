@@ -28,7 +28,7 @@ public sealed class SessionFiles(AppPaths paths, ConversationStore conversations
     const int MaxReadChars = 100_000;
 
     readonly SemaphoreSlim gate = new(1, 1);
-    // file_id -> セッション (親の会話) の ID。起動して初めて探すときにフォルダを全部見て作る
+    // file_id -> セッション (親の会話) の ID。起動して初めて探すときにフォルダを全部見て作る。gate の中でだけ触る
     Dictionary<string, string>? owners;
 
     public static string IncognitoSessionsDir => System.IO.Path.Combine(AppPaths.IncognitoFilesDir, "sessions");
@@ -69,7 +69,9 @@ public sealed class SessionFiles(AppPaths paths, ConversationStore conversations
     {
         var relative = path.Replace('\\', '/').Trim().TrimStart('/');
         if (relative.Length == 0) throw new ToolException("ファイル名を指定してください");
-        if (relative.Split('/').Any(part => part is "" or "." or ".." || part.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0))
+        // 末尾の . や空白は Windows が削って別の名前と同じにする。CON や NUL は装置に書き込まれる
+        if (relative.Split('/').Any(part => part is "" or "." or ".." || part.EndsWith('.') || part.EndsWith(' ')
+            || part.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0 || ReservedNames.Contains(part.Split('.')[0], StringComparer.OrdinalIgnoreCase)))
         {
             throw new ToolException($"使えないファイル名です: {path}");
         }
@@ -77,19 +79,36 @@ public sealed class SessionFiles(AppPaths paths, ConversationStore conversations
         var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(dir, relative));
         var root = System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(dir)) + System.IO.Path.DirectorySeparatorChar;
         if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new ToolException($"セッションのフォルダの外は指定できません: {path}");
+        // ターミナルなどで中にリンクを置かれると、確認なしの読み書きがフォルダの外に届く
+        var current = root.TrimEnd(System.IO.Path.DirectorySeparatorChar);
+        foreach (var part in relative.Split('/'))
+        {
+            current = System.IO.Path.Combine(current, part);
+            var info = new FileInfo(current);
+            if (info.Exists || Directory.Exists(current))
+            {
+                if (info.Attributes.HasFlag(FileAttributes.ReparsePoint) || info.LinkTarget is not null) throw new ToolException($"リンクは使えません: {path}");
+            }
+        }
         return relative;
     }
+
+    static readonly string[] ReservedNames = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
 
     public async Task<(SessionFile File, string FullPath)> WriteAsync(Conversation writer, string path, string content)
     {
         if (content.Length > MaxFileChars) throw new ToolException($"1 ファイル {MaxFileChars:N0} 文字までです");
         var root = await RootOfAsync(writer);
+        // 親が消えた子に自分だけのフォルダを作らせない。誰も消さないフォルダが残る
+        if (writer.ParentId is not null && root.Id == writer.Id) throw new ToolException("親のチャットが削除されたため、セッションのフォルダに書けません");
         var dir = DirOf(root);
         var relative = SafeRelative(dir, path);
         var bytes = Encoding.UTF8.GetBytes(content);
         await gate.WaitAsync();
         try
         {
+            // 止める前に書き始めた子が、消したばかりのフォルダを作り直さないように
+            if (!root.Incognito && await conversations.GetAsync(root.Id) is null) throw new ToolException("このチャットは削除されています");
             var files = await LoadAsync(dir);
             var existing = files.FirstOrDefault(f => f.Path.Equals(relative, StringComparison.OrdinalIgnoreCase));
             if (files.Where(f => f != existing).Sum(f => f.Size) + bytes.Length > MaxFolderBytes) throw new ToolException("このセッションのフォルダがいっぱいです。要らないファイルを消してください");
@@ -118,18 +137,17 @@ public sealed class SessionFiles(AppPaths paths, ConversationStore conversations
     {
         var myRoot = await RootOfAsync(reader);
         var root = myRoot;
-        if (fileId is { Length: > 0 } && !(await LoadAsync(DirOf(myRoot))).Any(f => f.Id == fileId))
+        if (fileId is { Length: > 0 } && !(await LockedAsync(() => LoadAsync(DirOf(myRoot)))).Any(f => f.Id == fileId))
         {
             Conversation? owner = null;
-            if ((await OwnersAsync()).TryGetValue(fileId, out var ownerId)) owner = await conversations.GetAsync(ownerId);
+            var ownerId = await LockedAsync(async () => (await OwnersAsync()).GetValueOrDefault(fileId));
+            if (ownerId is not null) owner = await conversations.GetAsync(ownerId);
             if (owner is null || owner.Incognito || myRoot.Incognito) throw new ToolException($"{fileId} というファイルはありません");
-            // 分けたチャットは、分ける前の会話で受け渡したファイルを引き続き読める
-            var forkedFromOwner = myRoot.ForkedFrom == owner.Id;
-            if (!forkedFromOwner && (CanShare is null || !await CanShare(myRoot, owner))) throw new ToolException($"{fileId} は、このチャットからは読めないセッションのファイルです");
+            if (CanShare is null || !await CanShare(myRoot, owner)) throw new ToolException($"{fileId} は、このチャットからは読めないセッションのファイルです");
             root = owner;
         }
         var dir = DirOf(root);
-        var files = await LoadAsync(dir);
+        var files = await LockedAsync(() => LoadAsync(dir));
         var file = fileId is { Length: > 0 }
             ? files.FirstOrDefault(f => f.Id == fileId)
             : files.FirstOrDefault(f => f.Path.Equals(SafeRelative(dir, path ?? ""), StringComparison.OrdinalIgnoreCase));
@@ -139,11 +157,55 @@ public sealed class SessionFiles(AppPaths paths, ConversationStore conversations
         return (file, full);
     }
 
-    public async Task<List<SessionFile>> ListAsync(Conversation conversation) => await LoadAsync(DirOf(await RootOfAsync(conversation)));
+    public async Task<List<SessionFile>> ListAsync(Conversation conversation)
+    {
+        var dir = DirOf(await RootOfAsync(conversation));
+        return await LockedAsync(() => LoadAsync(dir));
+    }
 
-    // 会話を消す前の確認用。子はフォルダを持たないので 0
-    public async Task<int> CountAsync(Conversation conversation) =>
-        conversation.ParentId is null ? (await LoadAsync(DirOf(conversation))).Count : 0;
+    // 書き込みの途中の一覧やファイルを読むと、Windows では書く側が共有違反で失敗する
+    async Task<T> LockedAsync<T>(Func<Task<T>> work)
+    {
+        await gate.WaitAsync();
+        try
+        {
+            return await work();
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public Task<string> ReadTextAsync(string fullPath, int offset) => LockedAsync(() => ReadPartAsync(fullPath, offset));
+
+    // 分けたチャットに、その時点のファイルを同じ file_id のまま写す。元を消しても履歴の file_id が読める
+    public async Task CopyAsync(Conversation source, Conversation fork)
+    {
+        var from = DirOf(source);
+        var to = DirOf(fork);
+        await gate.WaitAsync();
+        try
+        {
+            var files = await LoadAsync(from);
+            if (files.Count == 0) return;
+            var copied = new List<SessionFile>();
+            foreach (var file in files)
+            {
+                var original = System.IO.Path.Combine(from, SafeRelative(from, file.Path));
+                if (!File.Exists(original)) continue;
+                var target = System.IO.Path.Combine(to, file.Path);
+                Directory.CreateDirectory(System.IO.Path.GetDirectoryName(target)!);
+                File.Copy(original, target, overwrite: true);
+                copied.Add(file);
+            }
+            await Json.WriteAtomicAsync(RegistryPath(to), copied);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
 
     public async Task DeleteFolderAsync(Conversation conversation)
     {
@@ -156,7 +218,14 @@ public sealed class SessionFiles(AppPaths paths, ConversationStore conversations
             {
                 foreach (var id in owners.Where(o => o.Value == conversation.Id).Select(o => o.Key).ToList()) owners.Remove(id);
             }
-            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            try
+            {
+                if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // 開いたままのファイルがあると消せない。会話の削除は止めず、残りは手で消せるようにする
+            }
         }
         finally
         {
@@ -164,7 +233,7 @@ public sealed class SessionFiles(AppPaths paths, ConversationStore conversations
         }
     }
 
-    public static async Task<string> ReadTextAsync(string fullPath, int offset)
+    static async Task<string> ReadPartAsync(string fullPath, int offset)
     {
         var text = await File.ReadAllTextAsync(fullPath);
         if (offset < 0 || offset > text.Length) throw new ToolException($"offset は 0 から {text.Length} の間にしてください");
@@ -200,7 +269,7 @@ public sealed class SessionToolProvider(SessionFiles files) : IToolProvider
         return
         [
             new(Prefix + "write_file", Source, "write_file", "セッションにファイルを書く",
-                $"Write a text file (code, data, documents) into the session folder and get a file_id. Writing the same path again overwrites it and keeps its file_id. {Sharing} The result also gives the file's full path, so you can run or open it with other tools.",
+                $"Write a text file (code, data, documents) into the session folder and get a file_id. Writing the same path again overwrites it and keeps its file_id. {Sharing} The result also gives the file's full path, which terminal commands can use (the file tools cannot reach the app's own folder).",
                 new JsonObject
                 {
                     ["type"] = "object",
@@ -211,7 +280,7 @@ public sealed class SessionToolProvider(SessionFiles files) : IToolProvider
                     },
                     ["required"] = new JsonArray("path", "content"),
                     ["additionalProperties"] = false,
-                }, AutoApprove: true, ReadOnly: true),
+                }, AutoApprove: true),
             new(Prefix + "read_file", Source, "read_file", "セッションのファイルを読む",
                 "Read a session file by its file_id (also works for a file_id another chat or a sub-agent gave you) or by its relative path in your session folder. Long files come back in parts; pass offset to continue.",
                 new JsonObject
@@ -248,7 +317,7 @@ public sealed class SessionToolProvider(SessionFiles files) : IToolProvider
                 var path = (string?)input["path"];
                 if (string.IsNullOrWhiteSpace(fileId) && string.IsNullOrWhiteSpace(path)) throw new ToolException("file_id か path を指定してください");
                 var (file, full) = await files.FindAsync(conversation, fileId, path);
-                var text = await SessionFiles.ReadTextAsync(full, (int?)input["offset"] ?? 0);
+                var text = await files.ReadTextAsync(full, (int?)input["offset"] ?? 0);
                 return ToolJson.Text($"file_id: {file.Id}\npath: {file.Path}\nfull path: {full}\n\n{text}");
             }
             case "list_files":

@@ -25,7 +25,8 @@ public sealed class Checkpoints(AppPaths paths, IPlatform platform)
     public void Record(string path)
     {
         // シークレットチャットで触ったファイルの控えや一覧をディスクに残さない
-        if (ToolContext.Current?.Conversation is not { Incognito: false } conversation) return;
+        // 子が変えたファイルも、親の「この返答で変えたファイル」から戻せるよう、親の発言に記録する
+        if ((ToolContext.Current?.Root ?? ToolContext.Current?.Conversation) is not { Incognito: false } conversation) return;
         var turn = conversation.LastHumanIndex();
         if (turn < 0) return;
         lock (sync)

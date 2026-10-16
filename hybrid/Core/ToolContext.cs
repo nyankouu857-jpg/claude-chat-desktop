@@ -49,6 +49,8 @@ public sealed class HurrySignal
         lock (gate)
         {
             request = CancellationTokenSource.CreateLinkedTokenSource(run);
+            // 前の周で受け取った後に押されていたら、この問い合わせをすぐ止めて次の周で下げる
+            if (pending) request.Cancel();
             return request.Token;
         }
     }
@@ -95,6 +97,8 @@ public sealed class ToolContext
     }
 
     public required Conversation Conversation { get; init; }
+    // サブエージェントなら起動した親。ファイルの控えを親の発言にまとめる
+    public Conversation? Root { get; init; }
     public required ChatOptions Options { get; init; }
     // 0 はユーザーのチャット、1 はサブエージェント。子はさらに子を作れない
     public int Depth { get; init; }

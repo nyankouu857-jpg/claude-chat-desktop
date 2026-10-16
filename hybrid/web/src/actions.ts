@@ -3,6 +3,7 @@ import { FAST_MODELS, defaultEffortOf } from "./models";
 import { getState, setState, type AppState } from "./store";
 import type {
   SessionFile,
+  Effort,
   Approval,
   ChatEvent,
   Conversation,
@@ -128,7 +129,22 @@ export async function init() {
     },
   }));
   if (!data.secrets.hasApiKey) navigate({ name: "settings", tab: "api" });
-  else if (SINGLE_CHAT) navigate({ name: "chat", id: SINGLE_CHAT });
+  else if (SINGLE_CHAT) {
+    navigate({ name: "chat", id: SINGLE_CHAT });
+    // 別の窓の入力欄は、その会話で最後に使ったモデルやツールから始める
+    const conversation = await guard(() => call<Conversation | null>("conversations.get", { id: SINGLE_CHAT }));
+    const saved = conversation?.options as Record<string, any> | undefined;
+    if (saved) {
+      setChoice({
+        ...(typeof saved.model === "string" ? { model: saved.model } : {}),
+        ...(typeof saved.effort === "string" ? { effort: saved.effort as Effort } : {}),
+        ...(typeof saved.webSearch === "boolean" ? { webSearch: saved.webSearch } : {}),
+        ...(typeof saved.webFetch === "boolean" ? { webFetch: saved.webFetch } : {}),
+        ...(typeof saved.codeExecution === "boolean" ? { codeExecution: saved.codeExecution } : {}),
+        fast: saved.fast === true,
+      });
+    }
+  }
 }
 
 async function refreshFolders() {
@@ -376,6 +392,8 @@ function chatOptions() {
     fast: choice.fast && FAST_MODELS.includes(choice.model),
     style: choice.style,
     enabledSources: [...BUILTIN_SOURCE_IDS, ...mcp.map((m) => m.name)].filter((name) => !choice.disabledSources.includes(name)),
+    // 画面が知っている組み込み。これに無いものは後から増えたものとして使える
+    knownSources: BUILTIN_SOURCE_IDS,
   };
 }
 
@@ -410,7 +428,16 @@ async function flushOffline() {
   offlineQueue = [];
   setState((s) => ({ ...s, offlineQueued: 0 }));
   let sent = 0;
-  for (const payload of queued) if (await deliver(payload)) sent++;
+  const failed: SendPayload[] = [];
+  for (const payload of queued) {
+    if (await deliver(payload)) sent++;
+    else failed.push(payload);
+  }
+  // 応答中だったなどで送れなかったものは、捨てずに次の機会まで取っておく
+  if (failed.length) {
+    offlineQueue = [...failed, ...offlineQueue];
+    setState((s) => ({ ...s, offlineQueued: offlineQueue.length }));
+  }
   if (sent) toast(`送信待ちだった ${sent} 件を送りました`);
 }
 

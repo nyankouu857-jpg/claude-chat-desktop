@@ -140,7 +140,18 @@ public partial class MainWindow : Window
             // UI スレッドのキューは先入れ先出しなので、通知の順番が保たれる。返事も全部の窓に流し、ID の合う窓だけが受け取る
             Dispatcher.InvokeAsync(() =>
             {
-                foreach (var view in views) view.PostWebMessageAsString(json);
+                foreach (var view in views.ToList())
+                {
+                    try
+                    {
+                        view.PostWebMessageAsString(json);
+                    }
+                    catch (Exception)
+                    {
+                        // 中の WebView が落ちた窓には送らない。ほかの窓への知らせは止めない
+                        views.Remove(view);
+                    }
+                }
             });
         });
         platform.ChatWindowOpener = OpenChatWindow;
@@ -216,9 +227,12 @@ public partial class MainWindow : Window
         var browser = new Microsoft.Web.WebView2.Wpf.WebView2 { DefaultBackgroundColor = Browser.DefaultBackgroundColor };
         var chatWindow = new Window { Title = "ClaudeChat", Width = 900, Height = 820, Content = browser, Background = Background, Icon = Icon };
         CoreWebView2? core = null;
+        var closed = false;
         chatWindow.Loaded += async (_, _) =>
         {
             await browser.EnsureCoreWebView2Async(environment);
+            // 用意ができる前に閉じられた窓は、捨てた WebView に触らない
+            if (closed) return;
             core = browser.CoreWebView2;
             Configure(core);
             views.Add(core);
@@ -226,6 +240,7 @@ public partial class MainWindow : Window
         };
         chatWindow.Closed += (_, _) =>
         {
+            closed = true;
             if (core is not null) views.Remove(core);
             browser.Dispose();
         };

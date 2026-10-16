@@ -62,7 +62,9 @@ sealed partial class WindowsPlatform
         return Shell_NotifyIcon(NimModify, ref data) ? null : "通知を出せませんでした";
     });
 
-    public bool IsActive => Application.Current.Dispatcher.Invoke(() => window is { IsVisible: true, IsActive: true, WindowState: not WindowState.Minimized });
+    // 別の窓で開いたチャットを見ているときも、見ていることにする
+    public bool IsActive => Application.Current.Dispatcher.Invoke(() =>
+        Application.Current.Windows.OfType<Window>().Any(w => w is { IsVisible: true, IsActive: true, WindowState: not WindowState.Minimized }));
 
     public void ShowWindow() => Application.Current.Dispatcher.Invoke(() => onOpen?.Invoke());
 

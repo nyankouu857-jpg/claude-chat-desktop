@@ -8,6 +8,8 @@ import { Dialog, Dropdown, MenuItem } from "./ui";
 
 // 料金の動きは応答の終わりに知らせが来る。それとは別に、日付が変わったときのためにときどき読み直す
 const BUDGET_REFRESH_MS = 60_000;
+// 応答中の読み直しの間隔。問い合わせごとに読むと多すぎる
+const BUDGET_COST_DEBOUNCE_MS = 5_000;
 // これを超えたら色を変えて、上限が近いと分かるようにする
 const BUDGET_WARN_RATIO = 0.8;
 
@@ -26,9 +28,20 @@ function BudgetGauge() {
     void load();
     const timer = setInterval(() => void load(), BUDGET_REFRESH_MS);
     const off = on("conversations.changed", () => void load());
+    // 応答中も料金が増えるたびに読み直す。続けて届いても読み直しは 1 度にまとめる
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    const offCost = on("chat.event", ({ event }: { event: { type: string } }) => {
+      if (event.type !== "cost" || pending) return;
+      pending = setTimeout(() => {
+        pending = null;
+        void load();
+      }, BUDGET_COST_DEBOUNCE_MS);
+    });
     return () => {
       clearInterval(timer);
+      if (pending) clearTimeout(pending);
       off();
+      offCost();
     };
   }, [settingsBudget?.dailyLimitUsd, settingsBudget?.monthlyLimitUsd]);
   if (!budget) return null;
@@ -163,7 +176,7 @@ export function TagsDialog({ summary, onClose }: { summary: { id: string; tags?:
   const [text, setText] = useState((summary.tags ?? []).join(", "));
   const summaries = useStore((s) => s.summaries);
   const known = useMemo(() => [...new Set(summaries.flatMap((c) => c.tags ?? []))].sort(), [summaries]);
-  const parse = (value: string) => value.split(/[,、]/).map((t) => t.trim()).filter(Boolean);
+  const parse = (value: string) => value.split(/[,、，]/).map((t) => t.trim()).filter(Boolean);
   const save = async () => {
     await setTags(summary.id, parse(text));
     onClose();

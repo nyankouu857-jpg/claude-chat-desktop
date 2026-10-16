@@ -28,6 +28,8 @@ public sealed class ChatHub(
         public int Hops { get; } = hops;
     }
 
+    static readonly string[] SourcesAddedLater = [SessionToolProvider.Source];
+
     // Stop フックに続けさせるのは、止まらなくなるのを防ぐため 1 回の送信につき 3 回まで
     const int MaxStopContinuations = 3;
 
@@ -53,6 +55,7 @@ public sealed class ChatHub(
     string? clientKey;
 
     public ToolRegistry Tools { get; set; } = new([]);
+    public Uploads? Uploads { get; set; }
 
     public const string Running = "running";
     public const string Waiting = "waiting";
@@ -121,13 +124,21 @@ public sealed class ChatHub(
         var depth = DepthOf(conversation);
         // 画面からの指定が無いとき (ほかのチャットからの通信など) は、その会話の直近の設定で動かす
         var source = request ?? conversation.Options ?? [];
+        // 手で書き換えた settings.json に「自動」があっても API に渡さない
+        var defaultModel = defaults.Model == ModelCatalog.AutoModel ? "claude-opus-5-5" : defaults.Model;
         // 「自動」は送るときに振り分ける。振り分けずに動き出したときは、前回選んだモデルで続ける
         if ((string?)source["model"] == ModelCatalog.AutoModel)
         {
             source = (JsonObject)source.DeepClone();
-            source["model"] = conversation.Model ?? defaults.Model;
+            source["model"] = conversation.Model ?? defaultModel;
         }
         var enabled = source["enabledSources"] is JsonArray list ? list.Select(n => (string?)n).OfType<string>().ToHashSet() : null;
+        // 使うものを並べる形で保存しているので、後から増えた組み込みは昔の会話で使えないままになる。画面が知らなかったものは使えることにする
+        if (enabled is not null)
+        {
+            var known = (source["knownSources"] as JsonArray)?.Select(n => (string?)n).OfType<string>().ToHashSet() ?? [];
+            foreach (var added in SourcesAddedLater.Where(s => !known.Contains(s))) enabled.Add(added);
+        }
         // サブエージェントはさらに子を作ったり、ほかのチャットを動かしたりしない
         if (depth > 0) enabled = (enabled ?? Tools.SourceNames().ToHashSet()).Where(s => s != AgentToolProvider.Source).ToHashSet();
         // 予定は会話の中身を schedules.json に残し、後で保存されるチャットを作るので使わせない
@@ -142,7 +153,7 @@ public sealed class ChatHub(
             Skills = enabled is null || enabled.Contains(SkillToolProvider.Source) ? extensions.ListSkills() : [],
             OutputStyle = extensions.OutputStyleText((string?)source["style"] ?? defaults.OutputStyle),
             IsAgent = depth > 0,
-            Model = (string?)source["model"] ?? conversation.Model ?? defaults.Model,
+            Model = (string?)source["model"] ?? conversation.Model ?? defaultModel,
             MemoryListing = current.Features.Memory && (enabled is null || enabled.Contains(MemoryToolProvider.Source))
                 ? MemoryToolProvider.PromptListing(MemoryToolProvider.RootFor(paths, conversation.FolderId))
                 : null,
@@ -150,7 +161,7 @@ public sealed class ChatHub(
         }, DateTime.Now);
         return new ChatOptions
         {
-            Model = (string?)source["model"] ?? conversation.Model ?? defaults.Model,
+            Model = (string?)source["model"] ?? conversation.Model ?? defaultModel,
             Effort = (string?)source["effort"] ?? defaults.Effort,
             WebSearch = (bool?)source["webSearch"] ?? defaults.WebSearch,
             WebSearchMaxUses = Math.Clamp(defaults.WebSearchMaxUses, 1, 50),
@@ -188,7 +199,7 @@ public sealed class ChatHub(
     public async Task<ChatEngine> EngineAsync()
     {
         var apiKey = await secrets.GetAsync(SecretStore.ApiKey) ?? throw new InvalidOperationException("APIキーが未設定です。設定の API 画面から登録してください");
-        return new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargedAsync };
+        return new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargedAsync, Uploads = Uploads };
     }
 
     // ワークフローの子の料金をワークフローごとに数える。WorkflowRunner が渡す
@@ -197,7 +208,7 @@ public sealed class ChatHub(
     // 応答中の料金を画面に出す。サブエージェントの分は起動した会話の料金として見せる。子は終わると消えるので、その都度親に足す
     async Task ChargedAsync(Conversation conversation, decimal cost)
     {
-        EmitChatEvent(conversation.Id, new JsonObject { ["type"] = "cost", ["usage"] = Json.ToNode(conversation.Usage), ["added"] = cost });
+        EmitChatEvent(conversation.Id, new JsonObject { ["type"] = "cost", ["usage"] = Json.ToNode(conversation.Usage.Copy()), ["added"] = cost });
         if (conversation.WorkflowId is { } workflowId) WorkflowCharged?.Invoke(workflowId, cost);
         var parentId = conversation.ParentId;
         // 親子が輪になった壊れたデータでも回り続けない
@@ -205,9 +216,7 @@ public sealed class ChatHub(
         {
             if (await conversations.GetAsync(parentId) is not { } parent) return;
             parent.Usage.Charge(cost, byAgent: true);
-            EmitChatEvent(parent.Id, new JsonObject { ["type"] = "cost", ["usage"] = Json.ToNode(parent.Usage), ["added"] = cost });
-            // 動いている親は自分の保存に乗る。止まっている親を保存しても、会話を書き換えている者はいない
-            if (!running.ContainsKey(parent.Id)) await conversations.SaveAsync(parent, touch: false);
+            EmitChatEvent(parent.Id, new JsonObject { ["type"] = "cost", ["usage"] = Json.ToNode(parent.Usage.Copy()), ["added"] = cost });
             parentId = parent.ParentId;
         }
     }
@@ -286,10 +295,13 @@ public sealed class ChatHub(
     {
         var id = conversation.Id;
         var hurry = new HurrySignal();
-        hurries[id] = hurry;
-        options = options with { TakeInterjections = () => TakeInterjections(id), Hurry = hurry };
-        var costBefore = conversation.Usage.CostUsd;
-        ToolContext.Current = new ToolContext { Conversation = conversation, Options = options, Depth = DepthOf(conversation), Hops = hops };
+        // バッチは問い合わせを止められないので、急がせる口を作らない
+        if (!options.Batch) hurries[id] = hurry;
+        options = options with { TakeInterjections = () => TakeInterjections(id), Hurry = options.Batch ? null : hurry };
+        var costBefore = conversation.Usage.Copy().CostUsd;
+        var root = conversation;
+        for (var depth = 0; depth < 3 && root.ParentId is { } parentId && await conversations.GetAsync(parentId) is { } parent; depth++) root = parent;
+        ToolContext.Current = new ToolContext { Conversation = conversation, Root = root, Options = options, Depth = DepthOf(conversation), Hops = hops };
         // 途中経過を順番どおりに保存する。落ちてもそこまでの会話は残る
         var saveChain = Task.CompletedTask;
         void EmitChat(JsonObject e)
@@ -310,7 +322,7 @@ public sealed class ChatHub(
             else
             {
                 conversation.Model = options.Model;
-                engine = new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargedAsync };
+                engine = new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargedAsync, Uploads = Uploads };
                 var gate = new ApprovalGate(this, conversation);
                 result = await engine.RunAsync(conversation, options, EmitChat, gate, cancellation.Token);
                 // Stop フックが続けるよう求めたら、同じ枠のまま理由を渡して続けさせる。
@@ -370,6 +382,15 @@ public sealed class ChatHub(
         {
             result = new ChatRunResult(ChatStatus.Failed, e.Message);
             conversation.LastRunStatus = "failed";
+            try
+            {
+                // 保存しないと running のまま残り、次の起動で途中で終わった応答として扱われる
+                if (await conversations.GetAsync(id) is not null) await conversations.SaveAsync(conversation, touch: false);
+            }
+            catch (Exception)
+            {
+                // 保存できなくても、失敗したことは画面に知らせる
+            }
             EmitChat(new JsonObject { ["type"] = "done", ["status"] = "failed", ["error"] = e.Message, ["conversation"] = conversation.ToWire() });
         }
         finally
@@ -380,7 +401,7 @@ public sealed class ChatHub(
             completion.TrySetResult(result);
             EmitStatus(conversation);
         }
-        await AfterRunAsync(conversation, result, conversation.Usage.CostUsd - costBefore);
+        await AfterRunAsync(conversation, result, conversation.Usage.Copy().CostUsd - costBefore);
     }
 
     // 起動したとき、前回応答中のまま終わった会話に印を付け直す。答えまで書き終えていたものは終わったことにする
@@ -388,16 +409,23 @@ public sealed class ChatHub(
     {
         foreach (var summary in (await conversations.ListAsync()).Where(c => c.LastRunStatus == Running))
         {
-            if (await conversations.GetAsync(summary.Id) is not { } conversation) continue;
-            var last = conversation.LastMessage();
-            var answered = last is not null && (string?)last["role"] == "assistant" && !(last["content"] as JsonArray ?? []).OfType<JsonObject>().Any(b => (string?)b["type"] == "tool_use");
-            // 子は親がもう待っていないので、続きからは動かさない
-            conversation.LastRunStatus = answered ? "done" : conversation.ParentId is null ? Interrupted : "failed";
-            await conversations.SaveAsync(conversation, touch: false);
+            try
+            {
+                if (await conversations.GetAsync(summary.Id) is not { } conversation) continue;
+                var last = conversation.LastMessage();
+                var answered = last is not null && (string?)last["role"] == "assistant" && !(last["content"] as JsonArray ?? []).OfType<JsonObject>().Any(b => (string?)b["type"] == "tool_use");
+                // 子は親がもう待っていないので、続きからは動かさない
+                conversation.LastRunStatus = answered ? "done" : conversation.ParentId is null ? Interrupted : "failed";
+                await conversations.SaveAsync(conversation, touch: false);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+            {
+                // 読めない会話が 1 つあっても起動は止めない
+            }
         }
     }
 
-    const string ResumeNote = "<resumed>アプリが途中で終了したため、応答が中断されていました。ここまでの続きから再開してください。</resumed>";
+    const string ResumeNote = "<resumed>アプリが途中で終了したため、応答が中断されていました。動いていたサブエージェントとワークフローも止まっていて、結果は届きません。必要ならやり直して、ここまでの続きから再開してください。</resumed>";
 
     public async Task ResumeAsync(Conversation conversation)
     {
@@ -440,8 +468,15 @@ public sealed class ChatHub(
     {
         try
         {
+            // 子の料金は問い合わせごとに親へ足してある。親の会話を毎回書き直さず、子が終わったときにまとめて残す
+            for (var (ancestorId, depth) = (conversation.ParentId, 0); ancestorId is not null && depth < 8; depth++)
+            {
+                if (await conversations.GetAsync(ancestorId) is not { } ancestor) break;
+                if (!running.ContainsKey(ancestor.Id)) await conversations.SaveAsync(ancestor, touch: false);
+                ancestorId = ancestor.ParentId;
+            }
             // 待たれているサブエージェントの終わりは親の返答で分かるので、知らせるのは人が始めた会話と裏で動いた子だけ
-            if (conversation.ParentId is null && result.Status != ChatStatus.Aborted)
+            if (conversation.ParentId is null && result.Status != ChatStatus.Aborted && !quietAlerts.TryRemove(conversation.Id, out _))
             {
                 var digest = Digest(result.Status == ChatStatus.Done ? FinalText(conversation) : result.Error ?? "", runCost);
                 Alert?.Invoke(conversation, (result.Status == ChatStatus.Done ? "返答が終わりました" : "返答が失敗しました") + (digest.Length > 0 ? $": {digest}" : ""), false);
@@ -461,7 +496,7 @@ public sealed class ChatHub(
                 if (result.Status != ChatStatus.Aborted)
                 {
                     var verb = result.Status == ChatStatus.Done ? "終わりました" : "失敗しました";
-                    Alert?.Invoke(parent, $"サブエージェント「{conversation.Title}」が{verb}: {Digest(body, conversation.Usage.CostUsd)}", false);
+                    Alert?.Invoke(parent, $"サブエージェント「{conversation.Title}」が{verb}: {Digest(body, runCost)}", false);
                 }
                 await DeliverAsync(parent, $"<task-notification agent=\"{Escape(conversation.Title)}\" chat_id=\"{conversation.Id}\" status=\"{status}\">\n{body}\n</task-notification>", hops);
             }
@@ -555,9 +590,13 @@ public sealed class ChatHub(
 
     // Messaging
 
+    // 裏の子やワークフローの終わりは、その時点で知らせている。続けて動く親の返答では重ねて知らせない
+    readonly ConcurrentDictionary<string, byte> quietAlerts = new();
+
     // 待機中ならすぐ動かし、応答中なら終わってから届ける
     public async Task DeliverAsync(Conversation target, string text, int hops)
     {
+        if (text.StartsWith("<task-notification")) quietAlerts[target.Id] = 0;
         lock (inboxLock)
         {
             if (!inboxes.TryGetValue(target.Id, out var list)) inboxes[target.Id] = list = [];
@@ -715,6 +754,13 @@ public sealed class ChatHub(
         child.PermissionMode = parent.PermissionMode is "plan" or "auto" ? parent.PermissionMode : "default";
         // 親と同じ道具立てで動かす。モデルと effort は、呼んだ Claude が選んだときだけ変える
         child.Options = parent.Options?.DeepClone() as JsonObject;
+        if (child.Options is not null)
+        {
+            // 「自動」は親の発言ごとに選ぶもの。子は親が今使っているモデルで動かす
+            if ((string?)child.Options["model"] == ModelCatalog.AutoModel) child.Options["model"] = parent.Model;
+            // 高速モードは料金が 2 倍なので、頼まれていない子にまで広げない
+            child.Options.Remove("fast");
+        }
         if (overrides is not null)
         {
             child.Options ??= [];

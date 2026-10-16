@@ -294,7 +294,8 @@ function PlusMenu({ direction, onAddFiles, onCapture }: { direction: "up" | "dow
       {(close) => (
         <>
           <MenuItem icon={<Paperclip size={16} />} hint="画像、PDF、テキスト、Office 文書" onClick={() => { close(); onAddFiles(); }}>ファイルや写真を追加</MenuItem>
-          <MenuItem icon={<Camera size={16} />} hint="範囲を選んで撮り、そのまま添付" onClick={() => { close(); onCapture(); }}>画面を撮って添付</MenuItem>
+          {/* 画面を撮るのは Windows のアプリだけ。開発用のブラウザでは出さない */}
+          {(window as any).chrome?.webview && <MenuItem icon={<Camera size={16} />} hint="範囲を選んで撮り、そのまま添付" onClick={() => { close(); onCapture(); }}>画面を撮って添付</MenuItem>}
           <MenuItem icon={<Type size={16} />} hint={styles.find((st) => st.id === choice.style)?.label ?? "標準"} onClick={() => setStylesOpen((o) => !o)}>
             <span className="menu-expand">スタイルを使う <ChevronRight size={13} className={stylesOpen ? "rotated" : ""} /></span>
           </MenuItem>

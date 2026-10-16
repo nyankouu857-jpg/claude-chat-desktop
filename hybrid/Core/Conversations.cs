@@ -26,6 +26,27 @@ public sealed class ConversationUsage
             if (byAgent) AgentsCostUsd += cost;
         }
     }
+
+    public void Add(long input, long output, long cacheRead, long cacheWrite, decimal cost)
+    {
+        lock (gate)
+        {
+            Input += input;
+            Output += output;
+            CacheRead += cacheRead;
+            CacheWrite += cacheWrite;
+            CostUsd += cost;
+        }
+    }
+
+    // 保存や画面に出すときの写し。足している途中の値を書き出さない
+    public ConversationUsage Copy()
+    {
+        lock (gate)
+        {
+            return new ConversationUsage { Input = Input, Output = Output, CacheRead = CacheRead, CacheWrite = CacheWrite, CostUsd = CostUsd, AgentsCostUsd = AgentsCostUsd, Context = Context };
+        }
+    }
 }
 
 public sealed class Artifact
@@ -123,6 +144,7 @@ public sealed class Conversation
     public List<string> Tags { get; set; } = [];
     // 「ここから別のチャット」で分けた元。元のセッションのファイルを読めるようにする
     public string? ForkedFrom { get; set; }
+    public long ForkedAt { get; set; }
     public List<EffortMark> EffortMarks { get; set; } = [];
     // キャッシュが外れた理由を API に聞くための前の応答の ID。保存しない
     public string? LastResponseId { get; set; }
@@ -247,11 +269,17 @@ public sealed class Conversation
         {
             var messages = new List<JsonObject>();
             if (CompactionBlock is { } block) messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = new JsonArray(block.DeepClone()) });
-            for (var i = Math.Min(ApiStart, Messages.Count); i < Messages.Count; i++)
+            var start = Math.Min(ApiStart, Messages.Count);
+            // 要約の塊より前は API が読まないので、そこで効いていた effort を塊の直後で言い直す
+            var restart = Messages.FindLastIndex(m => (m["content"] as JsonArray)?.OfType<JsonObject>().Any(b => (string?)b["type"] == "compaction") == true) + 1;
+            if (restart <= start) restart = CompactionBlock is null ? -1 : start;
+            for (var i = start; i < Messages.Count; i++)
             {
                 if (withEffort)
                 {
-                    foreach (var mark in EffortMarks.Where(m => m.Index == i))
+                    var marks = EffortMarks.Where(m => m.Index == i).ToList();
+                    if (i == restart && marks.Count == 0 && EffortAt(i) is { } carried && carried != TopEffort) marks.Add(new EffortMark { Index = i, Effort = carried });
+                    foreach (var mark in marks)
                     {
                         messages.Add(new JsonObject { ["role"] = "system", ["content"] = new JsonArray(), ["output_config"] = new JsonObject { ["effort"] = mark.Effort } });
                     }
@@ -261,6 +289,45 @@ public sealed class Conversation
             return messages;
         }
     }
+
+    // 結果の無い tool_use の直後に結果を補う。人の発言が続いていれば、その先頭に結果を入れる
+    public void RepairToolUses(string reason)
+    {
+        lock (sync)
+        {
+            for (var i = Math.Min(ApiStart, Messages.Count); i < Messages.Count; i++)
+            {
+                if ((string?)Messages[i]["role"] != "assistant") continue;
+                var ids = (Messages[i]["content"] as JsonArray ?? []).OfType<JsonObject>().Where(b => (string?)b["type"] == "tool_use").Select(b => (string?)b["id"]).OfType<string>().ToList();
+                if (ids.Count == 0) continue;
+                var next = i + 1 < Messages.Count ? Messages[i + 1] : null;
+                var answered = (next?["content"] as JsonArray ?? []).OfType<JsonObject>().Where(b => (string?)b["type"] == "tool_result").Select(b => (string?)b["tool_use_id"]).ToHashSet();
+                var missing = ids.Where(id => !answered.Contains(id)).ToList();
+                if (missing.Count == 0) continue;
+                var results = missing.Select(id => (JsonNode)new JsonObject
+                {
+                    ["type"] = "tool_result",
+                    ["tool_use_id"] = id,
+                    ["is_error"] = true,
+                    ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = reason }),
+                }).ToList();
+                if (next is not null && (string?)next["role"] == "user")
+                {
+                    var blocks = next["content"] as JsonArray ?? new JsonArray(new JsonObject { ["type"] = "text", ["text"] = (string?)next["content"] ?? "" });
+                    for (var r = results.Count - 1; r >= 0; r--) blocks.Insert(0, results[r]);
+                    next["content"] = blocks;
+                }
+                else
+                {
+                    Messages.Insert(i + 1, new JsonObject { ["role"] = "user", ["content"] = new JsonArray(results.ToArray()) });
+                    foreach (var mark in EffortMarks.Where(m => m.Index > i)) mark.Index++;
+                }
+            }
+        }
+    }
+
+    // index の発言の手前で効いている effort
+    string? EffortAt(int index) => EffortMarks.Where(m => m.Index < index).LastOrDefault()?.Effort ?? TopEffort;
 
     // effort を変えたら、まだ送っていない末尾の発言の前に印を置く。初めて送るときは上の effort にする
     public void SetEffort(string effort)
@@ -272,7 +339,8 @@ public sealed class Conversation
                 TopEffort = effort;
                 return;
             }
-            var current = EffortMarks.Where(m => m.Index >= ApiStart && m.Index < Messages.Count).LastOrDefault()?.Effort ?? TopEffort;
+            // 要約の後も CopyApiMessages が言い直すので、印は会話の頭から数える
+            var current = EffortMarks.Where(m => m.Index < Messages.Count).LastOrDefault()?.Effort ?? TopEffort;
             if (current == effort) return;
             var index = Messages.Count > 0 && (string?)Messages[^1]["role"] == "user" ? Messages.Count - 1 : Messages.Count;
             EffortMarks.RemoveAll(m => m.Index >= index);
@@ -299,6 +367,7 @@ public sealed class Conversation
                 Files = new Dictionary<string, string>(Files),
                 Tags = [.. Tags],
                 ForkedFrom = Id,
+                ForkedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 LastRunStatus = "done",
             };
             if (ApiStart <= upTo) (fork.ApiStart, fork.CompactionBlock) = (ApiStart, CompactionBlock?.DeepClone() as JsonObject);
@@ -353,7 +422,7 @@ public sealed class Conversation
                 ["createdAt"] = CreatedAt,
                 ["updatedAt"] = UpdatedAt,
                 ["messages"] = new JsonArray(Messages.Select(m => (JsonNode)m.DeepClone()).ToArray()),
-                ["usage"] = Json.ToNode(Usage),
+                ["usage"] = Json.ToNode(Usage.Copy()),
                 ["folderId"] = FolderId,
                 ["parentId"] = ParentId,
                 ["kind"] = Kind,
@@ -371,6 +440,7 @@ public sealed class Conversation
                 ["incognito"] = Incognito,
                 ["topEffort"] = TopEffort,
                 ["forkedFrom"] = ForkedFrom,
+                ["forkedAt"] = ForkedAt,
                 ["tags"] = new JsonArray(Tags.Select(t => (JsonNode)t).ToArray()),
                 ["effortMarks"] = Json.ToNode(EffortMarks),
                 ["forkView"] = new JsonObject(Forks.Select(f => KeyValuePair.Create(f.Key.ToString(), (JsonNode?)new JsonObject { ["count"] = f.Value.Versions.Count, ["active"] = f.Value.Active }))),

@@ -29,6 +29,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 {
     // 応答中の料金を画面に出し、サブエージェントの分は起動した会話にも足す。ChatHub が渡す
     public Func<Conversation, decimal, Task>? Charged { get; init; }
+    // 大きな PDF を Files API の ID に差し替えて送る
+    public Uploads? Uploads { get; init; }
 
     readonly AutoReviewer reviewer = new(client, ledger);
     const string TitleModel = "claude-haiku-5-5";
@@ -254,6 +256,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         // コンテナは時間が経つと消えるので、断られたら 1 度だけ新しく作り直す
         var containerRetried = false;
         var transientRetries = 0;
+        var uploadsDropped = false;
 
         async Task<BetaMessage> StreamAsync(MessageCreateParams request, CancellationToken requestToken)
         {
@@ -313,6 +316,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
         try
         {
+            // 落ちたり止めたりして結果の無いツール呼び出しが履歴に残っていると、以後ずっと 400 になる
+            conversation.RepairToolUses("前の応答が途中で終わったため、結果を受け取れませんでした");
             if (ModelCatalog.SupportsMessageEffort(options.Model)) conversation.SetEffort(options.Effort);
             var mode = conversation.PermissionMode;
             for (var turn = 0; turn < options.MaxToolTurns; turn++)
@@ -339,7 +344,11 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 var toolSpecs = tools.GetTools(options.EnabledSources);
                 partialText.Clear();
                 emit(new JsonObject { ["type"] = "message-start" });
-                var request = BuildRequest(conversation, options, toolSpecs);
+                var outgoing = conversation.CopyApiMessages(UsesMessageEffort(conversation, options));
+                var uploaded = Uploads is not null && !uploadsDropped && (await settings.GetAsync()).Chat.UploadLargePdfs
+                    ? await Uploads.SubstituteAsync(client, conversation, outgoing, cancellationToken)
+                    : [];
+                var request = BuildRequest(conversation, options, toolSpecs, outgoing);
                 // 前の応答と比べて、キャッシュが外れた理由を返してもらう
                 if (!options.Batch) request = request with { Diagnostics = new BetaDiagnosticsParam { PreviousMessageID = conversation.LastResponseId } };
                 BetaMessage message;
@@ -354,6 +363,16 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     // 考えている途中の分は捨てて、次の周で effort を下げて送り直す
                     await RecordInterruptedUsageAsync(conversation, options.Model, streamUsage);
                     streamUsage = null;
+                    partialText.Clear();
+                    emit(new JsonObject { ["type"] = "discard" });
+                    turn--;
+                    continue;
+                }
+                catch (Exception e) when (e is AnthropicBadRequestException or AnthropicNotFoundException && uploaded.Count > 0 && e.Message.Contains("file", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 上げたファイルが期限切れや別の組織のキーで見えないときは、この応答では中身ごと送る
+                    await Uploads!.ForgetAsync(uploaded);
+                    uploadsDropped = true;
                     partialText.Clear();
                     emit(new JsonObject { ["type"] = "discard" });
                     turn--;
@@ -860,16 +879,22 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 WebSearches = webSearches,
             });
             webSearches = 0;
-            conversation.Usage.Input += record.Input + written;
-            conversation.Usage.Output += record.Output;
-            conversation.Usage.CacheRead += record.CacheRead;
-            conversation.Usage.CacheWrite += written;
-            conversation.Usage.Charge(record.CostUsd ?? 0, byAgent: false);
+            conversation.Usage.Add(record.Input + written, record.Output, record.CacheRead, written, record.CostUsd ?? 0);
             charged += record.CostUsd ?? 0;
             // 右の「コンテキスト」用に、最後に送った会話の大きさを覚えておく
             if (kind == "chat") conversation.Usage.Context = record.Input + record.CacheRead + written;
         }
-        if (charged > 0 && Charged is not null) await Charged(conversation, charged);
+        if (charged > 0 && Charged is not null)
+        {
+            try
+            {
+                await Charged(conversation, charged);
+            }
+            catch (Exception)
+            {
+                // 画面や親への知らせに失敗しても、払い済みの応答を失敗にしない
+            }
+        }
     }
 
     // 要約や脇道の質問は長くならない。トークン数で思考する世代は、思考の分より多くないと受け付けられない

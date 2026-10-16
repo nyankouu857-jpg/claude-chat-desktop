@@ -58,6 +58,7 @@ public sealed partial class AutoReviewer(AnthropicClient client, UsageLedger led
             {
                 At = DateTimeOffset.UtcNow,
                 ConversationId = conversation.Incognito ? null : conversation.Id,
+                ParentId = conversation.Incognito ? null : conversation.ParentId,
                 Kind = "auto",
                 Model = Model,
                 Input = response.Usage.InputTokens,

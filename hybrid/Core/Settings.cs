@@ -29,6 +29,8 @@ public sealed class ChatDefaults
     public bool ShowThinking { get; set; } = true;
     // summarized は思考の要約と進捗、updates は進捗だけ。対応していないモデルは summarized で動かす
     public string ThinkingDisplay { get; set; } = "summarized";
+    // 大きな PDF を Files API に上げて使い回す。上げたくない場合は切る
+    public bool UploadLargePdfs { get; set; } = true;
     public int MaxToolTurns { get; set; } = 30;
     // 長い会話を要約し始める入力トークン数
     public int CompactThreshold { get; set; } = 150_000;
