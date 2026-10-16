@@ -81,13 +81,13 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
             Schema(("url", "string", "The URL to open", true), ("new_tab", "boolean", "Open in a new tab instead of the current one", false)),
             false, true, OpenAsync),
         new("snapshot", "ページを読む",
-            "Read the current page: its URL, title, visible text, and a numbered list of clickable and editable elements. Use the numbers with click and type. Numbers change after each snapshot.",
+            "Read the current page: its URL, title, visible text (cut at 20,000 characters; scroll and snapshot again for the rest), and a numbered list of clickable and editable elements. Use the numbers with click and type. Numbers change after each snapshot.",
             Schema(), true, true, (_, ct) => SnapshotAsync(ct)),
         new("screenshot", "スクリーンショット",
             "Take a screenshot of the visible part of the current page, for layouts, images, or charts the text snapshot cannot show.",
             Schema(), true, true, (_, ct) => ScreenshotAsync(ct)),
         new("click", "クリック",
-            "Click an element by its number from the latest snapshot.",
+            "Click an element by its number from the latest snapshot. If the click opens a new tab, the tool switches to it. The result only tells you the current URL, so take a snapshot to see what changed.",
             Schema(("ref", "integer", "Element number from the snapshot", true)),
             false, true, ClickAsync),
         new("type", "文字を入力",
@@ -382,12 +382,13 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         var raw = (string?)await EvalAsync(page, SnapshotScript.Replace("__MAX__", MaxElements.ToString()), cancellationToken) ?? "{}";
         var snapshot = JsonNode.Parse(raw)!.AsObject();
         var text = (string?)snapshot["text"] ?? "";
-        if (text.Length > MaxPageTextChars) text = text[..MaxPageTextChars] + $"\n... 本文が長いので {MaxPageTextChars:N0} 文字で切りました。scroll してから snapshot すると続きの要素が見えます";
+        if (text.Length > MaxPageTextChars) text = text[..MaxPageTextChars] + $"\n... 本文が長いので {MaxPageTextChars:N0} 文字で切りました";
         var elements = (snapshot["elements"] as JsonArray ?? []).Select(e => (string?)e).ToList();
         var more = (bool?)snapshot["truncated"] == true ? $"\n... 要素が多いので {MaxElements} 個までにしました" : "";
         return $"URL: {snapshot["url"]}\nタイトル: {snapshot["title"]}\nスクロール位置: {snapshot["scroll"]}\n\n## 本文\n{text}\n\n## 操作できる要素\n{string.Join("\n", elements)}{more}";
     }
 
+    // 座標を返すと同時に、その要素に click が届いたかを見る仕掛けを付ける
     static async Task<(double X, double Y)> LocateAsync(IPageChannel page, int reference, CancellationToken cancellationToken)
     {
         var box = await EvalAsync(page, $$"""
@@ -396,12 +397,44 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
               if (!el) return null;
               // scroll-behavior: smooth のページでも、座標を取る前に動かし終える
               el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+              window.__claudeClicked = false;
+              el.addEventListener('click', () => { window.__claudeClicked = true; }, { once: true, capture: true });
               const r = el.getBoundingClientRect();
               return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
             })()
             """, cancellationToken) as JsonObject;
         if (box is null) throw new ToolException($"要素 {reference} が見つかりません。ページが変わった可能性があるので snapshot を取り直してください");
         return ((double)box["x"]!, (double)box["y"]!);
+    }
+
+    // 重なった広告や同意の帯、ブラウザの拡大率のずれで、座標のクリックが要素に届かないことがある
+    static async Task<string?> EnsureClickedAsync(IPageChannel page, int reference, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var outcome = (string?)await EvalAsync(page, $$"""
+                (() => {
+                  if (window.__claudeClicked !== false) return 'ok';
+                  const el = document.querySelector('[data-claude-ref="{{reference}}"]');
+                  if (!el) return 'ok';
+                  const r = el.getBoundingClientRect();
+                  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                  el.click();
+                  return top && top !== el && !el.contains(top) ? `covered:${top.tagName.toLowerCase()}${top.id ? '#' + top.id : ''}` : 'retried';
+                })()
+                """, cancellationToken);
+            return outcome switch
+            {
+                "ok" => null,
+                "retried" => "座標でのクリックが要素に届かなかったので、要素に直接クリックを送りました",
+                _ => $"画面上では別の要素 ({outcome![8..]}) が重なっていたので、要素に直接クリックを送りました",
+            };
+        }
+        catch (ToolException)
+        {
+            // クリックでページが移り始め、元のページで調べられなかった。届いている
+            return null;
+        }
     }
 
     static async Task KeyAsync(IPageChannel page, string key, int code, string? text, CancellationToken cancellationToken)
@@ -476,18 +509,33 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
     {
         var page = await PageAsync(cancellationToken);
         var reference = Reference(input);
+        var tabsBefore = (await ListTabsAsync(cancellationToken)).Select(t => t.Id).ToHashSet();
         var (x, y) = await LocateAsync(page, reference, cancellationToken);
         foreach (var type in new[] { "mouseMoved", "mousePressed", "mouseReleased" })
         {
             await page.SendAsync("Input.dispatchMouseEvent", new JsonObject { ["type"] = type, ["x"] = x, ["y"] = y, ["button"] = "left", ["clickCount"] = 1 }, cancellationToken);
         }
+        var retried = await EnsureClickedAsync(page, reference, cancellationToken);
         await WaitForLoadAsync(page, cancellationToken);
+        var lines = new List<string> { $"要素 {reference} をクリックしました" };
+        if (retried is not null) lines.Add(retried);
+        // target=_blank のリンクは新しいタブで開く。元のタブを見続けると「何も起きなかった」ように見えてしまう
+        var opened = (await ListTabsAsync(cancellationToken)).FirstOrDefault(t => !tabsBefore.Contains(t.Id));
+        if (opened.Id is not null)
+        {
+            await ResetSessionAsync();
+            currentTargetId = opened.Id;
+            page = await PageAsync(cancellationToken);
+            await WaitForLoadAsync(page, cancellationToken);
+            lines.Add("新しいタブで開いたので、そのタブに切り替えました");
+        }
         var title = await EvalAsync(page, "JSON.stringify([location.href, document.title])", cancellationToken);
         var info = JsonNode.Parse((string?)title ?? "[]") as JsonArray;
         var url = (string?)info?[0] ?? "";
         // 確認していないサイトに移ったら、題名 (受信件数などが入る) も渡さない
         var pageTitle = Mode == "extension" && !approvedHosts.Contains(HostKey(url)) ? "" : $"{info?[1]} ";
-        return Text($"要素 {reference} をクリックしました。今のページ: {pageTitle}({url})。結果を確かめるには snapshot を使ってください");
+        lines.Add($"今のページ: {pageTitle}({url})");
+        return Text(string.Join("\n", lines));
     }
 
     async Task<ToolCallResult> TypeAsync(JsonObject input, CancellationToken cancellationToken)

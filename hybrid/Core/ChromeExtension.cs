@@ -11,7 +11,7 @@ public static class ChromeExtension
           "manifest_version": 3,
           "key": "__KEY__",
           "name": "ClaudeChat 連携",
-          "version": "1.1.0",
+          "version": "1.2.0",
           "description": "ClaudeChat のブラウザ操作で、このブラウザを使えるようにします。",
           "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],
           "background": { "service_worker": "background.js" },
@@ -156,6 +156,13 @@ public static class ChromeExtension
           send({ event: "detached", tabId: String(source.tabId) });
         });
         chrome.tabs.onRemoved.addListener(async (tabId) => setOwnedTabs((await ownedTabs()).filter((id) => id !== tabId)));
+        // Claude が開いたタブのリンクから開いた新しいタブも Claude のものにする。ユーザーが自分で開いたタブは含めない
+        chrome.tabs.onCreated.addListener(async (tab) => {
+          const owned = await ownedTabs();
+          if (tab.openerTabId === undefined || !owned.includes(tab.openerTabId) || owned.includes(tab.id)) return;
+          await setOwnedTabs([...owned, tab.id]);
+          await addToGroup(tab.id).catch(() => {});
+        });
         chrome.storage.onChanged.addListener((changes, area) => {
           if (area !== "local" || !changes.token) return;
           socket?.close();
