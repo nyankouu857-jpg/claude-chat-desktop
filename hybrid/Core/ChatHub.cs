@@ -177,7 +177,23 @@ public sealed class ChatHub(
     public async Task<ChatEngine> EngineAsync()
     {
         var apiKey = await secrets.GetAsync(SecretStore.ApiKey) ?? throw new InvalidOperationException("APIキーが未設定です。設定の API 画面から登録してください");
-        return new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths);
+        return new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargeParentsAsync };
+    }
+
+    // サブエージェントの料金は起動した会話の料金として見せる。子は終わると消えるので、その都度親に足す
+    async Task ChargeParentsAsync(Conversation child, decimal cost)
+    {
+        var parentId = child.ParentId;
+        // 親子が輪になった壊れたデータでも回り続けない
+        for (var depth = 0; parentId is not null && depth < 8; depth++)
+        {
+            if (await conversations.GetAsync(parentId) is not { } parent) return;
+            parent.Usage.Charge(cost, byAgent: true);
+            EmitChatEvent(parent.Id, new JsonObject { ["type"] = "cost", ["usage"] = Json.ToNode(parent.Usage) });
+            // 動いている親は自分の保存に乗る。止まっている親を保存しても、会話を書き換えている者はいない
+            if (!running.ContainsKey(parent.Id)) await conversations.SaveAsync(parent, touch: false);
+            parentId = parent.ParentId;
+        }
     }
 
     // 要約や巻き戻しの間に送信が割り込まないよう、応答と同じ枠を取って動かす
@@ -273,7 +289,7 @@ public sealed class ChatHub(
             else
             {
                 conversation.Model = options.Model;
-                engine = new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths);
+                engine = new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargeParentsAsync };
                 var gate = new ApprovalGate(this, conversation);
                 result = await engine.RunAsync(conversation, options, EmitChat, gate, cancellation.Token);
                 // Stop フックが続けるよう求めたら、同じ枠のまま理由を渡して続けさせる。

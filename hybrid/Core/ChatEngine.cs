@@ -27,6 +27,9 @@ public interface IApprovalGate
 
 public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, UsageLedger ledger, SettingsStore settings, Hooks hooks, AppPaths paths)
 {
+    // サブエージェントの料金を起動した会話にも足す。ChatHub が渡す
+    public Func<Conversation, decimal, Task>? Charged { get; init; }
+
     readonly AutoReviewer reviewer = new(client, ledger);
     const string TitleModel = "claude-haiku-5-5";
     // API の下限
@@ -749,6 +752,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         var iterations = (usage["iterations"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
         if (iterations.Count == 0) iterations = [usage];
         var webSearches = (long?)usage["server_tool_use"]?["web_search_requests"] ?? 0;
+        var charged = 0m;
         foreach (var iteration in iterations)
         {
             var written = (long?)iteration["cache_creation_input_tokens"] ?? 0;
@@ -772,10 +776,12 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             conversation.Usage.Output += record.Output;
             conversation.Usage.CacheRead += record.CacheRead;
             conversation.Usage.CacheWrite += written;
-            conversation.Usage.CostUsd += record.CostUsd ?? 0;
+            conversation.Usage.Charge(record.CostUsd ?? 0, byAgent: false);
+            charged += record.CostUsd ?? 0;
             // 右の「コンテキスト」用に、最後に送った会話の大きさを覚えておく
             if (kind == "chat") conversation.Usage.Context = record.Input + record.CacheRead + written;
         }
+        if (conversation.ParentId is not null && charged > 0 && Charged is not null) await Charged(conversation, charged);
     }
 
     // 要約や脇道の質問は長くならない。トークン数で思考する世代は、思考の分より多くないと受け付けられない

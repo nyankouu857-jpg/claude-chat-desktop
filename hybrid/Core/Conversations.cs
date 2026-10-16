@@ -9,8 +9,22 @@ public sealed class ConversationUsage
     public long Output { get; set; }
     public long CacheRead { get; set; }
     public long CacheWrite { get; set; }
+    // サブエージェントの分も含む。子は終わると消えるので、親の側に足しておく
     public decimal CostUsd { get; set; }
+    public decimal AgentsCostUsd { get; set; }
     public long Context { get; set; }
+
+    // 親の応答と子の応答が別のスレッドから同時に足しに来る
+    readonly Lock gate = new();
+
+    public void Charge(decimal cost, bool byAgent)
+    {
+        lock (gate)
+        {
+            CostUsd += cost;
+            if (byAgent) AgentsCostUsd += cost;
+        }
+    }
 }
 
 public sealed class Artifact

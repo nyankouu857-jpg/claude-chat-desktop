@@ -102,7 +102,8 @@ export function ChatView({ id }: { id: string }) {
         {conversation && conversation.usage.costUsd > 0 && (
           <span
             className="cost-chip"
-            title={`入力 ${tokens(conversation.usage.input)} / 出力 ${tokens(conversation.usage.output)} / キャッシュ読み込み ${tokens(conversation.usage.cacheRead)} トークン`}
+            title={`入力 ${tokens(conversation.usage.input)} / 出力 ${tokens(conversation.usage.output)} / キャッシュ読み込み ${tokens(conversation.usage.cacheRead)} トークン`
+              + (conversation.usage.agentsCostUsd ? `\nうちサブエージェント ${usd(conversation.usage.agentsCostUsd)}` : "")}
           >
             {usd(conversation.usage.costUsd)}
           </span>

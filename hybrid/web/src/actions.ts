@@ -210,6 +210,13 @@ function applyChatEvent(id: string, event: ChatEvent) {
     case "usage":
       updateLive(id, (live) => ({ ...live, outputTokens: live.outputTokens + event.output, streamingTokens: 0 }));
       break;
+    case "cost":
+      // サブエージェントが使った分が親に足された
+      setState((s) => {
+        const conversation = s.conversations[id];
+        return conversation ? putConversation(s, { ...conversation, usage: event.usage }) : s;
+      });
+      break;
     case "block-start":
       updateLive(id, (live) => {
         const blocks = [...live.blocks];

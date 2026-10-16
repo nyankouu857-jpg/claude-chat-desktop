@@ -16,6 +16,8 @@ export interface ConversationUsage {
   cacheRead: number;
   cacheWrite: number;
   costUsd: number;
+  // costUsd のうちサブエージェントの分
+  agentsCostUsd?: number;
   // 最後の問い合わせで送った会話の大きさ (トークン)
   context?: number;
 }
@@ -306,6 +308,7 @@ export type ChatEvent =
   | { type: "notice"; text: string }
   | { type: "compacted"; apiStart: number; compactionBlock: WireBlock | null }
   | { type: "usage"; output: number }
+  | { type: "cost"; usage: ConversationUsage }
   | { type: "options"; model?: string; effort?: Effort }
   | { type: "inbound"; message: WireMessage }
   | { type: "discard" }
