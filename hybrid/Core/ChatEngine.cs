@@ -343,6 +343,12 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 }
 
                 if (stopReason == "max_tokens") Notice(emit, "出力上限に達したため途中で終わっています");
+                if (stopReason == "model_context_window_exceeded")
+                {
+                    Notice(emit, "会話がモデルの扱える長さの上限に届いたため途中で終わっています。" + (ModelCatalog.SupportsCompaction(options.Model)
+                        ? "次の送信で古い部分が要約されます"
+                        : "/compact で要約するか、新しいチャットで続けてください"));
+                }
                 return new ChatRunResult(ChatStatus.Done);
             }
             Notice(emit, $"ツールの呼び出しが {options.MaxToolTurns} 回に達したので止めました。続けるには続きをお願いしてください");
