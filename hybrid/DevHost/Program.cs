@@ -124,6 +124,10 @@ sealed class ConsolePlatform(string trashDir) : IPlatform
     // ブラウザからはフォルダ選択ダイアログを出せない
     public string? PickFolder() => null;
 
+    // 画面の無いところで動くので、本物のマウスは無い
+    public bool CanRealClick => false;
+    public string? RealClick(string titleMarker, double fx, double fy) => "この環境では本物のマウスでのクリックは使えません";
+
     // ごみ箱の代わり
     public void MoveToTrash(string path)
     {

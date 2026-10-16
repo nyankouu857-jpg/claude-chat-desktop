@@ -49,7 +49,7 @@ sealed class DpapiProtector : ISecretProtector
         Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(protectedValue), null, DataProtectionScope.CurrentUser));
 }
 
-sealed class WindowsPlatform : IPlatform
+sealed partial class WindowsPlatform : IPlatform
 {
     public string Version => typeof(WindowsPlatform).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 

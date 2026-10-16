@@ -11,6 +11,10 @@ public interface IPlatform
     void OpenPath(string path);
     string? PickFolder();
     void MoveToTrash(string path);
+    // 画面上の本物のマウスでブラウザを押せるか。Windows のアプリだけ
+    bool CanRealClick { get; }
+    // 題名に titleMarker を含むブラウザの窓の、ページ表示領域の中の割合 (0 から 1) の位置を本物のマウスで押す。できなかったら理由を返す
+    string? RealClick(string titleMarker, double fx, double fy);
 }
 
 // 画面 (WebView2 やブラウザ) とのやり取りを一手に引き受ける。通信路には依存しない
@@ -62,7 +66,7 @@ public sealed class AppHost : IAsyncDisposable
         mcp = new McpHub(paths);
         terminal = new TerminalToolProvider(settings);
         bridge = new BrowserBridge(settings, secrets);
-        browser = new BrowserToolProvider(settings, paths, bridge);
+        browser = new BrowserToolProvider(settings, paths, bridge, platform);
         // 同じ名前があれば先に並べたものが勝つので、MCP は最後
         hub.Tools = new ToolRegistry(
         [

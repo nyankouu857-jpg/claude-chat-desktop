@@ -7,7 +7,7 @@ using static ClaudeChat.Core.ToolJson;
 namespace ClaudeChat.Core;
 
 // Chrome を DevTools プロトコルで動かす組み込みツール。専用プロファイルの Chrome (無ければ Edge) か、拡張機能を通していつもの Chrome を使う
-public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, BrowserBridge bridge) : IToolProvider, IAsyncDisposable
+public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, BrowserBridge bridge, IPlatform platform) : IToolProvider, IAsyncDisposable
 {
     public const string Source = "browser";
     const string Prefix = "browser__";
@@ -87,8 +87,8 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
             "Take a screenshot of the visible part of the current page, for layouts, images, or charts the text snapshot cannot show.",
             Schema(), true, true, (_, ct) => ScreenshotAsync(ct)),
         new("click", "クリック",
-            "Click an element by its number from the latest snapshot. If the click opens a new tab, the tool switches to it. The result only tells you the current URL, so take a snapshot to see what changed.",
-            Schema(("ref", "integer", "Element number from the snapshot", true)),
+            "Click an element by its number from the latest snapshot. If the click does not reach the element, the tool retries with the real mouse on the screen (Windows), then with a direct DOM click. If the click opens a new tab, the tool switches to it. The result only tells you the current URL, so take a snapshot to see what changed. Set real to click with the real mouse from the start, when a page ignored a normal click that did reach the element.",
+            Schema(("ref", "integer", "Element number from the snapshot", true), ("real", "boolean", "Use the real mouse on the screen (moves the user's pointer briefly)", false)),
             false, true, ClickAsync),
         new("type", "文字を入力",
             "Replace the contents of an input, text area, or editable element with text, by its number from the latest snapshot. For a select element, choose the option whose text or value matches. Set submit to press Enter afterwards.",
@@ -407,28 +407,22 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         return ((double)box["x"]!, (double)box["y"]!);
     }
 
-    // 重なった広告や同意の帯、ブラウザの拡大率のずれで、座標のクリックが要素に届かないことがある
-    static async Task<string?> EnsureClickedAsync(IPageChannel page, int reference, CancellationToken cancellationToken)
+    // 重なった広告や同意の帯、ブラウザの拡大率のずれで、座標のクリックが要素に届かないことがある。
+    // 届いていれば null、届いていなければ重なっていた要素の説明 (分からなければ空)
+    static async Task<string?> MissedClickAsync(IPageChannel page, int reference, CancellationToken cancellationToken)
     {
         try
         {
-            var outcome = (string?)await EvalAsync(page, $$"""
+            return (string?)await EvalAsync(page, $$"""
                 (() => {
-                  if (window.__claudeClicked !== false) return 'ok';
+                  if (window.__claudeClicked !== false) return null;
                   const el = document.querySelector('[data-claude-ref="{{reference}}"]');
-                  if (!el) return 'ok';
+                  if (!el) return null;
                   const r = el.getBoundingClientRect();
                   const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-                  el.click();
-                  return top && top !== el && !el.contains(top) ? `covered:${top.tagName.toLowerCase()}${top.id ? '#' + top.id : ''}` : 'retried';
+                  return top && top !== el && !el.contains(top) ? `${top.tagName.toLowerCase()}${top.id ? '#' + top.id : ''}` : '';
                 })()
                 """, cancellationToken);
-            return outcome switch
-            {
-                "ok" => null,
-                "retried" => "座標でのクリックが要素に届かなかったので、要素に直接クリックを送りました",
-                _ => $"画面上では別の要素 ({outcome![8..]}) が重なっていたので、要素に直接クリックを送りました",
-            };
         }
         catch (ToolException)
         {
@@ -436,6 +430,44 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
             return null;
         }
     }
+
+    // 窓を見分けるため、タブの題名を一時的に目印に変えてから、Windows に本物のマウスで押してもらう
+    async Task<string?> RealClickAsync(IPageChannel page, int reference, CancellationToken cancellationToken)
+    {
+        var marker = "claudechat-" + Guid.NewGuid().ToString("N")[..12];
+        var box = await EvalAsync(page, $$"""
+            (() => {
+              const el = document.querySelector('[data-claude-ref="{{reference}}"]');
+              if (!el) return null;
+              el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+              window.__claudeClicked = false;
+              el.addEventListener('click', () => { window.__claudeClicked = true; }, { once: true, capture: true });
+              window.__claudeTitle = document.title;
+              document.title = '{{marker}}';
+              const r = el.getBoundingClientRect();
+              return { fx: (r.left + r.width / 2) / innerWidth, fy: (r.top + r.height / 2) / innerHeight };
+            })()
+            """, cancellationToken) as JsonObject;
+        if (box is null) throw new ToolException($"要素 {reference} が見つかりません。ページが変わった可能性があるので snapshot を取り直してください");
+        try
+        {
+            return await Task.Run(() => platform.RealClick(marker, (double)box["fx"]!, (double)box["fy"]!), cancellationToken);
+        }
+        finally
+        {
+            try
+            {
+                await EvalAsync(page, $"if (document.title === '{marker}') document.title = window.__claudeTitle", CancellationToken.None);
+            }
+            catch (ToolException)
+            {
+                // 押したことでページが移った。題名は新しいページのものになっている
+            }
+        }
+    }
+
+    static Task ScriptClickAsync(IPageChannel page, int reference, CancellationToken cancellationToken) =>
+        EvalAsync(page, $"document.querySelector('[data-claude-ref=\"{reference}\"]')?.click()", cancellationToken);
 
     static async Task KeyAsync(IPageChannel page, string key, int code, string? text, CancellationToken cancellationToken)
     {
@@ -510,15 +542,37 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         var page = await PageAsync(cancellationToken);
         var reference = Reference(input);
         var tabsBefore = (await ListTabsAsync(cancellationToken)).Select(t => t.Id).ToHashSet();
-        var (x, y) = await LocateAsync(page, reference, cancellationToken);
-        foreach (var type in new[] { "mouseMoved", "mousePressed", "mouseReleased" })
-        {
-            await page.SendAsync("Input.dispatchMouseEvent", new JsonObject { ["type"] = type, ["x"] = x, ["y"] = y, ["button"] = "left", ["clickCount"] = 1 }, cancellationToken);
-        }
-        var retried = await EnsureClickedAsync(page, reference, cancellationToken);
-        await WaitForLoadAsync(page, cancellationToken);
         var lines = new List<string> { $"要素 {reference} をクリックしました" };
-        if (retried is not null) lines.Add(retried);
+        if ((bool?)input["real"] == true)
+        {
+            if (!platform.CanRealClick) throw new ToolException("この環境では本物のマウスでのクリックは使えません");
+            if (await RealClickAsync(page, reference, cancellationToken) is { } failed) throw new ToolException($"本物のマウスでクリックできませんでした: {failed}");
+            lines.Add("画面上で本物のマウスを使って押しました");
+        }
+        else
+        {
+            var (x, y) = await LocateAsync(page, reference, cancellationToken);
+            foreach (var type in new[] { "mouseMoved", "mousePressed", "mouseReleased" })
+            {
+                await page.SendAsync("Input.dispatchMouseEvent", new JsonObject { ["type"] = type, ["x"] = x, ["y"] = y, ["button"] = "left", ["clickCount"] = 1 }, cancellationToken);
+            }
+            if (await MissedClickAsync(page, reference, cancellationToken) is { } cover)
+            {
+                lines.Add(cover.Length > 0 ? $"画面上では別の要素 ({cover}) が重なっていて、クリックが要素に届きませんでした" : "座標でのクリックが要素に届きませんでした");
+                var realFailed = platform.CanRealClick ? await RealClickAsync(page, reference, cancellationToken) : "";
+                if (realFailed is null && await MissedClickAsync(page, reference, cancellationToken) is null)
+                {
+                    lines.Add("画面上で本物のマウスを使って押し直しました");
+                }
+                else
+                {
+                    if (realFailed is { Length: > 0 }) lines.Add($"本物のマウスでも押せませんでした ({realFailed})");
+                    await ScriptClickAsync(page, reference, cancellationToken);
+                    lines.Add("要素に直接クリックを送りました");
+                }
+            }
+        }
+        await WaitForLoadAsync(page, cancellationToken);
         // target=_blank のリンクは新しいタブで開く。元のタブを見続けると「何も起きなかった」ように見えてしまう
         var opened = (await ListTabsAsync(cancellationToken)).FirstOrDefault(t => !tabsBefore.Contains(t.Id));
         if (opened.Id is not null)
