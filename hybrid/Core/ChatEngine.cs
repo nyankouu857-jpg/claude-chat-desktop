@@ -107,7 +107,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         var parameters = new MessageCreateParams
         {
             Model = options.Model,
-            MaxTokens = 64000,
+            // 上限は付けたくないが必須の値なので、選べるどのモデルも受け付ける最大にする。料金は実際に出た分だけ
+            MaxTokens = 128000,
             Messages = (messages ?? conversation.CopyApiMessages()).Select(ToParam).ToList(),
             Thinking = new BetaThinkingConfigAdaptive
             {
