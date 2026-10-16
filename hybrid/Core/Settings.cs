@@ -50,6 +50,10 @@ public sealed class AgentSettings
     public int MaxConcurrent { get; set; } = 4;
     public int MaxWorkflowAgents { get; set; } = 10;
     public int MaxMessageHops { get; set; } = 10;
+    // 親と話している最中に子の確認待ちが埋もれて止まるのを防ぐ
+    public bool AutoApproveChildren { get; set; } = true;
+    // 結果は親に渡し終えているので、一覧に残しても散らかるだけ
+    public bool DeleteFinishedChildren { get; set; } = true;
 }
 
 public sealed class FeatureSettings

@@ -452,6 +452,11 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             {
                 outcome = ToolRegistry.Error($"PreToolUse フックが止めました: {blocked.Message}");
             }
+            else if (spec.ApiName == AskToolProvider.ApiName && conversation.ParentId is not null && (await settings.GetAsync()).Agents.AutoApproveChildren)
+            {
+                // 子の質問は誰にも見られないまま止まる
+                outcome = ToolRegistry.Error("サブエージェントはユーザーに質問できません。妥当な前提を置いて進め、その前提を最後の報告に書いてください");
+            }
             else if (spec.ApiName == AskToolProvider.ApiName)
             {
                 outcome = await AskAsync(spec, id, input, gate, cancellationToken);
@@ -529,6 +534,13 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             // ワークツリーは git を動かすので、編集の自動許可には含めない
             case "acceptEdits" when spec.Source == FileToolProvider.Source && spec.Name is not ("create_worktree" or "exit_worktree"):
                 return null;
+        }
+        if (conversation.ParentId is not null && current.Agents.AutoApproveChildren)
+        {
+            // 計画を抜ける許可までは子に出させない。計画は親が受け取ってユーザーに見せる
+            return spec.ApiName == PlanToolProvider.ExitPlanMode
+                ? "サブエージェントは計画モードを抜けられません。計画は最後のメッセージにまとめて親に返してください"
+                : null;
         }
         if (spec.AutoApprove || readOnlyCall || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return null;
 

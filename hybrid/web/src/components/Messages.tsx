@@ -183,17 +183,21 @@ function peerHeader(peer: PeerMessage): { icon: ReactNode; title: string } {
   }
 }
 
+// 終わったサブエージェントは自動で消えるので、消えたチャットへのリンクは出さない
+const useChatExists = (id?: string) => useStore((s) => !!id && s.summaries.some((c) => c.id === id));
+
 function PeerCard({ peer }: { peer: PeerMessage }) {
   // 作業の依頼と予定は読めないと困るので開いておく
   const [open, setOpen] = useState(peer.tag === "task" || peer.tag === "message" || peer.tag === "scheduled-task");
   const { icon, title } = peerHeader(peer);
   const chatId = peer.attrs.chat_id;
+  const chatExists = useChatExists(chatId);
   return (
     <div className={`peer-card peer-${peer.tag}`}>
       <button type="button" className="peer-header" onClick={() => setOpen((o) => !o)}>
         {icon}
         <span className="peer-title">{title}</span>
-        {chatId && (
+        {chatExists && (
           <span className="link-button small" role="link" onClick={(e) => { e.stopPropagation(); navigate({ name: "chat", id: chatId }); }}>
             開く <ExternalLink size={12} />
           </span>
@@ -403,15 +407,22 @@ function AgentCard({ block, result, conversationId }: { block: WireBlock; result
   const childId = useStore((s) => CHAT_ID.exec(resultText(result))?.[1]
     ?? s.summaries.find((c) => c.parentId === conversationId && c.title === title)?.id);
   const status = useStore((s) => (childId ? s.statuses[childId] : undefined));
+  const childExists = useChatExists(childId);
+  // 消えるのはうまく終わった子だけ。残っている状態は消える直前の「待機中」なので出さない
+  const discarded = !!result && !childExists && status !== "running" && status !== "waiting";
   return (
     <div className="tool-card agent-card">
       <div className="tool-card-header static">
         {status === "running" ? <LoaderCircle size={15} className="spin" /> : <Bot size={15} />}
         <span className="tool-card-title">サブエージェント「{title}」</span>
         {block.input?.background && <span className="tool-badge">バックグラウンド</span>}
-        <StatusDot status={status} />
-        {status && <span className="tool-card-sub">{STATUS_LABELS[status]}</span>}
-        {childId && <button type="button" className="link-button small" onClick={() => navigate({ name: "chat", id: childId })}>チャットを開く <ExternalLink size={12} /></button>}
+        {discarded ? <span className="tool-card-sub">完了</span> : (
+          <>
+            <StatusDot status={status} />
+            {status && <span className="tool-card-sub">{STATUS_LABELS[status]}</span>}
+          </>
+        )}
+        {childExists && childId && <button type="button" className="link-button small" onClick={() => navigate({ name: "chat", id: childId })}>チャットを開く <ExternalLink size={12} /></button>}
       </div>
     </div>
   );
@@ -423,6 +434,7 @@ function WorkflowCard({ block, result }: { block: WireBlock; result?: WireBlock 
   const [open, setOpen] = useState(true);
   const title = run?.title ?? block.input?.title ?? "ワークフロー";
   const done = run?.agents.filter((a) => a.status === "done").length ?? 0;
+  const summaries = useStore((s) => s.summaries);
   return (
     <div className="tool-card workflow-card">
       <button type="button" className="tool-card-header" onClick={() => setOpen((o) => !o)}>
@@ -441,7 +453,7 @@ function WorkflowCard({ block, result }: { block: WireBlock; result?: WireBlock 
                   <span className={`agent-state ${a.status}`} />
                   <span className="agent-label">{a.label}</span>
                   <span className="agent-phase">{a.phase}</span>
-                  {!a.chatId.startsWith("pending_") && <button type="button" className="link-button small" onClick={() => navigate({ name: "chat", id: a.chatId })}>開く</button>}
+                  {summaries.some((c) => c.id === a.chatId) && <button type="button" className="link-button small" onClick={() => navigate({ name: "chat", id: a.chatId })}>開く</button>}
                 </li>
               ))}
             </ul>

@@ -195,7 +195,7 @@ export interface Settings {
   terminal: { enabled: boolean; timeoutSeconds: number };
   programs: { enabled: boolean };
   browser: { enabled: boolean; executablePath?: string | null; mode: "dedicated" | "extension" };
-  agents: { enabled: boolean; maxConcurrent: number; maxWorkflowAgents: number; maxMessageHops: number };
+  agents: { enabled: boolean; maxConcurrent: number; maxWorkflowAgents: number; maxMessageHops: number; autoApproveChildren: boolean; deleteFinishedChildren: boolean };
   features: { memory: boolean; confirmMemoryWrites: boolean; artifacts: boolean; chatSearch: boolean; disabledSkills: string[]; allowBypassMode: boolean };
   hooks: Record<string, HookEntry[]>;
   mcpServers: Record<string, McpServerConfig>;

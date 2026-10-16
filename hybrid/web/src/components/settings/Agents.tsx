@@ -13,7 +13,7 @@ export function Agents({ settings }: { settings: Settings }) {
   const summaries = useStore((s) => s.summaries);
   return (
     <>
-      <Section title="エージェント" description="Claude Code のサブエージェントやワークフローと同じく、Claude が別の Claude に作業を任せたり、ほかのチャットとやり取りしたりできます。任された子は、親のチャットの下に入れ子で並びます。">
+      <Section title="エージェント" description="Claude Code のサブエージェントやワークフローと同じく、Claude が別の Claude に作業を任せたり、ほかのチャットとやり取りしたりできます。任された子は、動いている間は親のチャットの下に入れ子で並びます。">
         <div className="switch-row">
           <div>
             <div>エージェントを使う</div>
@@ -40,6 +40,20 @@ export function Agents({ settings }: { settings: Settings }) {
             <div className="field-hint">Claude 同士で返事をし合って止まらなくなるのを防ぎます</div>
           </div>
           <NumberField value={agents.maxMessageHops} min={1} max={100} onCommit={(v) => void updateSettings({ agents: { maxMessageHops: v } })} />
+        </div>
+        <div className="switch-row">
+          <div>
+            <div>サブエージェントは確認なしで動かす</div>
+            <div className="field-hint">親と話している間に子の確認待ちで止まらないよう、子のツールは承認なしで動き、子からユーザーへの質問もしません。計画モードの制限とフックは子にも効きます。コマンドの実行なども確認なしになるので、気になるときはオフにしてください</div>
+          </div>
+          <Toggle checked={agents.autoApproveChildren} onChange={(v) => void updateSettings({ agents: { autoApproveChildren: v } })} label="サブエージェントは確認なしで動かす" />
+        </div>
+        <div className="switch-row">
+          <div>
+            <div>終わったサブエージェントのチャットを消す</div>
+            <div className="field-hint">結果は親に渡し終えているので、うまく終わった子のチャットは一覧から消します。失敗や停止で終わった子は、原因を見られるよう残します</div>
+          </div>
+          <Toggle checked={agents.deleteFinishedChildren} onChange={(v) => void updateSettings({ agents: { deleteFinishedChildren: v } })} label="終わったサブエージェントのチャットを消す" />
         </div>
       </Section>
 

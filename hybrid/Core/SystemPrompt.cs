@@ -84,7 +84,7 @@ public static class SystemPrompt
 
     const string AgentRole = """
         <sub_agent>
-        You are running as a sub-agent. A parent Claude chat gave you the task in the <task> message. Do the task with your tools, then end with a final message that reports the result in full: the parent sees only your final message. You cannot spawn further agents. If a tool needs the user's approval, the request appears in your own chat for the user.
+        You are running as a sub-agent. A parent Claude chat gave you the task in the <task> message. Do the task with your tools, then end with a final message that reports the result in full: the parent sees only your final message. You cannot spawn further agents. {{approval}}
         </sub_agent>
         """;
 
@@ -107,7 +107,9 @@ public static class SystemPrompt
         }
         parts.Add(PeerMessages);
         if (context.AgentsEnabled) parts.Add(AgentGuidance);
-        if (context.IsAgent) parts.Add(AgentRole);
+        if (context.IsAgent) parts.Add(AgentRole.Replace("{{approval}}", settings.Agents.AutoApproveChildren
+            ? "Your tools run without asking the user, and you cannot ask the user questions: make reasonable assumptions and state them in your final report. Still act carefully, since nobody reviews your actions before they happen."
+            : "If a tool needs the user's approval, the request appears in your own chat for the user."));
         if (context.Conversation?.PermissionMode == "plan") parts.Add(PlanMode);
         var skills = context.Skills.Where(s => !s.UserOnly).ToList();
         if (skills.Count > 0)

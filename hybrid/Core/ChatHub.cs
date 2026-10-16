@@ -340,11 +340,29 @@ public sealed class ChatHub(
                 }
             }
             await FlushInboxAsync(conversation);
+            await DiscardFinishedChildAsync(conversation, result);
         }
         catch (Exception)
         {
             // 知らせに失敗しても、終わった会話そのものには影響させない
         }
+    }
+
+    // 会話を消すときの後片付け (チェックポイントなど) は AppHost が持っている
+    public Func<string, Task>? DeleteConversation { get; set; }
+
+    // サブエージェントは使い捨て。失敗や停止は原因を見られるよう残す
+    async Task DiscardFinishedChildAsync(Conversation child, ChatRunResult result)
+    {
+        if (result.Status != ChatStatus.Done || child.ParentId is null || DeleteConversation is not { } delete) return;
+        if (!(await settings.GetAsync()).Agents.DeleteFinishedChildren) return;
+        // 誰かが話しかけて次の番が始まった、または始まるのを待っている子は消さない
+        if (StatusOf(child) != Idle) return;
+        lock (inboxLock)
+        {
+            if (inboxes.TryGetValue(child.Id, out var pending) && pending.Count > 0) return;
+        }
+        await delete(child.Id);
     }
 
     static string Escape(string s) => s.Replace("\"", "'");

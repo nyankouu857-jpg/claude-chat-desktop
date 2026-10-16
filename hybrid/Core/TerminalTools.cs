@@ -18,7 +18,15 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
     // バックグラウンドの出力を溜めすぎない
     const int MaxBackgroundBufferChars = 1_000_000;
     const int MaxTimeoutSeconds = 600;
+    // Windows のコマンドライン上限 32,767 文字。EncodedCommand は 1 文字が約 2.7 文字に膨らむので、余裕を見て越えたらファイル経由
+    const int MaxEncodedCommandChars = 28_000;
+    // Linux の引数 1 個の上限 128KB
+    const int MaxInlineBashBytes = 100_000;
     static readonly TimeSpan OutputGrace = TimeSpan.FromSeconds(2);
+    // 上限を知らないと、長いスクリプトを怖がって細切れにしたり、手探りで試したりする
+    static readonly string Limits = $"Limits: the command itself has no length limit, so a long multi-line script is fine in one call. Output is capped at {MaxOutputChars:N0} characters per call; longer output keeps the first {KeepHeadChars:N0} and the last {MaxOutputChars - KeepHeadChars:N0} characters. The timeout is at most {MaxTimeoutSeconds} seconds.";
+    // 長いスクリプトをそのまま結果に載せ直すと、同じ文を二度送ることになる
+    const int MaxEchoChars = 2_000;
 
     sealed class BackgroundCommand(int id, string command, Process process, string? ownerId)
     {
@@ -58,11 +66,11 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
         return
         [
             new(Prefix + "run_command", Source, "run_command", "コマンドを実行",
-                $"Run a command in {shell} on the user's PC and wait for it to finish. {cwd} Each call starts a fresh shell, so cd and variables do not carry over; pass working_directory instead. Standard input is closed, so interactive prompts fail: use non-interactive flags. Times out after {timeout} seconds by default. For servers or anything long-running, use start_background instead.",
+                $"Run a command in {shell} on the user's PC and wait for it to finish. {cwd} Each call starts a fresh shell, so cd and variables do not carry over; pass working_directory instead. Standard input is closed, so interactive prompts fail: use non-interactive flags. Times out after {timeout} seconds by default. For servers or anything long-running, use start_background instead. {Limits}",
                 Schema(("command", "string", "The command to run", true), ("working_directory", "string", "Absolute path of the directory to run in", false), ("timeout_seconds", "integer", $"Timeout in seconds, up to {MaxTimeoutSeconds}", false)),
                 AllowAlways: false),
             new(Prefix + "start_background", Source, "start_background", "バックグラウンドで実行",
-                $"Start a long-running command in {shell} (a dev server, a watcher, a long build) without waiting. Returns an id. {cwd}",
+                $"Start a long-running command in {shell} (a dev server, a watcher, a long build) without waiting. Returns an id. {cwd} {Limits}",
                 Schema(("command", "string", "The command to run", true), ("working_directory", "string", "Absolute path of the directory to run in", false)),
                 AllowAlways: false),
             new(Prefix + "read_background", Source, "read_background", "バックグラウンドの出力を見る",
@@ -120,13 +128,21 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
             StandardErrorEncoding = Encoding.UTF8,
             CreateNoWindow = true,
         };
+        string? scriptFile = null;
         if (OperatingSystem.IsWindows())
         {
             info.FileName = FindOnPath("pwsh.exe") ?? "powershell.exe";
             // 出力を UTF-8 にそろえないと日本語が化ける
-            var script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; $ProgressPreference = 'SilentlyContinue'\n" + command;
+            const string Setup = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; $ProgressPreference = 'SilentlyContinue'\n";
+            var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(Setup + command));
+            if (encoded.Length > MaxEncodedCommandChars)
+            {
+                // 終了コードを -Command にじかに渡したときとそろえる。ファイルのドットソースや Invoke-Expression では exit や最後の失敗が 0 になる
+                scriptFile = WriteScriptFile(command + "\nif (-not $?) { exit 1 }", ".ps1", new UTF8Encoding(false));
+                encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(Setup + $". ([ScriptBlock]::Create([IO.File]::ReadAllText('{scriptFile.Replace("'", "''")}', [Text.Encoding]::UTF8)))"));
+            }
             // npm などの .ps1 が既定の実行ポリシーで止まるため、このプロセスだけ緩める
-            foreach (var arg in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script)) })
+            foreach (var arg in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded })
             {
                 info.ArgumentList.Add(arg);
             }
@@ -134,11 +150,45 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
         else
         {
             info.FileName = "/bin/bash";
-            info.ArgumentList.Add("-c");
-            info.ArgumentList.Add(command);
+            if (Encoding.UTF8.GetByteCount(command) > MaxInlineBashBytes)
+            {
+                scriptFile = WriteScriptFile(command, ".sh", new UTF8Encoding(false));
+                info.ArgumentList.Add(scriptFile);
+            }
+            else
+            {
+                info.ArgumentList.Add("-c");
+                info.ArgumentList.Add(command);
+            }
         }
         info.Environment["NO_COLOR"] = "1";
-        return new Process { StartInfo = info, EnableRaisingEvents = true };
+        var process = new Process { StartInfo = info, EnableRaisingEvents = true };
+        if (scriptFile is not null) process.Exited += (_, _) => DeleteScriptFile(scriptFile);
+        return process;
+    }
+
+    static string WriteScriptFile(string command, string extension, Encoding encoding)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "ClaudeChat-commands");
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + extension);
+        File.WriteAllText(path, command, encoding);
+        return path;
+    }
+
+    static void DeleteScriptFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // 一時フォルダなので残っても害はない
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     static void Capture(Process process, StringBuilder output)
@@ -228,7 +278,8 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
         lock (output) text = Clean(output.ToString());
         var status = timedOut ? $"{timeout} 秒でタイムアウトしたので止めました" : $"終了コード {process.ExitCode}";
         if (leftRunning) status += "。シェルの終了後も動き続けているプロセスがあります。止める必要があれば、次からは start_background で起動してください";
-        var body = $"$ {command}\n({directory} / {status})\n{(text.Length > 0 ? text : "(出力なし)")}";
+        var echo = command.Length > MaxEchoChars ? $"{command[..MaxEchoChars]} ... (全 {command.Length:N0} 文字)" : command;
+        var body = $"$ {echo}\n({directory} / {status})\n{(text.Length > 0 ? text : "(出力なし)")}";
         return new ToolCallResult(new JsonArray(new JsonObject { ["type"] = "text", ["text"] = body }), timedOut || process.ExitCode != 0);
     }
 

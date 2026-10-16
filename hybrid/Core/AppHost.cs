@@ -66,6 +66,7 @@ public sealed class AppHost : IAsyncDisposable
         checkpoints = new Checkpoints(paths, platform);
         hooks = new Hooks(settings, paths);
         hub = new ChatHub(paths, settings, secrets, conversations, folders, ledger, hooks, extensions, events);
+        hub.DeleteConversation = async id => await DeleteConversationAsync(id);
         workflows = new WorkflowRunner(hub, settings, conversations, events);
         scheduler = new Scheduler(paths, hub, conversations, events);
         mcp = new McpHub(paths);

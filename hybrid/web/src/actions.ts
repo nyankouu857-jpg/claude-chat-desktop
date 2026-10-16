@@ -4,6 +4,7 @@ import type {
   Approval,
   ChatEvent,
   Conversation,
+  ConversationSummary,
   Folder,
   HookEntry,
   LiveReply,
@@ -155,7 +156,7 @@ export async function refreshExtensions() {
 }
 
 async function refreshSummaries() {
-  const summaries = await call("conversations.list");
+  const summaries = await call<ConversationSummary[]>("conversations.list");
   setState((s) => {
     // タイトルが変わったら開いている会話にも反映する
     const conversations = { ...s.conversations };
@@ -165,7 +166,10 @@ async function refreshSummaries() {
         conversations[summary.id] = { ...loaded, title: summary.title, starred: summary.starred, folderId: summary.folderId };
       }
     }
-    return { ...s, summaries, conversations };
+    // 開いていたサブエージェントが終わって消えたら、親のチャットに戻す
+    const open = s.view.name === "chat" ? conversations[s.view.id] : undefined;
+    const view: View = open?.parentId && !summaries.some((c) => c.id === open.id) ? { name: "chat", id: open.parentId } : s.view;
+    return { ...s, summaries, conversations, view };
   });
 }
 
