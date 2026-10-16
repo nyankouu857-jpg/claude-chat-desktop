@@ -15,6 +15,8 @@ public sealed class WorkflowRun
     public string? Name { get; init; }
     // 始めた時点の往復の回数。結果を親に返すときに引き継ぐ
     public int Hops { get; init; }
+    // run_workflow で選んだモデルと effort。台本の agent() の指定がさらに優先する
+    public JsonObject? Overrides { get; init; }
     public string Status { get; set; } = "running";
     public string? Phase { get; set; }
     public List<string> Logs { get; } = [];
@@ -60,7 +62,7 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
     public const string ToolDescription = """
         Run a workflow: a JavaScript script that orchestrates many sub-agents in the background, then returns one consolidated result to this chat as a <task-notification>. Use it only when the user asked for a workflow or deep research, or a task truly needs many agents in parallel (broad reviews, research across many sources). It costs far more than doing the work yourself.
         Script API (plain JavaScript, top-level await allowed, `return` the final value):
-        - agent(prompt, {label, phase, schema, webSearch}) -> Promise of the sub-agent's final text, or of a parsed object when `schema` (a JSON Schema with type "object") is given. Resolves to null if the agent fails. Each agent sees only its prompt.
+        - agent(prompt, {label, phase, schema, webSearch, model, effort}) -> Promise of the sub-agent's final text, or of a parsed object when `schema` (a JSON Schema with type "object") is given. Resolves to null if the agent fails. Each agent sees only its prompt. model and effort default to the workflow's, which default to this chat's; set them only when an agent's job clearly calls for it (a cheaper model for simple bulk work, a stronger one for hard reasoning).
         - parallel([() => agent(...), ...]) -> runs thunks concurrently, failed ones become null.
         - pipeline(items, stage1, stage2, ...) -> runs each item through the stages independently; each stage gets (previousResult, item, index).
         - log(message), phase(title), args (the value passed in).
@@ -116,7 +118,7 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
 
     void Changed(WorkflowRun run) => events.Emit("workflow.changed", run.ToWire());
 
-    public WorkflowRun Start(Conversation parent, string? script, string? name, JsonNode? args, string title)
+    public WorkflowRun Start(Conversation parent, string? script, string? name, JsonNode? args, string title, JsonObject? overrides = null)
     {
         var source = name switch
         {
@@ -126,7 +128,7 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
         };
         // Claude Code の書き方の先頭の export const meta をそのまま受け付ける
         source = ExportMeta().Replace(source, "const meta");
-        var run = new WorkflowRun { ParentId = parent.Id, Title = title, Name = name, Hops = hub.RunHopsOf(parent.Id) };
+        var run = new WorkflowRun { ParentId = parent.Id, Title = title, Name = name, Hops = hub.RunHopsOf(parent.Id), Overrides = overrides };
         runs[run.Id] = run;
         Changed(run);
         var thread = new Thread(() => Execute(run, parent, source, args)) { IsBackground = true, Name = $"workflow {run.Id}" };
@@ -211,6 +213,16 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
             var phase = (string?)opts?["phase"] ?? run.Phase ?? "";
             var schema = opts?["schema"] as JsonObject;
             var webSearch = (bool?)opts?["webSearch"];
+            JsonObject? overrides;
+            try
+            {
+                overrides = ModelCatalog.Overrides((string?)opts?["model"] ?? (string?)run.Overrides?["model"], (string?)opts?["effort"] ?? (string?)run.Overrides?["effort"]);
+            }
+            catch (ToolException e)
+            {
+                reject(JsValue.FromObject(engine, e.Message));
+                return promise;
+            }
             // 上限を数えるため、始まる前に枠を確保する
             var placeholder = "pending_" + Guid.NewGuid().ToString("N");
             run.Agents[placeholder] = (label, phase, "starting");
@@ -224,7 +236,7 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
                         OutputSchema = schema is null ? null : StrictSchema(schema),
                         WebSearch = webSearch ?? options.WebSearch,
                         WebFetch = webSearch ?? options.WebFetch,
-                    }, background: false, token);
+                    }, background: false, token, overrides);
                     run.Agents.TryRemove(placeholder, out _);
                     run.Agents[child.Id] = (label, phase, "running");
                     // 止めたのと入れ違いに始まった子も止める

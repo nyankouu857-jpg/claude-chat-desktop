@@ -278,6 +278,7 @@ export type ChatEvent =
   | { type: "tool-result"; toolUseId: string; result: WireBlock }
   | { type: "notice"; text: string }
   | { type: "usage"; output: number }
+  | { type: "options"; model?: string; effort?: Effort }
   | { type: "inbound"; message: WireMessage }
   | { type: "discard" }
   | { type: "state"; state: Pick<Conversation, "permissionMode" | "todos" | "artifacts"> }

@@ -1,4 +1,5 @@
 import { AppWindow, Bot, Brain, CalendarClock, CircleQuestionMark, Globe, FolderOpen, ListChecks, MessagesSquare, MousePointerClick, NotebookPen, PanelsTopLeft, SquareTerminal, type LucideIcon } from "lucide-react";
+import { modelLabel } from "./models";
 import type { Settings } from "./types";
 
 // 組み込みツールの表示情報。ツール名の接頭辞が id
@@ -123,8 +124,10 @@ export const BUILTIN_SOURCES: BuiltinSource[] = [
       stop_task: "タスクを止める",
       list_chats: "チャットの一覧と状態",
       send_message: "ほかのチャットに送る",
+      set_model: "モデルを切り替える",
     },
-    subject: (_, input) => input.title ?? input.to ?? input.id ?? "",
+    subject: (tool, input) =>
+      tool === "set_model" ? [input.chat, modelLabel(input.model), input.effort].filter(Boolean).join(" / ") : input.title ?? input.to ?? input.id ?? "",
   },
   {
     id: "chats",

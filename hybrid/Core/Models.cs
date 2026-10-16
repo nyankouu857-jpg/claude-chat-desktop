@@ -1,8 +1,28 @@
+using System.Text.Json.Nodes;
+
 namespace ClaudeChat.Core;
 
 // 「他のモデル」で選べる前の世代は、API の受け付ける指定が今の世代と違う
 public static class ModelCatalog
 {
+    public static readonly string[] Known =
+    [
+        "claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5",
+        "claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
+    ];
+    public static readonly string[] Efforts = ["low", "medium", "high", "xhigh", "max"];
+
+    // ツールから来たモデルと effort を確かめ、会話の設定に重ねる形にする。どちらも無ければ null
+    public static JsonObject? Overrides(string? model, string? effort)
+    {
+        if (model is { Length: > 0 } && !Known.Contains(model)) throw new ToolException($"{model} は選べないモデルです。{string.Join(", ", Known)} から選んでください");
+        if (effort is { Length: > 0 } && !Efforts.Contains(effort)) throw new ToolException($"effort は {string.Join(", ", Efforts)} のどれかにしてください");
+        var overrides = new JsonObject();
+        if (model is { Length: > 0 }) overrides["model"] = model;
+        if (effort is { Length: > 0 }) overrides["effort"] = effort;
+        return overrides.Count > 0 ? overrides : null;
+    }
+
     // 思考の量を effort ではなくトークン数で決める世代
     public static bool UsesThinkingBudget(string model) => model == "claude-haiku-4-5";
 

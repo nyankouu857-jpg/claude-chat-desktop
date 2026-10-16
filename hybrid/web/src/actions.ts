@@ -187,6 +187,12 @@ function applyChatEvent(id: string, event: ChatEvent) {
     case "message-start":
       updateLive(id, (live) => ({ ...live, blocks: [], streamingTokens: 0 }));
       break;
+    case "options":
+      // Claude が切り替えたチャットを開いているなら、入力欄の選択も合わせる
+      if (getState().view.name === "chat" && (getState().view as { id?: string }).id === id) {
+        setChoice({ ...(event.model ? { model: event.model } : {}), ...(event.effort ? { effort: event.effort } : {}) });
+      }
+      break;
     case "usage":
       updateLive(id, (live) => ({ ...live, outputTokens: live.outputTokens + event.output, streamingTokens: 0 }));
       break;

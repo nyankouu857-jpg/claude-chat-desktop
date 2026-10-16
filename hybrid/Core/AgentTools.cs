@@ -11,6 +11,8 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
     public const string RunWorkflow = Prefix + "run_workflow";
     // 子の最後の回答を親に返す量の上限
     const int MaxResultChars = 30_000;
+    static readonly string ModelChoice = $"Model id: {string.Join(", ", ModelCatalog.Known)}";
+    const string EffortChoice = "low, medium, high, xhigh, or max";
 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
@@ -21,12 +23,20 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
         [
             new(Prefix + "spawn_agent", Source, "spawn_agent", "サブエージェントに任せる",
                 "Start a sub-agent: a fresh Claude chat that works on one self-contained task with the same tools as you, and reports back. It sees only your prompt, so include all needed context. With background=false (default) you wait and get its final answer as the result. With background=true it runs while you continue, and its result arrives later as a <task-notification> message. The sub-agent appears as a child chat the user can open.",
-                Schema(("prompt", "string", "The full task for the sub-agent", true), ("title", "string", "A short name shown to the user", true), ("background", "boolean", "Run without waiting", false)),
+                Schema(("prompt", "string", "The full task for the sub-agent", true), ("title", "string", "A short name shown to the user", true), ("background", "boolean", "Run without waiting", false),
+                    ("model", "string", $"Optional; defaults to this chat's model. Set it only when the task clearly calls for it (a cheaper model for simple bulk work, a stronger one for hard reasoning). {ModelChoice}", false),
+                    ("effort", "string", $"Optional; defaults to this chat's effort. {EffortChoice}", false)),
                 AutoApprove: true, ReadOnly: true),
             new(RunWorkflow, Source, "run_workflow", "ワークフローを実行",
                 WorkflowRunner.ToolDescription,
-                Schema(("script", "string", "Workflow script (JavaScript). Omit when using name", false), ("name", "string", "A bundled workflow: research", false), ("args", "object", "Value exposed to the script as args", false), ("title", "string", "A short name shown to the user", true)),
+                Schema(("script", "string", "Workflow script (JavaScript). Omit when using name", false), ("name", "string", "A bundled workflow: research", false), ("args", "object", "Value exposed to the script as args", false), ("title", "string", "A short name shown to the user", true),
+                    ("model", "string", $"Optional default model for the workflow's agents; defaults to this chat's model. {ModelChoice}", false),
+                    ("effort", "string", $"Optional default effort for the workflow's agents; defaults to this chat's effort. {EffortChoice}", false)),
                 AllowAlways: false),
+            new(Prefix + "set_model", Source, "set_model", "モデルを切り替える",
+                "Change the model and/or effort a chat uses from its next message on: this chat (default) or another chat by id or exact title. Use it only when the user explicitly asks you to switch. Never switch on your own, and don't call it when nothing would change. For sub-agents and workflows, use their model and effort options instead.",
+                Schema(("chat", "string", "Chat id or exact title; omit for this chat", false), ("model", "string", ModelChoice, false), ("effort", "string", EffortChoice, false)),
+                AutoApprove: true, ReadOnly: true),
             new(Prefix + "list_tasks", Source, "list_tasks", "タスク一覧",
                 "List the sub-agents and workflows this chat started, with their status.",
                 Schema(), AutoApprove: true, ReadOnly: true),
@@ -56,6 +66,7 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
             "stop_task" => await StopTaskAsync(me, Required(input, "id")),
             "list_chats" => await ListChatsAsync(me),
             "send_message" => await SendMessageAsync(me, input, context.Hops),
+            "set_model" => await SetModelAsync(me, input),
             _ => throw new ToolException($"ツール {apiName} はありません"),
         };
     }
@@ -67,7 +78,8 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
         var prompt = Required(input, "prompt");
         var title = (string?)input["title"] is { Length: > 0 } t ? t : "サブエージェント";
         var background = (bool?)input["background"] == true;
-        var child = await hub.SpawnAsync(me, prompt, title, "agent", null, null, background);
+        var overrides = ModelCatalog.Overrides((string?)input["model"], (string?)input["effort"]);
+        var child = await hub.SpawnAsync(me, prompt, title, "agent", null, null, background, overrides: overrides);
         if (background) return Text($"サブエージェント「{title}」(chat_id {child.Id}) をバックグラウンドで始めました。終わると <task-notification> が届きます");
         // 親を止めたら子も止める
         using var registration = cancellationToken.Register(() => hub.Stop(child.Id));
@@ -81,7 +93,8 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
     async Task<ToolCallResult> RunWorkflowAsync(Conversation me, JsonObject input)
     {
         var title = (string?)input["title"] is { Length: > 0 } t ? t : "ワークフロー";
-        var run = workflows.Start(me, (string?)input["script"], (string?)input["name"], input["args"]?.DeepClone(), title);
+        var overrides = ModelCatalog.Overrides((string?)input["model"], (string?)input["effort"]);
+        var run = workflows.Start(me, (string?)input["script"], (string?)input["name"], input["args"]?.DeepClone(), title, overrides);
         return Text($"ワークフロー「{title}」(id {run.Id}) を始めました。終わると結果が <task-notification> で届きます。待っている間に別の作業を続けてかまいません");
     }
 
@@ -138,6 +151,28 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
         var chats = await ReachableAsync(me);
         var lines = chats.Select(c => $"{c.Id}  [{hub.StatusOf(c)}]  {c.Title}{(c.Kind != "chat" ? $"  ({c.Kind})" : "")}");
         return Text($"{scope}\n{(chats.Count == 0 ? "通信できるチャットはありません" : string.Join("\n", lines))}");
+    }
+
+    async Task<ToolCallResult> SetModelAsync(Conversation me, JsonObject input)
+    {
+        var overrides = ModelCatalog.Overrides((string?)input["model"], (string?)input["effort"]) ?? throw new ToolException("model か effort を指定してください");
+        var target = me;
+        if ((string?)input["chat"] is { Length: > 0 } chat && chat != me.Id && !chat.Equals(me.Title, StringComparison.OrdinalIgnoreCase))
+        {
+            var reachable = await ReachableAsync(me);
+            target = reachable.FirstOrDefault(c => c.Id == chat)
+                ?? reachable.FirstOrDefault(c => c.Title.Equals(chat, StringComparison.OrdinalIgnoreCase))
+                ?? throw new ToolException($"{chat} というチャットは見つかりません。list_chats で確認してください");
+        }
+        var before = $"{ModelCatalog.DisplayName((string?)target.Options?["model"] ?? target.Model ?? "")} / {(string?)target.Options?["effort"] ?? "既定"}";
+        target.Options ??= [];
+        foreach (var (key, value) in overrides) target.Options[key] = value?.DeepClone();
+        if (overrides["model"] is { } model) target.Model = (string?)model;
+        await conversations.SaveAsync(target, touch: false);
+        hub.EmitOptions(target, overrides);
+        var after = $"{ModelCatalog.DisplayName((string?)target.Options["model"] ?? target.Model ?? "")} / {(string?)target.Options["effort"] ?? "既定"}";
+        var who = target == me ? "このチャット" : $"チャット「{target.Title}」";
+        return Text($"{who}を {before} から {after} に切り替えました。次のメッセージから使われます");
     }
 
     async Task<ToolCallResult> SendMessageAsync(Conversation me, JsonObject input, int hops)

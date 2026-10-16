@@ -524,7 +524,7 @@ public sealed class ChatHub(
     }
 
     // ワークフローは空きが出るまで待ち、単発の呼び出しは待たずに断る
-    public async Task<Conversation> SpawnAsync(Conversation parent, string prompt, string title, string kind, string? workflowId, Func<ChatOptions, ChatOptions>? customize, bool background, CancellationToken cancellationToken = default)
+    public async Task<Conversation> SpawnAsync(Conversation parent, string prompt, string title, string kind, string? workflowId, Func<ChatOptions, ChatOptions>? customize, bool background, CancellationToken cancellationToken = default, JsonObject? overrides = null)
     {
         var limit = await AgentLimitAsync();
         var child = conversations.Create();
@@ -545,8 +545,13 @@ public sealed class ChatHub(
         child.WorktreePath = parent.WorktreePath;
         // 計画中の子は変更せず、auto の子は同じ確認役に見てもらう
         child.PermissionMode = parent.PermissionMode is "plan" or "auto" ? parent.PermissionMode : "default";
-        // 親と同じ道具立てで動かす
+        // 親と同じ道具立てで動かす。モデルと effort は、呼んだ Claude が選んだときだけ変える
         child.Options = parent.Options?.DeepClone() as JsonObject;
+        if (overrides is not null)
+        {
+            child.Options ??= [];
+            foreach (var (key, value) in overrides) child.Options[key] = value?.DeepClone();
+        }
         try
         {
             var baseOptions = await OptionsForAsync(child);
@@ -597,6 +602,14 @@ public sealed class ChatHub(
                 hub.EmitStatus(conversation);
             }
         }
+    }
+
+    // Claude がモデルや effort を切り替えたとき。開いている画面の選択も合わせる
+    public void EmitOptions(Conversation conversation, JsonObject overrides)
+    {
+        var e = (JsonObject)overrides.DeepClone();
+        e["type"] = "options";
+        EmitChatEvent(conversation.Id, e);
     }
 
     // サブエージェントが元のチャットのアーティファクトを作ったり直したりしたとき
