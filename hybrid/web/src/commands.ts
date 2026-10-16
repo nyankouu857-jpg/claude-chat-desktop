@@ -183,7 +183,11 @@ export async function runCommand(text: string, conversationId: string | null): P
       const typed = prompt;
       const inner = parseCommand(prompt);
       if (inner && !BUILTIN_COMMANDS.some((b) => b.name === inner.name)) {
-        const expanded = await expandCommand(inner.name, inner.args);
+        // 空欄は最初に 1 度だけ聞き、繰り返す間は同じ中身で送る
+        const blanks = blanksOf((await getCommand(inner.name))?.body ?? "");
+        const values = blanks.length > 0 ? await askBlanks(inner.name, blanks) : undefined;
+        if (values === null) return "keep";
+        const expanded = await expandCommand(inner.name, inner.args, values);
         if (expanded === undefined) return "keep";
         prompt = expanded;
       }

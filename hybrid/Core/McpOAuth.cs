@@ -15,41 +15,91 @@ public sealed class McpOAuth(AppPaths paths, ISecretProtector protector)
     // ブラウザでログインを済ませるのを待つ上限
     public static readonly TimeSpan LoginTimeout = TimeSpan.FromMinutes(5);
 
-    static readonly SemaphoreSlim fileGate = new(1, 1);
+    readonly SemaphoreSlim fileGate = new(1, 1);
     // 同じポートで 2 つの待ち受けはできないので、ログインは 1 つずつ
     static readonly SemaphoreSlim loginGate = new(1, 1);
+    // SDK は問い合わせのたびにトークンを聞いてくる。毎回ファイルを開いて復号すると、書き込みとぶつかって失敗する
+    readonly Dictionary<string, TokenContainer> memory = [];
+    Dictionary<string, string>? stored;
 
     string TokensFile => Path.Combine(paths.ConfigDir, "mcp-tokens.json");
-    ISecretProtector Protector => protector;
 
     public Action<string>? OpenBrowser { get; set; }
 
     // URL を変えたら別のサーバーとして、ログインし直してもらう
     static string KeyOf(string server, string url) => $"{server}|{url}";
 
-    async Task<Dictionary<string, string>> LoadAsync()
+    // fileGate の中で呼ぶ
+    async Task<Dictionary<string, string>> StoredAsync()
     {
+        if (stored is not null) return stored;
         try
         {
-            return await Json.ReadAsync<Dictionary<string, string>>(TokensFile) ?? [];
+            stored = await Json.ReadAsync<Dictionary<string, string>>(TokensFile) ?? [];
         }
-        catch (JsonException)
+        catch (Exception e) when (e is JsonException or IOException)
         {
-            return [];
+            stored = [];
+        }
+        return stored;
+    }
+
+    async Task<TokenContainer?> GetAsync(string key)
+    {
+        await fileGate.WaitAsync();
+        try
+        {
+            if (memory.TryGetValue(key, out var tokens)) return tokens;
+            if (!(await StoredAsync()).TryGetValue(key, out var protectedTokens)) return null;
+            try
+            {
+                tokens = JsonSerializer.Deserialize<TokenContainer>(protector.Unprotect(protectedTokens));
+            }
+            catch (Exception)
+            {
+                // 別の PC やユーザーで暗号化したものは読めない。ログインし直してもらう
+                return null;
+            }
+            if (tokens is not null) memory[key] = tokens;
+            return tokens;
+        }
+        finally
+        {
+            fileGate.Release();
+        }
+    }
+
+    async Task SetAsync(string key, TokenContainer tokens, CancellationToken cancellationToken)
+    {
+        await fileGate.WaitAsync(cancellationToken);
+        try
+        {
+            var all = await StoredAsync();
+            all[key] = protector.Protect(JsonSerializer.Serialize(tokens));
+            memory[key] = tokens;
+            await Json.WriteAtomicAsync(TokensFile, all);
+        }
+        finally
+        {
+            fileGate.Release();
         }
     }
 
     public ITokenCache CacheFor(string server, string url) => new Cache(this, KeyOf(server, url));
 
-    public async Task<bool> HasTokensAsync(string server, string url) => (await LoadAsync()).ContainsKey(KeyOf(server, url));
+    public async Task<bool> HasTokensAsync(string server, string url) => await GetAsync(KeyOf(server, url)) is not null;
 
     public async Task ForgetAsync(string server)
     {
         await fileGate.WaitAsync();
         try
         {
-            var all = await LoadAsync();
-            foreach (var key in all.Keys.Where(k => k.StartsWith(server + "|")).ToList()) all.Remove(key);
+            var all = await StoredAsync();
+            foreach (var key in all.Keys.Concat(memory.Keys).Where(k => k.StartsWith(server + "|")).Distinct().ToList())
+            {
+                all.Remove(key);
+                memory.Remove(key);
+            }
             await Json.WriteAtomicAsync(TokensFile, all);
         }
         finally
@@ -60,35 +110,9 @@ public sealed class McpOAuth(AppPaths paths, ISecretProtector protector)
 
     sealed class Cache(McpOAuth owner, string key) : ITokenCache
     {
-        public async ValueTask StoreTokensAsync(TokenContainer tokens, CancellationToken cancellationToken)
-        {
-            await fileGate.WaitAsync(cancellationToken);
-            try
-            {
-                var all = await owner.LoadAsync();
-                all[key] = owner.Protector.Protect(JsonSerializer.Serialize(tokens));
-                await Json.WriteAtomicAsync(owner.TokensFile, all);
-            }
-            finally
-            {
-                fileGate.Release();
-            }
-        }
+        public async ValueTask StoreTokensAsync(TokenContainer tokens, CancellationToken cancellationToken) => await owner.SetAsync(key, tokens, cancellationToken);
 
-        public async ValueTask<TokenContainer?> GetTokensAsync(CancellationToken cancellationToken)
-        {
-            var all = await owner.LoadAsync();
-            if (!all.TryGetValue(key, out var stored)) return null;
-            try
-            {
-                return JsonSerializer.Deserialize<TokenContainer>(owner.Protector.Unprotect(stored));
-            }
-            catch (Exception)
-            {
-                // 別の PC やユーザーで暗号化したものは読めない。ログインし直してもらう
-                return null;
-            }
-        }
+        public async ValueTask<TokenContainer?> GetTokensAsync(CancellationToken cancellationToken) => await owner.GetAsync(key);
     }
 
     // ブラウザでログインしてもらい、戻ってきた code を受け取る
@@ -109,7 +133,9 @@ public sealed class McpOAuth(AppPaths paths, ISecretProtector protector)
             {
                 throw new InvalidOperationException($"ログインの戻り先 (ポート {CallbackPort}) をほかのアプリが使っています");
             }
-            OpenBrowser?.Invoke(authorizationUri.ToString());
+            // ToString は %20 などを戻してしまい、ブラウザに渡す引数が崩れる
+            OpenBrowser?.Invoke(authorizationUri.AbsoluteUri);
+            var expectedState = HttpUtility.ParseQueryString(authorizationUri.Query)["state"];
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(LoginTimeout);
             while (true)
@@ -123,6 +149,13 @@ public sealed class McpOAuth(AppPaths paths, ISecretProtector protector)
                     continue;
                 }
                 var query = HttpUtility.ParseQueryString(context.Request.Url.Query);
+                // ほかのページから戻り先を叩かれても、始めたログインの返事でなければ相手にせず待ち続ける
+                if (expectedState is not null && query["state"] != expectedState)
+                {
+                    context.Response.StatusCode = 400;
+                    context.Response.Close();
+                    continue;
+                }
                 var failed = query["error"];
                 var page = failed is null
                     ? "<h2>ClaudeChat にログインしました</h2><p>この画面を閉じて、アプリに戻ってください。</p>"

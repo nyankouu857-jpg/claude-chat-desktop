@@ -113,12 +113,19 @@ public sealed partial class Extensions(AppPaths paths, SettingsStore settings)
     public void SaveCommand(string name, string description, string body, string? previousName)
     {
         var path = CommandPath(name);
-        if (previousName is not null && !previousName.Equals(name, StringComparison.OrdinalIgnoreCase) && File.Exists(path)) throw new InvalidOperationException($"/{name} はもうあります");
+        var renamed = previousName is not null && previousName != name;
+        var sameFile = previousName is not null && previousName.Equals(name, StringComparison.OrdinalIgnoreCase);
+        // 新しく作るときと別の名前に変えるときは、ほかのコマンドを上書きしない
+        if ((previousName is null || !sameFile) && File.Exists(path)) throw new InvalidOperationException($"/{name} はもうあります");
+        // 同じ名前の Skill があると、コマンドは補完に出ず使えなくなる
+        if (ListSkills(includeDisabled: true).Any(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException($"/{name} は Skill の名前と同じです。別の名前にしてください");
         Directory.CreateDirectory(paths.CommandsDir);
+        // 大文字と小文字だけ変えたときは、Windows では同じファイルなので名前を付け替える
+        if (renamed && sameFile && File.Exists(CommandPath(previousName!))) File.Move(CommandPath(previousName!), path);
         // 説明に改行があると front matter が崩れる
         var line = description.ReplaceLineEndings(" ").Trim();
         File.WriteAllText(path, line.Length > 0 ? $"---\ndescription: {line}\n---\n{body.TrimEnd()}\n" : body.TrimEnd() + "\n");
-        if (previousName is not null && !previousName.Equals(name, StringComparison.OrdinalIgnoreCase)) DeleteCommand(previousName);
+        if (renamed && !sameFile) DeleteCommand(previousName!);
     }
 
     public void DeleteCommand(string name)

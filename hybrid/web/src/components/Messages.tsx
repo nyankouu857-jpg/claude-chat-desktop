@@ -841,7 +841,8 @@ function SpeakButton({ text }: { text: string }) {
         const utterance = new SpeechSynthesisUtterance(sentence);
         if (voice) utterance.voice = voice;
         utterance.lang = voice?.lang ?? "ja-JP";
-        if (i === sentences.length - 1) utterance.onend = () => {
+        // 声が無いなどで読めなかったときも end の代わりに error が来るので、同じく戻す
+        if (i === sentences.length - 1) utterance.onend = utterance.onerror = () => {
           if (speakingOwner === setSpeaking) speakingOwner = null;
           setSpeaking(false);
         };

@@ -1,6 +1,7 @@
 import { FolderOpen, Pencil, Plus, RefreshCw, Trash, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { askConfirm, blanksOf, deleteCommand, getCommand, importSkill, openPath, refreshExtensions, saveCommand, saveHooks, toast, updateSettings } from "../../actions";
+import { BUILTIN_COMMANDS } from "../../commands";
 import { useStore } from "../../store";
 import type { HookEntry, Settings } from "../../types";
 import { Dialog, NumberField, Toggle } from "../ui";
@@ -40,6 +41,8 @@ type CommandDraft = { name: string; description: string; body: string; previousN
 function CommandDialog({ initial, onClose }: { initial: CommandDraft; onClose: () => void }) {
   const [draft, setDraft] = useState(initial);
   const validName = /^[A-Za-z0-9_-]+$/.test(draft.name);
+  // /clear のような組み込みと同じ名前だと、組み込みが先に動いて呼べない
+  const builtin = BUILTIN_COMMANDS.some((c) => c.name === draft.name.toLowerCase());
   const blanks = blanksOf(draft.body);
   return (
     <Dialog
@@ -48,7 +51,7 @@ function CommandDialog({ initial, onClose }: { initial: CommandDraft; onClose: (
       footer={
         <>
           <button type="button" className="button ghost" onClick={onClose}>キャンセル</button>
-          <button type="button" className="button primary" disabled={!validName || !draft.body.trim()} onClick={async () => {
+          <button type="button" className="button primary" disabled={!validName || builtin || !draft.body.trim()} onClick={async () => {
             if (await saveCommand(draft)) {
               toast("保存しました");
               onClose();
@@ -60,7 +63,7 @@ function CommandDialog({ initial, onClose }: { initial: CommandDraft; onClose: (
       <label className="field">
         <span className="field-label">名前</span>
         <input className="input" autoFocus value={draft.name} placeholder="review" onChange={(e) => setDraft({ ...draft, name: e.target.value.trim() })} />
-        <span className="field-hint">入力欄で /{draft.name || "名前"} と打って使います。英数字と - _ だけ使えます</span>
+        <span className="field-hint">{builtin ? `/${draft.name} は組み込みのコマンドと同じ名前なので使えません` : `入力欄で /${draft.name || "名前"} と打って使います。英数字と - _ だけ使えます`}</span>
       </label>
       <label className="field">
         <span className="field-label">説明</span>

@@ -23,7 +23,6 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
         public CancellationTokenSource? Starting { get; set; }
         // 人が「ログイン」を押した接続だけブラウザを開く。起動時に勝手にログイン画面を出さない
         public bool Interactive { get; set; }
-        public bool NeedsLogin { get; set; }
         public bool SignedIn { get; set; }
     }
 
@@ -104,21 +103,27 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
 
     async Task StartAsync(ServerState state)
     {
+        // 前の接続の後片付けが後から旗を倒さないよう、この接続の分は手元に写して使う
+        var interactive = state.Interactive;
+        state.Interactive = false;
+        var login = new LoginState();
         // npx の初回ダウンロードや Docker の起動を見込む。ログインはブラウザでの操作の分も待つ
-        var starting = new CancellationTokenSource(state.Interactive ? McpOAuth.LoginTimeout + TimeSpan.FromSeconds(150) : TimeSpan.FromSeconds(150));
-        state.NeedsLogin = false;
+        var starting = new CancellationTokenSource(interactive ? McpOAuth.LoginTimeout + TimeSpan.FromSeconds(150) : TimeSpan.FromSeconds(150));
         state.Starting?.Cancel();
         state.Starting = starting;
         McpClient? client = null;
+        var signedIn = false;
         try
         {
+            signedIn = state.Config.IsRemote && OAuth is not null && await OAuth.HasTokensAsync(state.Name, state.Config.Url!);
             IClientTransport transport = state.Config.IsRemote
                 ? new HttpClientTransport(new HttpClientTransportOptions
                 {
                     Name = state.Name,
                     Endpoint = new Uri(state.Config.Url!),
                     AdditionalHeaders = state.Config.Headers,
-                    OAuth = OAuthOptions(state),
+                    // トークンが無いのに OAuth を付けると、起動のたびにサーバーへクライアント登録だけが飛ぶ。ログインを押したときだけ付ける
+                    OAuth = interactive || signedIn ? OAuthOptions(state, interactive, login) : null,
                 })
                 : new StdioClientTransport(StdioOptions(state));
             client = await McpClient.CreateAsync(
@@ -133,7 +138,7 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
                 },
                 cancellationToken: starting.Token);
             var tools = await client.ListToolsAsync(cancellationToken: starting.Token);
-            state.SignedIn = state.Config.IsRemote && OAuth is not null && await OAuth.HasTokensAsync(state.Name, state.Config.Url!);
+            if (interactive && OAuth is not null) signedIn = await OAuth.HasTokensAsync(state.Name, state.Config.Url!);
 
             await gate.WaitAsync();
             try
@@ -146,6 +151,7 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
                     return;
                 }
                 state.Client = client;
+                state.SignedIn = signedIn;
                 state.Tools = tools.ToList();
                 state.Status = "running";
                 state.Error = null;
@@ -163,19 +169,35 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
             // 止められた場合は止めた側が状態を決める
             if (state.Starting != starting) return;
             state.Starting = null;
-            state.Status = state.NeedsLogin ? "needs-login" : "error";
-            state.Error = state.NeedsLogin ? "ログインが必要です" : e is OperationCanceledException ? "起動がタイムアウトしました" : e.Message;
+            state.SignedIn = false;
+            var needsLogin = login.Needed || (state.Config.IsRemote && !interactive && IsUnauthorized(e));
+            state.Status = needsLogin ? "needs-login" : "error";
+            state.Error = needsLogin ? "ログインが必要です" : e is OperationCanceledException ? "起動がタイムアウトしました" : e.Message;
             Log(state.Name, $"接続に失敗しました: {e}");
         }
         finally
         {
             starting.Dispose();
-            state.Interactive = false;
         }
         Changed?.Invoke();
     }
 
-    ClientOAuthOptions? OAuthOptions(ServerState state)
+    sealed class LoginState
+    {
+        public bool Needed;
+    }
+
+    static bool IsUnauthorized(Exception e)
+    {
+        for (Exception? current = e; current is not null; current = current.InnerException)
+        {
+            if (current is HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized }) return true;
+            if (current.Message.Contains("401") || current.Message.Contains("Unauthorized", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    ClientOAuthOptions? OAuthOptions(ServerState state, bool interactive, LoginState login)
     {
         if (OAuth is not { } oauth) return null;
         return new ClientOAuthOptions
@@ -185,9 +207,17 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
             TokenCache = oauth.CacheFor(state.Name, state.Config.Url!),
             AuthorizationCallbackHandler = async (context, cancellationToken) =>
             {
-                if (!state.Interactive)
+                if (!interactive)
                 {
-                    state.NeedsLogin = true;
+                    login.Needed = true;
+                    // つながった後にトークンが切れて取り直せなかったときも、ログインし直してもらう
+                    if (state.Status == "running")
+                    {
+                        state.Status = "needs-login";
+                        state.Error = "ログインの期限が切れました";
+                        state.SignedIn = false;
+                        Changed?.Invoke();
+                    }
                     return null;
                 }
                 return await oauth.AuthorizeAsync(context.AuthorizationUri, cancellationToken);
@@ -221,6 +251,7 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
         // 接続の途中なら、繋がった時点で捨てさせる
         var starting = state.Starting;
         state.Starting = null;
+        state.SignedIn = false;
         try
         {
             starting?.Cancel();

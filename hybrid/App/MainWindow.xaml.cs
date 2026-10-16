@@ -76,6 +76,8 @@ public partial class MainWindow : Window
                 return;
             }
             platform.RemoveTrayIcon();
+            // 終わるときは別の窓を閉じずにプロセスごと終わるので、開いている窓の位置はここで覚える
+            foreach (var (window, key) in chatPlacements) Placement.Save(window, key);
             if (host is null) return;
             // MCP サーバーの子プロセスを残さないよう、片付けてから終わる
             e.Cancel = true;
@@ -99,7 +101,8 @@ public partial class MainWindow : Window
     public void BringToFront()
     {
         Show();
-        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        // 最大化していた窓は最大化に戻す
+        if (WindowState == WindowState.Minimized) WindowState = Frameless.WasMaximizedBeforeMinimize(this) ? WindowState.Maximized : WindowState.Normal;
         Activate();
     }
 
@@ -258,10 +261,12 @@ public partial class MainWindow : Window
             views.Add(core);
             core.Navigate($"{AppOrigin}/index.html?chat={conversationId}");
         };
+        chatPlacements[chatWindow] = placementKey;
         chatWindow.Closing += (_, _) => Placement.Save(chatWindow, placementKey);
         chatWindow.Closed += (_, _) =>
         {
             closed = true;
+            chatPlacements.Remove(chatWindow);
             if (core is not null) views.Remove(core);
             browser.Dispose();
         };
@@ -270,6 +275,7 @@ public partial class MainWindow : Window
     }
 
     Window? quickEntry;
+    readonly Dictionary<Window, string> chatPlacements = [];
 
     // 入力の小窓。一度作ったら隠して使い回し、次に呼んだときすぐ出す
     void ToggleQuickEntry()

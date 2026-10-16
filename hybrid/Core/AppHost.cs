@@ -155,7 +155,8 @@ public sealed class AppHost : IAsyncDisposable
         housekeeping.Start();
         // settings.json を手で直したときや、exe を移したときも、ログオン時の起動をそろえる。できない環境では何もしない
         platform.SetStartWithWindows(current.Desktop.StartWithWindows);
-        platform.SetQuickEntryHotkey(current.Desktop.QuickEntryHotkey);
+        // 起動のときはまだ画面が無いので、キーが使えなかったことは Windows の通知で伝える
+        if (platform.SetQuickEntryHotkey(current.Desktop.QuickEntryHotkey) is { } taken) platform.Notify("入力の小窓", taken);
     }
 
     void Send(JsonObject message) => send(message.ToJsonString(Json.Wire));
@@ -182,6 +183,7 @@ public sealed class AppHost : IAsyncDisposable
     {
         "app.init" => InitAsync(),
         "settings.update" => UpdateSettingsAsync(p),
+        "settings.get" => Task.FromResult<JsonNode?>(settings.Current is { } currentSettings ? SettingsView(currentSettings) : null),
         "settings.reload" => ReloadSettingsAsync(),
         "secrets.set" => SetSecretAsync(p),
         "api.test" => TestApiKeyAsync(),
@@ -364,12 +366,36 @@ public sealed class AppHost : IAsyncDisposable
     // 窓を見ていないときだけ知らせる。押したらその会話を開く
     void Alert(Conversation conversation, string message, bool waiting)
     {
+        if (!waiting) _ = WarnForecastAsync();
         var desktop = settings.Current?.Desktop;
         if (desktop is null || !(waiting ? desktop.NotifyWhenWaiting : desktop.NotifyWhenDone) || platform.IsActive) return;
         // シークレットチャットは題名も答えも通知の履歴に残さない
         var title = conversation.Incognito ? "シークレットチャット" : conversation.Title;
         if (conversation.Incognito) message = waiting ? "確認や質問で止まっています" : "返答が届きました";
         platform.Notify(message, title, () => Emit("app.navigate", new JsonObject { ["conversationId"] = conversation.Id }));
+    }
+
+    // 今月の見込みが上限を超えそうなら、1 日 1 回だけ知らせる。サイドバーを畳んでいても、トレイにしまっていても届くように中身の側で見る
+    async Task WarnForecastAsync()
+    {
+        try
+        {
+            if (await BudgetViewAsync() is not JsonObject view || (bool?)view["forecastReliable"] != true) return;
+            var forecast = (decimal?)view["forecastUsd"] ?? 0;
+            var limit = (decimal?)view["monthlyLimitUsd"] ?? 0;
+            if (limit <= 0 || forecast <= limit) return;
+            var markFile = Path.Combine(paths.DataDir, "forecast-warned.txt");
+            var today = DateTime.Now.ToString("yyyy-MM-dd");
+            if (File.Exists(markFile) && (await File.ReadAllTextAsync(markFile)).Trim() == today) return;
+            await File.WriteAllTextAsync(markFile, today);
+            var message = $"このペースだと今月は ${forecast:0.00} ほどになり、上限の ${limit:0.##} を超えそうです";
+            Emit("budget.forecast", message);
+            if (!platform.IsActive) platform.Notify("料金の見込み", message);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // 知らせられなくても返答は止めない
+        }
     }
 
     // アプリ内の更新でも、zip から入れ替えても、前に起動した版と違えば変わった所を見せる

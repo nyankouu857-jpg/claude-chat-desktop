@@ -156,6 +156,8 @@ function ServerCard({ status, config, servers, onEdit }: {
   onEdit: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  // ログインはブラウザでの操作が終わるまで返ってこない。待っている間に押し直して何本も始めないように
+  const [loggingIn, setLoggingIn] = useState(false);
   const name = status?.name ?? "";
   const state = config.disabled ? "disabled" : status?.status ?? "stopped";
   return (
@@ -177,7 +179,11 @@ function ServerCard({ status, config, servers, onEdit }: {
       {state === "needs-login" && (
         <div className="server-login">
           <span>このコネクタはログインして使います。ブラウザでログインすると、次からは自動でつながります。</span>
-          <button type="button" className="button small primary" onClick={() => void loginMcp(name)}>ログイン</button>
+          <button type="button" className="button small primary" disabled={loggingIn} onClick={async () => {
+            setLoggingIn(true);
+            await loginMcp(name);
+            setLoggingIn(false);
+          }}>{loggingIn ? "ログインを待っています…" : "ログイン"}</button>
         </div>
       )}
       <div className="server-actions">

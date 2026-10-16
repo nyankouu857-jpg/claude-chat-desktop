@@ -6,7 +6,8 @@ import type { Artifact, Conversation, WireBlock } from "./types";
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 // 書き出したファイルを開いた人の PC で、会話の中身が外へ送られないようにする。画像は埋め込んだものだけ
-const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; frame-src 'self' about: data:";
+// srcdoc のアーティファクトはこのページの制限を受け継ぐので、インラインのスクリプトだけは許す。ページ自身の本文は DOMPurify を通していてスクリプトを含まない
+const PAGE_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'";
 // アーティファクトは画面と同じく、外とは通信させずに動かす
 const ARTIFACT_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'";
 
@@ -26,7 +27,9 @@ function appStyles() {
 function artifactHtml(artifact: Artifact) {
   const head = `<div class="export-artifact-title">${escapeHtml(artifact.title)}</div>`;
   if (artifact.type === "html" || artifact.type === "svg") {
-    const page = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_CSP}">${artifact.content}`;
+    // doctype より前に置くと互換モードで描かれて見た目が変わるので、doctype の後ろに差し込む
+    const meta = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_CSP}">`;
+    const page = artifact.content.replace(/^(\s*<!doctype[^>]*>)?/i, (doctype) => `${doctype}${meta}`);
     return `<div class="export-artifact">${head}<iframe sandbox="allow-scripts" srcdoc="${escapeHtml(page)}"></iframe></div>`;
   }
   if (artifact.type === "markdown") return `<div class="export-artifact">${head}<div class="markdown">${renderMarkdown(artifact.content).html}</div></div>`;

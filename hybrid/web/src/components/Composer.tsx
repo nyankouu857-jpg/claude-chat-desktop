@@ -423,16 +423,19 @@ function useSlashItems(query: string | null) {
   }, [query, extensions]);
 }
 
-// 送る前の文はチャットごとに取っておく。切り替えや再起動で消えると、長く書いた指示を失う
-const draftKeyOf = (conversationId: string | null) => `draft:${conversationId ?? "new"}`;
+// 送る前の文はチャットごとに取っておく。切り替えや再起動で消えると、長く書いた指示を失う。
+// シークレットチャットは残さないと約束しているので、空の鍵にして読みも書きもしない
+const draftKeyOf = (conversationId: string | null, incognito: boolean) => (incognito ? "" : `draft:${conversationId ?? "new"}`);
 function readDraft(key: string) {
+  if (!key) return "";
   try {
     return localStorage.getItem(key) ?? "";
   } catch {
     return "";
   }
 }
-function writeDraft(key: string, text: string) {
+export function writeDraft(key: string, text: string) {
+  if (!key) return;
   try {
     if (text) localStorage.setItem(key, text);
     else localStorage.removeItem(key);
@@ -451,7 +454,8 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
   // リサーチの結果が届く前に別の質問を始めると、結果がその応答の後ろに回ってしまう
   const researching = useStore((s) => !!conversationId && Object.values(s.workflows).some((w) => w.parentId === conversationId && w.name === "research" && w.status === "running"));
   const storedPrefill = useStore((s) => (conversationId ? s.prefill[conversationId] : undefined));
-  const draftKey = draftKeyOf(conversationId);
+  const incognito = useStore((s) => (conversationId ? !!s.conversations[conversationId]?.incognito : s.view.name === "new" && !!s.view.incognito));
+  const draftKey = draftKeyOf(conversationId, incognito);
   const [text, setText] = useState(() => readDraft(draftKey));
   // 今の text がどのチャットの下書きか。切り替えた直後に前のチャットの文を書き込まないため
   const draftOwner = useRef(draftKey);
@@ -552,9 +556,14 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
     // /btw だけは応答中にも使える
     if (attachments.length === 0 && trimmed.startsWith("/") && (!running || trimmed.startsWith("/btw"))) {
       setSending(true);
+      // コマンドで別の画面へ移ると、この入力欄は先に消えて setText が届かない。下書きは自分で消す
+      const key = draftOwner.current;
       const outcome = await runCommand(trimmed, conversationId);
       setSending(false);
-      if (outcome === "done") setText("");
+      if (outcome === "done") {
+        setText("");
+        writeDraft(key, "");
+      }
       if (outcome !== null) return;
     }
     if (running) {
@@ -594,10 +603,13 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
       ? message
       : [...attachments.map(toBlock), ...(message ? [{ type: "text", text: message }] : [])];
     setSending(true);
+    // 新しいチャットは送るとすぐそのチャットへ移り、この入力欄が消える。下書きは自分で消す
+    const key = draftOwner.current;
     const ok = await send(conversationId, content);
     setSending(false);
     if (ok) {
       setText("");
+      writeDraft(key, "");
       setAttachments([]);
       if (conversationId) setQuote(conversationId, null);
     }

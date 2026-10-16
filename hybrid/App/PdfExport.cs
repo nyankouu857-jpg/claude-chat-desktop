@@ -28,9 +28,21 @@ sealed partial class WindowsPlatform
                 await browser.EnsureCoreWebView2Async(environment);
                 var core = browser.CoreWebView2;
                 var loaded = new TaskCompletionSource<bool>();
+                var page = new Uri(htmlPath).AbsoluteUri;
                 core.NavigationCompleted += (_, e) => loaded.TrySetResult(e.IsSuccess);
-                core.Navigate(new Uri(htmlPath).AbsoluteUri);
-                if (!await loaded.Task.WaitAsync(LoadTimeout)) return "書き出した HTML を読み込めませんでした";
+                // 書き出した HTML のほかへは移らせない。アーティファクトの中から外のページを開かれても読み込まない
+                core.NavigationStarting += (_, e) => { if (e.Uri != page) e.Cancel = true; };
+                core.FrameNavigationStarting += (_, e) => { if (!e.Uri.StartsWith("about:")) e.Cancel = true; };
+                core.NewWindowRequested += (_, e) => e.Handled = true;
+                core.Navigate(page);
+                try
+                {
+                    if (!await loaded.Task.WaitAsync(LoadTimeout)) return "書き出した HTML を読み込めませんでした";
+                }
+                catch (TimeoutException)
+                {
+                    return "書き出した HTML を読み込めませんでした";
+                }
                 await Task.Delay(RenderSettle);
                 var settings = environment.CreatePrintSettings();
                 settings.ShouldPrintBackgrounds = true;

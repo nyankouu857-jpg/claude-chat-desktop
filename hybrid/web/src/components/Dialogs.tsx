@@ -1,6 +1,6 @@
 import { LoaderCircle, Square } from "lucide-react";
 import { useEffect, useState } from "react";
-import { answerBlanks, answerConfirm, btw, generateStyle, getStyle, navigate, rewind, rewindTurns, saveFolder, saveStyle, setChoice, stop, stopWorkflow, textOf } from "../actions";
+import { answerBlanks, answerConfirm, cancelBlanks, btw, generateStyle, getStyle, navigate, rewind, rewindTurns, saveFolder, saveStyle, setChoice, stop, stopWorkflow, textOf } from "../actions";
 import { allCommands } from "../commands";
 import { getState, setState, useStore, type DialogState } from "../store";
 import type { Folder } from "../types";
@@ -228,6 +228,7 @@ function WhatsNewDialog({ dialog }: { dialog: Extract<DialogState, { kind: "what
 function BlanksDialog({ dialog }: { dialog: Extract<DialogState, { kind: "blanks" }> }) {
   const [values, setValues] = useState<Record<string, string>>({});
   const ready = dialog.blanks.every((b) => values[b]?.trim());
+  useEffect(() => () => { if (getState().dialog?.kind !== "blanks") cancelBlanks(); }, []);
   return (
     <Dialog
       title={`/${dialog.command}`}

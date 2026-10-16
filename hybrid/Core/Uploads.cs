@@ -96,7 +96,8 @@ public sealed class Uploads(AppPaths paths)
         return used;
     }
 
-    static string TextHashOf(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..32];
+    // 履歴の文字の添付と元のファイルを結ぶ印。画像だけの資料は取り出した文字が空で重なるので、名前も混ぜる
+    static string OriginalKeyOf(string title, string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{title}\n{text}")))[..32];
 
     // 画面から届いた元のファイルを、取り出した文字と結び付けて取っておく。シークレットチャットは残さない
     public async Task KeepOriginalAsync(Conversation conversation, string title, string text, byte[] original)
@@ -105,7 +106,7 @@ public sealed class Uploads(AppPaths paths)
         if (conversation.Incognito || !OfficeTypes.ContainsKey(extension)) return;
         var dir = OriginalsDir(conversation.Id);
         Directory.CreateDirectory(dir);
-        await File.WriteAllBytesAsync(Path.Combine(dir, TextHashOf(text) + extension.ToLowerInvariant()), original);
+        await File.WriteAllBytesAsync(Path.Combine(dir, OriginalKeyOf(title, text) + extension.ToLowerInvariant()), original);
     }
 
     // コード実行を使う回は、文字にした Word や Excel を元のファイルに替えてコンテナに置く。表の形や数式、書式のまま扱える
@@ -122,7 +123,7 @@ public sealed class Uploads(AppPaths paths)
                     || (string?)source["type"] != "text" || (string?)block["title"] is not { } title || (string?)source["data"] is not { } text) continue;
                 var extension = Path.GetExtension(title).ToLowerInvariant();
                 if (!OfficeTypes.TryGetValue(extension, out var mediaType)) continue;
-                var path = Path.Combine(dir, TextHashOf(text) + extension);
+                var path = Path.Combine(dir, OriginalKeyOf(title, text) + extension);
                 if (!File.Exists(path)) continue;
                 var bytes = await File.ReadAllBytesAsync(path, cancellationToken);
                 var hash = Convert.ToHexString(SHA256.HashData(bytes));
@@ -172,9 +173,16 @@ public sealed class Uploads(AppPaths paths)
     {
         var from = OriginalsDir(fromId);
         if (!Directory.Exists(from)) return;
-        var to = OriginalsDir(toId);
-        Directory.CreateDirectory(to);
-        foreach (var file in Directory.GetFiles(from)) File.Copy(file, Path.Combine(to, Path.GetFileName(file)), true);
+        try
+        {
+            var to = OriginalsDir(toId);
+            Directory.CreateDirectory(to);
+            foreach (var file in Directory.GetFiles(from)) File.Copy(file, Path.Combine(to, Path.GetFileName(file)), true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // 写せなくても分けたチャットはできている。コード実行で文字のまま渡すだけ
+        }
     }
 
     async Task<string?> FileIdAsync(string hash, string conversationId)

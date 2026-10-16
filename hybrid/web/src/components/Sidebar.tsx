@@ -1,6 +1,6 @@
 import { Archive, ArchiveRestore, Bot, ChartColumn, Shapes, Keyboard, ChevronRight, CircleArrowUp, EllipsisVertical, Folder as FolderIcon, FolderInput, FolderOpen, LoaderCircle, MessagesSquare, PanelLeft, Pencil, Plug, Plus, Settings, Star, Trash, Workflow, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { toast, archiveConversation, askConfirm, confirmDeleteConversations, type BudgetView, deleteConversation, installUpdate, setTags, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
+import { archiveConversation, askConfirm, confirmDeleteConversations, type BudgetView, deleteConversation, installUpdate, setTags, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
 import { call, on } from "../bridge";
 import { setState, useStore, type AppState } from "../store";
 import type { ChatStatus, ConversationSummary } from "../types";
@@ -45,18 +45,6 @@ function BudgetGauge() {
     };
   }, [settingsBudget?.dailyLimitUsd, settingsBudget?.monthlyLimitUsd]);
   const overForecast = !!budget && budget.forecastReliable && budget.monthlyLimitUsd > 0 && budget.forecastUsd > budget.monthlyLimitUsd;
-  useEffect(() => {
-    if (!overForecast || !budget) return;
-    // 毎分の読み直しのたびに出すと邪魔なので、1 日 1 回だけ
-    const key = `forecast-warned:${new Date().toDateString()}`;
-    try {
-      if (localStorage.getItem(key)) return;
-      localStorage.setItem(key, "1");
-    } catch {
-      // 覚えられない環境では毎回出るが、読み直しは 1 分おきなので邪魔になりすぎない
-    }
-    toast(`このペースだと今月は $${budget.forecastUsd.toFixed(2)} ほどになり、上限の $${budget.monthlyLimitUsd} を超えそうです`, "error");
-  }, [overForecast, budget]);
   if (!budget) return null;
   const row = (label: string, spent: number, limit: number) => {
     const ratio = limit > 0 ? Math.min(1, spent / limit) : 0;

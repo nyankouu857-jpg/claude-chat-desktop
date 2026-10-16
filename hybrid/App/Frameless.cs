@@ -15,6 +15,8 @@ static class Frameless
     {
         public bool Fullscreen;
         public bool WasMaximized;
+        // 最小化する前に最大化していたか。戻すときに使う
+        public bool MaximizedBeforeMinimize;
         public CoreWebView2? View;
     }
 
@@ -63,15 +65,25 @@ static class Frameless
                 return IntPtr.Zero;
             });
         };
-        window.StateChanged += (_, _) => Report(window);
+        window.StateChanged += (_, _) =>
+        {
+            if (states.TryGetValue(window, out var state) && window.WindowState != WindowState.Minimized) state.MaximizedBeforeMinimize = window.WindowState == WindowState.Maximized;
+            Report(window);
+        };
         window.Closed += (_, _) => states.Remove(window);
     }
+
+    public static bool WasMaximizedBeforeMinimize(Window window) => states.TryGetValue(window, out var state) && state.MaximizedBeforeMinimize;
 
     public static bool IsFullscreen(Window window) => states.TryGetValue(window, out var state) && state.Fullscreen;
 
     // 全画面は最大化の一種として出しているので、全画面に入る前に最大化していたかで答える
-    public static bool IsMaximized(Window window) =>
-        states.TryGetValue(window, out var state) && state.Fullscreen ? state.WasMaximized : window.WindowState == WindowState.Maximized;
+    public static bool IsMaximized(Window window)
+    {
+        if (!states.TryGetValue(window, out var state)) return window.WindowState == WindowState.Maximized;
+        if (state.Fullscreen) return state.WasMaximized;
+        return window.WindowState == WindowState.Minimized ? state.MaximizedBeforeMinimize : window.WindowState == WindowState.Maximized;
+    }
 
     // 画面が描いた ─ ☐ ✕ や、つかんだ所の知らせを受け取る WebView
     public static void Attach(Window window, CoreWebView2 view)
@@ -96,6 +108,12 @@ static class Frameless
     public static void Command(Window window, string action)
     {
         if (!states.TryGetValue(window, out var state)) return;
+        // CSS の zoom だと 100vh まで拡大されて下が切れる。ブラウザの拡大と同じ WebView の倍率で拡大する
+        if (action.StartsWith("zoom:") && double.TryParse(action[5..], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var factor))
+        {
+            if (window.Content is Microsoft.Web.WebView2.Wpf.WebView2 browser) browser.ZoomFactor = Math.Clamp(factor, 0.5, 3);
+            return;
+        }
         switch (action)
         {
             case "minimize":

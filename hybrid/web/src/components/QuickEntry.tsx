@@ -1,6 +1,6 @@
 import { ArrowUp, LoaderCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { sendQuick } from "../actions";
+import { refreshQuickChoice, sendQuick } from "../actions";
 import { on } from "../bridge";
 import { ALL_MODELS } from "../models";
 import { useStore } from "../store";
@@ -27,10 +27,14 @@ export function QuickEntry() {
   const [text, setText] = useState(readDraft);
   const [sending, setSending] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
-  useTheme();
+  // 小窓は大きさが決まっているので、メインの拡大は持ち込まない
+  useTheme({ zoomable: false });
 
   useEffect(() => {
-    const focus = () => textarea.current?.focus();
+    const focus = () => {
+      textarea.current?.focus();
+      void refreshQuickChoice();
+    };
     focus();
     const off = on("quick.shown", focus);
     return () => { off(); };

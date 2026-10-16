@@ -87,8 +87,10 @@ export async function init() {
   on("folders.changed", () => void refreshFolders());
   // Windows の通知を押したとき
   // 別の窓は 1 つの会話だけを出すので、通知を押したときの移動はメインの窓に任せる
-  on("app.navigate", ({ conversationId }: { conversationId: string }) => { if (!SINGLE_CHAT) navigate({ name: "chat", id: conversationId }); });
+  on("app.navigate", ({ conversationId }: { conversationId: string }) => { if (!SINGLE_CHAT && !QUICK_ENTRY) navigate({ name: "chat", id: conversationId }); });
   window.addEventListener("online", () => void flushOffline());
+  // 料金の見込みの知らせはメインの窓だけで出す。どの窓でも出すと重なる
+  on("budget.forecast", (message: string) => { if (!SINGLE_CHAT && !QUICK_ENTRY) toast(message, "error"); });
   on("update.available", (info: UpdateInfo) => setState((s) => ({ ...s, update: info })));
   on("update.installing", (info: UpdateInfo) => setState((s) => ({ ...s, update: { ...info, installing: true } })));
   on("update.failed", (message: string) => {
@@ -505,6 +507,26 @@ export async function send(conversationId: string | null, content: WireMessage["
   return true;
 }
 
+// 入力の小窓は隠したまま使い回すので、出すたびに設定の既定とコネクタを読み直す
+export async function refreshQuickChoice() {
+  const [settings, mcp] = await Promise.all([guard(() => call<Settings | null>("settings.get")), guard(() => call<McpServerStatus[]>("mcp.list"))]);
+  if (!settings) return;
+  setState((s) => ({
+    ...s,
+    settings,
+    mcp: mcp ?? s.mcp,
+    choice: {
+      ...s.choice,
+      model: settings.chat.model,
+      effort: settings.chat.effort,
+      webSearch: settings.chat.webSearch,
+      webFetch: settings.chat.webFetch,
+      codeExecution: settings.chat.codeExecution,
+      style: settings.chat.outputStyle,
+    },
+  }));
+}
+
 // 入力の小窓から送る。新しいチャットにして、メインの窓で開く
 export async function sendQuick(text: string) {
   const result = await guard(() => call<{ conversationId: string }>("chat.send", { conversationId: null, content: text, permissionMode: "default", ...chatOptions() }));
@@ -662,6 +684,11 @@ export const starConversation = (id: string, starred: boolean) => guard(() => ca
 
 export async function deleteConversation(id: string) {
   await guard(() => call("conversations.delete", { id }));
+  try {
+    localStorage.removeItem(`draft:${id}`);
+  } catch {
+    // 消せなくても、開けない会話の下書きが残るだけ
+  }
   setState((s) => {
     const { [id]: _, ...conversations } = s.conversations;
     const view: View = s.view.name === "chat" && s.view.id === id ? { name: "new" } : s.view;
@@ -895,6 +922,12 @@ export function askBlanks(command: string, blanks: string[]) {
   blanksResolver?.(null);
   setState((s) => ({ ...s, dialog: { kind: "blanks", command, blanks } }));
   return new Promise<Record<string, string> | null>((resolve) => { blanksResolver = resolve; });
+}
+
+// ほかのダイアログに入れ替わったときは、聞くのをやめたことにする。送信中のまま固まらないように
+export function cancelBlanks() {
+  blanksResolver?.(null);
+  blanksResolver = null;
 }
 
 export function answerBlanks(values: Record<string, string> | null) {

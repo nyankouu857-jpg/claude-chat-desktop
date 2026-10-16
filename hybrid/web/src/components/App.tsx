@@ -16,7 +16,7 @@ import { Sidebar } from "./Sidebar";
 import { FRAMELESS, TitleBar } from "./TitleBar";
 import { ZOOM_STEPS } from "./ui";
 
-export function useTheme() {
+export function useTheme({ zoomable = true } = {}) {
   const theme = useStore((s) => s.settings?.appearance.theme ?? "system");
   const font = useStore((s) => s.settings?.appearance.chatFont ?? "default");
   const zoom = useStore((s) => s.settings?.appearance.zoom ?? 100);
@@ -35,9 +35,14 @@ export function useTheme() {
     document.documentElement.dataset.chatFont = font;
   }, [font]);
   useEffect(() => {
-    document.documentElement.style.zoom = String(zoom / 100);
     document.documentElement.dataset.chatWidth = chatWidth;
-  }, [zoom, chatWidth]);
+    if (!zoomable) return;
+    const factor = Math.min(2, Math.max(0.7, zoom / 100));
+    // アプリの中では WebView の倍率で拡大する。開発用のブラウザでは代わりに CSS で
+    const webview = (window as any).chrome?.webview;
+    if (webview) webview.postMessage(JSON.stringify({ window: `zoom:${factor}` }));
+    else document.documentElement.style.zoom = String(factor);
+  }, [zoom, chatWidth, zoomable]);
 }
 
 // WebView2 の拡大は窓ごとに覚えないので、画面の側で持って設定に残す
@@ -49,7 +54,8 @@ function stepZoom(direction: -1 | 0 | 1) {
   toast(`表示 ${next}%`);
 }
 
-let lastWheelZoom = 0;
+// 最後にホイールが来た時刻。間が空くまでは同じひねりとして扱う
+let lastWheel = 0;
 
 // claude.ai のキーボードショートカットにならう
 function useShortcuts() {
@@ -84,9 +90,10 @@ function useShortcuts() {
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
-      // タッチパッドは一度に何十回も送ってくるので、1 回のひねりで 1 段だけ
-      if (e.timeStamp - lastWheelZoom < 150) return;
-      lastWheelZoom = e.timeStamp;
+      // タッチパッドは 1 回のひねりで何十回も送ってくるので、300ms 途切れるまでは 1 段だけ
+      const continuing = e.timeStamp - lastWheel < 300;
+      lastWheel = e.timeStamp;
+      if (continuing || e.deltaY === 0) return;
       stepZoom(e.deltaY < 0 ? 1 : -1);
     };
     document.addEventListener("keydown", onKey);
