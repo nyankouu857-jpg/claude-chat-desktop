@@ -599,6 +599,10 @@ public sealed class ChatHub(
         }
     }
 
+    // サブエージェントが元のチャットのアーティファクトを作ったり直したりしたとき
+    public void EmitState(Conversation conversation) =>
+        EmitChatEvent(conversation.Id, new JsonObject { ["type"] = "state", ["state"] = conversation.StateView() });
+
     void EmitChatEvent(string conversationId, JsonObject e) =>
         events.Emit("chat.event", new JsonObject { ["conversationId"] = conversationId, ["event"] = e });
 

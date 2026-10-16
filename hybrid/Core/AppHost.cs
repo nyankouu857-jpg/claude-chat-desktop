@@ -82,7 +82,11 @@ public sealed class AppHost : IAsyncDisposable
             new AgentToolProvider(hub, conversations, folders, settings, workflows),
             new ChatSearchToolProvider(conversations, settings),
             new TodoToolProvider(),
-            new ArtifactToolProvider(settings),
+            new ArtifactToolProvider(settings, conversations, async conversation =>
+            {
+                await conversations.SaveAsync(conversation, touch: false);
+                hub.EmitState(conversation);
+            }),
             new MemoryToolProvider(paths, settings),
             new PlanToolProvider(),
             new AskToolProvider(),

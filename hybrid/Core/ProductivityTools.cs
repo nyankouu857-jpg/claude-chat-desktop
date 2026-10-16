@@ -57,14 +57,18 @@ public sealed class TodoToolProvider : IToolProvider
     }
 }
 
-// claude.ai のアーティファクト。回答の横に HTML や文書を出す
-public sealed class ArtifactToolProvider(SettingsStore settings) : IToolProvider
+// claude.ai のアーティファクト。回答の横に HTML や文書を出す。
+// サブエージェントやワークフローのエージェントは、元のチャットのアーティファクトを読み書きし、元のチャットのパネルに出す
+public sealed class ArtifactToolProvider(SettingsStore settings, ConversationStore conversations, Func<Conversation, Task> artifactsChanged) : IToolProvider
 {
     public const string Source = "artifacts";
     const string Prefix = "artifacts__";
     static readonly string[] Types = ["html", "react", "markdown", "svg", "mermaid", "code"];
     // 1 つのアーティファクトの上限
     const int MaxChars = 500_000;
+    // 1 回で読ませる量。残りは offset で続きを読ませる
+    const int MaxReadChars = 60_000;
+    const int MaxListed = 100;
 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
@@ -76,36 +80,68 @@ public sealed class ArtifactToolProvider(SettingsStore settings) : IToolProvider
                 Schema(("title", "string", "Short title", true), ("type", "string", "html, react, markdown, svg, mermaid, or code", true), ("content", "string", "The full content", true), ("language", "string", "Programming language when type is code", false)),
                 AutoApprove: true, ReadOnly: true),
             new(Prefix + "update", Source, "update", "アーティファクトを直す",
-                "Change an existing artifact by id: either replace old_str with new_str (old_str must appear exactly once), or pass content to rewrite it entirely.",
+                "Change an existing artifact of this chat by id: either replace old_str with new_str (old_str must appear exactly once), or pass content to rewrite it entirely. Read it first with read if you are not sure of its current text.",
                 Schema(("id", "string", "Artifact id", true), ("old_str", "string", "Exact text to replace", false), ("new_str", "string", "Replacement text", false), ("content", "string", "New full content", false), ("title", "string", "New title", false)),
+                AutoApprove: true, ReadOnly: true),
+            new(Prefix + "list", Source, "list", "アーティファクトの一覧",
+                "List artifacts with their ids. scope chat (default) lists this chat's artifacts; when you are a sub-agent or workflow agent, that is the artifacts of the chat that started you. scope all also lists artifacts from the user's other chats, newest first. query filters by title.",
+                Schema(("scope", "string", "chat or all", false), ("query", "string", "Words in the title", false)),
+                AutoApprove: true, ReadOnly: true),
+            new(Prefix + "read", Source, "read", "アーティファクトを読む",
+                "Read an artifact's current content by id, from this chat or another chat (find ids with list). Set version to read an earlier version. Long artifacts come in parts; pass offset to read on.",
+                Schema(("id", "string", "Artifact id", true), ("version", "integer", "Version number, for an earlier version", false), ("offset", "integer", "Character position to start from", false)),
                 AutoApprove: true, ReadOnly: true),
         ];
     }
 
-    public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
+    public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
-        var conversation = ToolContext.Current?.Conversation ?? throw new ToolException("チャットの外からは使えません");
-        if (apiName == Prefix + "create")
+        var current = ToolContext.Current?.Conversation ?? throw new ToolException("チャットの外からは使えません");
+        var home = await HomeAsync(current);
+        switch (apiName[Prefix.Length..])
         {
-            var type = Required(input, "type");
-            if (!Types.Contains(type)) throw new ToolException($"type は {string.Join(", ", Types)} のどれかにしてください");
-            var content = (string?)input["content"] ?? throw new ToolException("content を指定してください");
-            if (content.Length > MaxChars) throw new ToolException("内容が大きすぎます");
-            var artifact = new Artifact
-            {
-                Id = "art_" + Guid.NewGuid().ToString("N")[..8],
-                Title = Required(input, "title"),
-                Type = type,
-                Language = (string?)input["language"],
-                Content = content,
-            };
-            lock (conversation.Artifacts) conversation.Artifacts.Add(artifact);
-            return Task.FromResult(Text($"アーティファクト「{artifact.Title}」を作りました (id {artifact.Id}、版 1)"));
+            case "list":
+                return Text(await ListAsync(home, (string?)input["scope"] == "all" && !current.Incognito, ((string?)input["query"])?.Trim() ?? ""));
+            case "read":
+                return Text(await ReadAsync(home, current.Incognito, Required(input, "id"), (int?)input["version"], Math.Max(0, (int?)input["offset"] ?? 0)));
         }
-        var id = Required(input, "id");
-        lock (conversation.Artifacts)
+        var result = apiName == Prefix + "create" ? Create(home, input) : Update(home, input);
+        // 元のチャットは今動いていないこともあるので、ここで保存して画面に知らせる
+        if (home != current) await artifactsChanged(home);
+        return Text(result);
+    }
+
+    // サブエージェントは 1 段までだが、念のため途中で止める
+    async Task<Conversation> HomeAsync(Conversation conversation)
+    {
+        for (var depth = 0; depth < 3 && conversation.ParentId is { } parentId && await conversations.GetAsync(parentId) is { } parent; depth++) conversation = parent;
+        return conversation;
+    }
+
+    static string Create(Conversation home, JsonObject input)
+    {
+        var type = Required(input, "type");
+        if (!Types.Contains(type)) throw new ToolException($"type は {string.Join(", ", Types)} のどれかにしてください");
+        var content = (string?)input["content"] ?? throw new ToolException("content を指定してください");
+        if (content.Length > MaxChars) throw new ToolException("内容が大きすぎます");
+        var artifact = new Artifact
         {
-            var target = conversation.Artifacts.FirstOrDefault(a => a.Id == id) ?? throw new ToolException($"{id} というアーティファクトはありません");
+            Id = "art_" + Guid.NewGuid().ToString("N")[..8],
+            Title = Required(input, "title"),
+            Type = type,
+            Language = (string?)input["language"],
+            Content = content,
+        };
+        lock (home.Artifacts) home.Artifacts.Add(artifact);
+        return $"アーティファクト「{artifact.Title}」を作りました (id {artifact.Id}、版 1)";
+    }
+
+    static string Update(Conversation home, JsonObject input)
+    {
+        var id = Required(input, "id");
+        lock (home.Artifacts)
+        {
+            var target = home.Artifacts.FirstOrDefault(a => a.Id == id) ?? throw new ToolException($"このチャットに {id} というアーティファクトはありません。ほかのチャットのものは read で読んで、create で作り直してください");
             string updated;
             if ((string?)input["content"] is { } full)
             {
@@ -126,8 +162,53 @@ public sealed class ArtifactToolProvider(SettingsStore settings) : IToolProvider
             if ((string?)input["title"] is { Length: > 0 } title) target.Title = title;
             target.Version++;
             target.UpdatedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            return Task.FromResult(Text($"アーティファクト「{target.Title}」を直しました (id {target.Id}、版 {target.Version})"));
+            return $"アーティファクト「{target.Title}」を直しました (id {target.Id}、版 {target.Version})";
         }
+    }
+
+    // ほかのチャットのものも含めて探す。シークレットチャットは保存されないので一覧に出てこない
+    async Task<List<(Conversation Chat, Artifact Artifact)>> CollectAsync(Conversation home, bool allChats)
+    {
+        var found = new List<(Conversation, Artifact)>();
+        lock (home.Artifacts) found.AddRange(home.Artifacts.Select(a => (home, a)));
+        if (!allChats) return found;
+        foreach (var summary in await conversations.ListAsync())
+        {
+            if (summary.Id == home.Id || await conversations.GetAsync(summary.Id) is not { Incognito: false } chat) continue;
+            lock (chat.Artifacts) found.AddRange(chat.Artifacts.Select(a => (chat, a)));
+        }
+        return found;
+    }
+
+    async Task<string> ListAsync(Conversation home, bool allChats, string query)
+    {
+        var found = (await CollectAsync(home, allChats))
+            .Where(f => query.Length == 0 || f.Artifact.Title.Contains(query, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(f => f.Chat == home)
+            .ThenByDescending(f => f.Artifact.UpdatedAt)
+            .ToList();
+        if (found.Count == 0) return allChats ? "アーティファクトはありません" : "このチャットにアーティファクトはありません。ほかのチャットのものは scope all で探せます";
+        var lines = found.Take(MaxListed).Select(f =>
+            $"{f.Artifact.Id}  「{f.Artifact.Title}」 {f.Artifact.Type}{(f.Artifact.Language is { } language ? $" ({language})" : "")} 版 {f.Artifact.Version}  {(f.Chat == home ? "このチャット" : $"チャット「{f.Chat.Title}」")}");
+        return string.Join("\n", lines) + (found.Count > MaxListed ? $"\nほか {found.Count - MaxListed} 件。query で絞り込めます" : "");
+    }
+
+    async Task<string> ReadAsync(Conversation home, bool incognito, string id, int? version, int offset)
+    {
+        var (chat, artifact) = (await CollectAsync(home, !incognito)).FirstOrDefault(f => f.Artifact.Id == id);
+        if (artifact is null) throw new ToolException($"{id} というアーティファクトは見つかりません。list で id を確かめてください");
+        string? content;
+        int latest;
+        lock (chat.Artifacts)
+        {
+            latest = artifact.Version;
+            content = artifact.ContentOf(version ?? latest);
+        }
+        if (content is null) throw new ToolException($"版 {version} はありません。版は 1 から {latest} までです");
+        var part = offset >= content.Length ? "" : content.Substring(offset, Math.Min(MaxReadChars, content.Length - offset));
+        var rest = offset + part.Length < content.Length ? $"\n\n(ここまで {offset + part.Length} / {content.Length} 文字。続きは offset {offset + part.Length} で読めます)" : "";
+        var where = chat == home ? "このチャット" : $"チャット「{chat.Title}」";
+        return $"「{artifact.Title}」 {artifact.Type}{(artifact.Language is { } language ? $" ({language})" : "")} 版 {version ?? latest} / {latest}  {where}\n\n{part}{rest}";
     }
 }
 

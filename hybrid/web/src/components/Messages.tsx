@@ -457,10 +457,13 @@ function WorkflowCard({ block, result }: { block: WireBlock; result?: WireBlock 
 
 function ArtifactCard({ block, result, conversationId }: { block: WireBlock; result?: WireBlock; conversationId: string }) {
   const id = ARTIFACT_ID.exec(resultText(result))?.[1] ?? block.input?.id;
-  const artifact = useStore((s) => s.conversations[conversationId]?.artifacts?.find((a) => a.id === id));
+  // サブエージェントが作ったものは、元のチャットに入っている
+  const parentId = useStore((s) => s.conversations[conversationId]?.parentId);
+  const home = useStore((s) => (s.conversations[conversationId]?.artifacts?.some((a) => a.id === id) || !parentId ? conversationId : parentId));
+  const artifact = useStore((s) => s.conversations[home]?.artifacts?.find((a) => a.id === id));
   const title = artifact?.title ?? block.input?.title ?? "アーティファクト";
   return (
-    <button type="button" className="artifact-card" disabled={!artifact} onClick={() => artifact && openArtifact(conversationId, artifact.id)}>
+    <button type="button" className="artifact-card" disabled={!artifact} onClick={() => artifact && openArtifact(home, artifact.id)}>
       <PanelsTopLeft size={20} />
       <span className="artifact-card-text">
         <span className="artifact-card-title">{title}</span>

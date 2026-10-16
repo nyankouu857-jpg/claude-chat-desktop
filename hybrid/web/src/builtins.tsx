@@ -153,8 +153,8 @@ export const BUILTIN_SOURCES: BuiltinSource[] = [
     icon: PanelsTopLeft,
     isAvailable: (s) => s.features.artifacts,
     hint: () => "文書やアプリを横に表示",
-    titles: { create: "アーティファクトを作る", update: "アーティファクトを直す" },
-    subject: (_, input) => input.title ?? input.id ?? "",
+    titles: { create: "アーティファクトを作る", update: "アーティファクトを直す", list: "アーティファクトの一覧", read: "アーティファクトを読む" },
+    subject: (_, input) => input.title ?? input.id ?? input.query ?? (input.scope === "all" ? "すべてのチャット" : ""),
   },
   {
     id: "todo",
