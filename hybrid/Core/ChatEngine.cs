@@ -276,6 +276,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
                 var message = aggregator.Message();
                 var content = new JsonArray(message.Content.Select(b => (JsonNode)ToWire(b)).ToArray());
+                // 画面の「↓ 1.2k tokens」を、流れてきた文字からの見積もりから本当の数に置き換える
+                emit(new JsonObject { ["type"] = "usage", ["output"] = message.Usage.OutputTokens });
                 // 途中で断られた応答は完成した回答として扱わず捨てる。別モデルが書き直した (fallback) ときは残す
                 if (message.StopReason?.Raw() == "refusal" && !content.OfType<JsonObject>().Any(b => (string?)b["type"] == "fallback"))
                 {

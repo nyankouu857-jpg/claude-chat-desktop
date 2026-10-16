@@ -215,6 +215,46 @@ function useElapsed(since: number | undefined, running: boolean) {
   return since ? Math.max(0, Math.round((now - since) / 1000)) : 0;
 }
 
+// Claude Code の作業中の表示。動詞はその都度ひとつ選ぶ
+const SPINNER_VERBS = [
+  "Accomplishing", "Actioning", "Actualizing", "Baking", "Brewing", "Calculating", "Cerebrating", "Churning", "Clauding", "Coalescing",
+  "Cogitating", "Computing", "Conjuring", "Considering", "Cooking", "Crafting", "Creating", "Crunching", "Deliberating", "Determining",
+  "Doing", "Effecting", "Finagling", "Forging", "Forming", "Generating", "Germinating", "Hatching", "Herding", "Honking", "Hustling",
+  "Ideating", "Inferring", "Manifesting", "Marinating", "Moseying", "Mulling", "Mustering", "Musing", "Noodling", "Percolating",
+  "Pondering", "Processing", "Puttering", "Reticulating", "Ruminating", "Schlepping", "Shucking", "Simmering", "Smooshing", "Spinning",
+  "Stewing", "Synthesizing", "Thinking", "Transmuting", "Vibing", "Working",
+];
+const DONE_VERBS = ["Baked", "Brewed", "Churned", "Cogitated", "Cooked", "Crunched", "Sautéed", "Worked"];
+// 記号が膨らんでしぼむ動き
+const SPINNER_FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
+
+const pick = (list: string[], seed: number) => list[Math.abs(Math.floor(seed)) % list.length];
+
+function formatDuration(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+const formatTokens = (tokens: number) => (tokens < 1000 ? String(Math.round(tokens)) : `${(tokens / 1000).toFixed(1)}k`);
+
+function LiveTurnStatus({ live }: { live: LiveReply }) {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    // 端末の Claude Code と同じくらいの速さで回す
+    const timer = setInterval(() => setFrame((f) => (f + 1) % SPINNER_FRAMES.length), 120);
+    return () => clearInterval(timer);
+  }, []);
+  const elapsed = useElapsed(live.startedAt, true);
+  const verb = useMemo(() => pick(SPINNER_VERBS, live.startedAt), [live.startedAt]);
+  return (
+    <span className="turn-status live">
+      <span className="turn-status-glyph">{SPINNER_FRAMES[frame]}</span> <span className="turn-status-verb">{verb}…</span>{" "}
+      ({formatDuration(elapsed)} · ↓ {formatTokens(live.outputTokens + live.streamingTokens)} tokens · esc to interrupt)
+    </span>
+  );
+}
+
 function ThinkingBlock({ block, active }: { block: WireBlock; active: boolean }) {
   const [open, setOpen] = useState(false);
   const elapsed = useElapsed(block._startedAt, active);
@@ -672,6 +712,7 @@ const NO_NOTICES: string[] = [];
 
 function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, { kind: "assistant" }>; conversationId: string; isLast: boolean }) {
   const showThinking = useStore((s) => s.settings?.chat.showThinking ?? true);
+  const lastTurn: { seconds: number; tokens: number } | undefined = useStore((s) => (isLast ? (s.conversations[conversationId] as any)?._lastTurn : undefined));
   const notices: string[] = useStore((s) => (isLast ? s.live[conversationId]?.notices ?? (s.conversations[conversationId] as any)?._notices ?? NO_NOTICES : NO_NOTICES));
   const live = turn.live;
   const searchResults = new Map<string, WireBlock>();
@@ -751,6 +792,8 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
             {turn.human >= 0 && <RetryMenu conversationId={conversationId} human={turn.human} />}
           </div>
         )}
+        {live && <LiveTurnStatus live={live} />}
+        {isLast && !live && lastTurn && <span className="turn-status">✻ {pick(DONE_VERBS, lastTurn.seconds + lastTurn.tokens)} for {formatDuration(lastTurn.seconds)}</span>}
         {isLast && !live && <span className="disclaimer">Claude は間違えることがあります。回答内容は必ずご確認ください。</span>}
       </div>
     </div>

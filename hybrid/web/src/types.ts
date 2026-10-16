@@ -261,6 +261,9 @@ export interface LiveReply {
   approvals: Approval[];
   notices: string[];
   startedAt: number;
+  // 返答を受け取り終えた問い合わせの本当の数と、受け取り中の分の見積もり
+  outputTokens: number;
+  streamingTokens: number;
 }
 
 export type ChatEvent =
@@ -274,6 +277,7 @@ export type ChatEvent =
   | { type: "tool-running"; toolUseId: string }
   | { type: "tool-result"; toolUseId: string; result: WireBlock }
   | { type: "notice"; text: string }
+  | { type: "usage"; output: number }
   | { type: "inbound"; message: WireMessage }
   | { type: "discard" }
   | { type: "state"; state: Pick<Conversation, "permissionMode" | "todos" | "artifacts"> }

@@ -45,7 +45,18 @@ async function guard<T>(work: () => Promise<T>): Promise<T | undefined> {
 }
 
 function emptyLive(): LiveReply {
-  return { blocks: [], toolResults: {}, runningTools: [], approvals: [], notices: [], startedAt: Date.now() };
+  return { blocks: [], toolResults: {}, runningTools: [], approvals: [], notices: [], startedAt: Date.now(), outputTokens: 0, streamingTokens: 0 };
+}
+
+// 本当の数は問い合わせが終わるまで届かないので、それまでは文字数から見積もる。英数字は 4 文字、日本語は 1 文字でおよそ 1 トークン
+function estimateTokens(text: string) {
+  let ascii = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (ch.charCodeAt(0) < 128) ascii++;
+    else other++;
+  }
+  return ascii / 4 + other;
 }
 
 function updateLive(id: string, update: (live: LiveReply) => LiveReply, deferred = false) {
@@ -174,7 +185,10 @@ function applyChatEvent(id: string, event: ChatEvent) {
       void ensureConversation(id);
       break;
     case "message-start":
-      updateLive(id, (live) => ({ ...live, blocks: [] }));
+      updateLive(id, (live) => ({ ...live, blocks: [], streamingTokens: 0 }));
+      break;
+    case "usage":
+      updateLive(id, (live) => ({ ...live, outputTokens: live.outputTokens + event.output, streamingTokens: 0 }));
       break;
     case "block-start":
       updateLive(id, (live) => {
@@ -191,7 +205,7 @@ function applyChatEvent(id: string, event: ChatEvent) {
         if (block.type === "thinking") blocks[event.index] = { ...block, thinking: (block.thinking ?? "") + event.text };
         else if (block.type === "compaction") blocks[event.index] = { ...block, content: (block.content ?? "") + event.text };
         else blocks[event.index] = { ...block, text: (block.text ?? "") + event.text };
-        return { ...live, blocks };
+        return { ...live, blocks, streamingTokens: live.streamingTokens + estimateTokens(event.text) };
       }, true);
       break;
     case "block-stop":
@@ -263,7 +277,10 @@ function applyChatEvent(id: string, event: ChatEvent) {
         const { [id]: _, ...live } = s.live;
         const errors = { ...s.errors };
         if (event.status === "failed" && event.error) errors[id] = event.error;
-        const conversation = { ...event.conversation, _notices: notices } as Conversation;
+        const finished = s.live[id];
+        // Claude Code の「✻ Cooked for 1m 6s」用に、最新の回答にかかった時間を覚えておく
+        const lastTurn = finished ? { seconds: Math.round((Date.now() - finished.startedAt) / 1000), tokens: finished.outputTokens + finished.streamingTokens } : undefined;
+        const conversation = { ...event.conversation, _notices: notices, _lastTurn: lastTurn } as Conversation;
         return { ...putConversation(s, conversation), live, errors };
       });
       break;
