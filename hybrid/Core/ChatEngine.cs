@@ -27,6 +27,7 @@ public interface IApprovalGate
 
 public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, UsageLedger ledger, SettingsStore settings, Hooks hooks, AppPaths paths)
 {
+    readonly AutoReviewer reviewer = new(client, ledger);
     const string TitleModel = "claude-haiku-5-5";
     // API の下限
     const int MinCompactThreshold = 50_000;
@@ -495,6 +496,15 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         }
         if (spec.AutoApprove || readOnlyCall || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return null;
 
+        string? autoReason = null;
+        // ワークフローは危なさでなく料金の問題なので、auto でも本人に決めてもらう
+        if (conversation.PermissionMode == "auto" && spec.ApiName != AgentToolProvider.RunWorkflow)
+        {
+            var verdict = await reviewer.ReviewAsync(conversation, spec, input, cancellationToken);
+            if (verdict.Allowed) return null;
+            autoReason = verdict.Reason;
+        }
+
         var decision = await gate.RequestAsync(new JsonObject
         {
             ["toolUseId"] = toolUseId,
@@ -504,6 +514,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             ["title"] = spec.Title,
             ["description"] = spec.Description,
             ["allowAlways"] = spec.AllowAlways,
+            ["autoReason"] = autoReason,
             ["input"] = input.DeepClone(),
         }, cancellationToken);
 

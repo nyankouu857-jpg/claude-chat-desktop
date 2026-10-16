@@ -33,7 +33,7 @@ export const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "export", description: "会話を Markdown に書き出す", needsChat: true, kind: "builtin" },
   { name: "research", args: "<調べたいこと>", description: "リサーチモードで、複数のエージェントに調べさせる", kind: "builtin" },
   { name: "plan", description: "計画モードを切り替える", kind: "builtin" },
-  { name: "mode", args: "<default|acceptEdits|plan|bypass>", description: "権限モードを変える", kind: "builtin" },
+  { name: "mode", args: "<default|acceptEdits|auto|plan|bypass>", description: "権限モードを変える", kind: "builtin" },
   { name: "model", args: "<opus|fable|sonnet|haiku>", description: "モデルを変える", kind: "builtin" },
   { name: "effort", args: "<low|medium|high|xhigh|max>", description: "思考の深さを変える", kind: "builtin" },
   { name: "loop", args: "[間隔] <内容>", description: "一定の間隔で繰り返し頼む (7 日で終わる)", kind: "builtin" },
@@ -62,7 +62,7 @@ export function parseCommand(text: string) {
 
 const openDialog = (dialog: DialogState) => setState((s) => ({ ...s, dialog }));
 
-const MODES: PermissionMode[] = ["default", "acceptEdits", "plan", "bypass"];
+const MODES: PermissionMode[] = ["default", "acceptEdits", "auto", "plan", "bypass"];
 
 // 「5m」「2h」「30」(分) を分に直す
 function parseInterval(token: string) {

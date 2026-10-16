@@ -273,6 +273,7 @@ function PlusMenu({ direction, onAddFiles }: { direction: "up" | "down"; onAddFi
 export const MODE_LABELS: Record<PermissionMode, { label: string; hint: string }> = {
   default: { label: "毎回確認", hint: "変更する操作は毎回確認する" },
   acceptEdits: { label: "編集は自動で許可", hint: "フォルダ内のファイル操作は確認しない" },
+  auto: { label: "自動で判断", hint: "Haiku が危ないと判断した操作だけ確認する" },
   plan: { label: "計画モード", hint: "調べて計画を出すだけ。変更はしない" },
   bypass: { label: "確認なし", hint: "すべての操作を確認せずに実行する" },
 };

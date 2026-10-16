@@ -218,7 +218,7 @@ public sealed class AppHost : IAsyncDisposable
         AskToolProvider.Source,
     ];
 
-    static readonly string[] PermissionModes = ["default", "acceptEdits", "plan", "bypass"];
+    static readonly string[] PermissionModes = ["default", "acceptEdits", "auto", "plan", "bypass"];
 
     static string Str(JsonObject p, string key) => (string?)p[key] ?? throw new InvalidOperationException($"{key} がありません");
 

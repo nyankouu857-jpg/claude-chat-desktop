@@ -19,7 +19,7 @@ export interface ConversationUsage {
 }
 
 export type ChatKind = "chat" | "agent" | "workflow";
-export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypass";
+export type PermissionMode = "default" | "acceptEdits" | "auto" | "plan" | "bypass";
 export type ChatStatus = "running" | "waiting" | "idle" | "failed" | "stopped";
 
 export interface Todo {
@@ -250,6 +250,7 @@ export interface Approval {
   title?: string;
   description?: string;
   allowAlways?: boolean;
+  autoReason?: string;
   input: unknown;
 }
 

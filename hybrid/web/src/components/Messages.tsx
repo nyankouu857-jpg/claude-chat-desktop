@@ -336,6 +336,7 @@ function ApprovalCard({ conversationId, approval }: { conversationId: string; ap
             : <><b>{approval.source}</b> の <b>{name}</b> を使おうとしています</>}
         </span>
       </div>
+      {approval.autoReason && <div className="approval-desc">自動の判定で確認が必要になりました: {approval.autoReason}</div>}
       {!builtin && approval.description && <div className="approval-desc">{approval.description}</div>}
       <ApprovalInput approval={approval} />
       <div className="approval-actions">
@@ -343,7 +344,7 @@ function ApprovalCard({ conversationId, approval }: { conversationId: string; ap
         <button type="button" className={`button${approval.allowAlways === false ? " primary" : ""}`} onClick={() => approve(conversationId, approval.requestId, "once")}>{approval.allowAlways === false ? "許可" : "今回だけ許可"}</button>
         <button type="button" className="button ghost" onClick={() => approve(conversationId, approval.requestId, "deny")}>拒否</button>
       </div>
-      {approval.allowAlways === false && <div className="approval-note">内容によって何でもできる操作なので、毎回確認します</div>}
+      {approval.allowAlways === false && !approval.autoReason && <div className="approval-note">内容によって何でもできる操作なので、毎回確認します</div>}
     </div>
   );
 }

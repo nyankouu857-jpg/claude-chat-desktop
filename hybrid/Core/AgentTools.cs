@@ -8,6 +8,7 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
 {
     public const string Source = "agents";
     const string Prefix = "agents__";
+    public const string RunWorkflow = Prefix + "run_workflow";
     // 子の最後の回答を親に返す量の上限
     const int MaxResultChars = 30_000;
 
@@ -22,7 +23,7 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
                 "Start a sub-agent: a fresh Claude chat that works on one self-contained task with the same tools as you, and reports back. It sees only your prompt, so include all needed context. With background=false (default) you wait and get its final answer as the result. With background=true it runs while you continue, and its result arrives later as a <task-notification> message. The sub-agent appears as a child chat the user can open.",
                 Schema(("prompt", "string", "The full task for the sub-agent", true), ("title", "string", "A short name shown to the user", true), ("background", "boolean", "Run without waiting", false)),
                 AutoApprove: true, ReadOnly: true),
-            new(Prefix + "run_workflow", Source, "run_workflow", "ワークフローを実行",
+            new(RunWorkflow, Source, "run_workflow", "ワークフローを実行",
                 WorkflowRunner.ToolDescription,
                 Schema(("script", "string", "Workflow script (JavaScript). Omit when using name", false), ("name", "string", "A bundled workflow: research", false), ("args", "object", "Value exposed to the script as args", false), ("title", "string", "A short name shown to the user", true)),
                 AllowAlways: false),

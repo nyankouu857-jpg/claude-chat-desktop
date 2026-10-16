@@ -543,7 +543,8 @@ public sealed class ChatHub(
         child.Incognito = parent.Incognito;
         child.WorkflowId = workflowId;
         child.WorktreePath = parent.WorktreePath;
-        child.PermissionMode = parent.PermissionMode == "plan" ? "plan" : "default";
+        // 計画中の子は変更せず、auto の子は同じ確認役に見てもらう
+        child.PermissionMode = parent.PermissionMode is "plan" or "auto" ? parent.PermissionMode : "default";
         // 親と同じ道具立てで動かす
         child.Options = parent.Options?.DeepClone() as JsonObject;
         try
