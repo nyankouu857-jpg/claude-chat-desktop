@@ -19,7 +19,8 @@ public partial class MainWindow : Window
     readonly AppPaths paths;
     readonly Dictionary<string, string> resources;
     AppHost? host;
-    bool closed;
+    // 片付けを待つ上限。止まったものを待ち続けて、閉じたはずのアプリを残さない
+    static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(3);
 
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
@@ -40,25 +41,23 @@ public partial class MainWindow : Window
         Closing += async (_, e) =>
         {
             if (host is null) return;
-            // MCP サーバーの子プロセスを残さないよう、片付け終わってから閉じ直す
+            // MCP サーバーの子プロセスを残さないよう、片付けてから終わる
             e.Cancel = true;
             var closing = host;
             host = null;
-            // 片付けの間に窓が見えていると、もう一度閉じられて、閉じ終わった窓をまた閉じることになる。
-            // Closing の中では隠せないので、抜けた後に隠す
-            _ = Dispatcher.InvokeAsync(Hide);
+            // Closing の中では隠すことも閉じ直すこともできない。片付けがすぐ終わっても、いったんここを抜けてから続ける
+            await Dispatcher.InvokeAsync(Hide);
             try
             {
-                // 片付けが止まっても、隠れたままのアプリを残さない
-                await closing.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+                await closing.DisposeAsync().AsTask().WaitAsync(CleanupTimeout);
             }
             catch (Exception)
             {
-                // 片付けに失敗しても、閉じるのは止めない
+                // 片付けに失敗しても、終わるのは止めない
             }
-            if (!closed) Close();
+            // × はアプリの終了。裏で動き続けるスレッドが残っていても、プロセスごと終わらせる
+            Environment.Exit(0);
         };
-        Closed += (_, _) => closed = true;
     }
 
     static bool PrefersDarkTheme()
