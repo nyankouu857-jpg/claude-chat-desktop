@@ -79,6 +79,8 @@ interface PendingAttachment {
   // image と pdf は base64、text は本文
   data: string;
   name: string;
+  // Word や Excel の元のファイル (base64)。コード実行を使う回だけ、文字の代わりにこれを Claude に渡す
+  original?: string;
 }
 
 function isTextFile(file: File) {
@@ -116,7 +118,7 @@ function attachedChars(conversationId: string | null) {
 function toBlock(a: PendingAttachment): WireBlock {
   if (a.kind === "image") return { type: "image", source: { type: "base64", media_type: a.mediaType, data: a.data } };
   if (a.kind === "pdf") return { type: "document", title: a.name, source: { type: "base64", media_type: "application/pdf", data: a.data } };
-  return { type: "document", title: a.name, source: { type: "text", media_type: "text/plain", data: a.data } };
+  return { type: "document", title: a.name, source: { type: "text", media_type: "text/plain", data: a.data }, ...(a.original ? { original: a.original } : {}) };
 }
 
 function readAsBase64(file: File) {
@@ -520,7 +522,8 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
           continue;
         }
         try {
-          added.push({ kind: "text", mediaType: "text/plain", data: await extractDocumentText(file.name, await readAsBase64(file)), name: file.name });
+          const original = await readAsBase64(file);
+          added.push({ kind: "text", mediaType: "text/plain", data: await extractDocumentText(file.name, original), name: file.name, original });
         } catch (e) {
           toast(e instanceof Error ? e.message : String(e), "error");
         }

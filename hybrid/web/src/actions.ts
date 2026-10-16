@@ -2,6 +2,7 @@ import { call, on } from "./bridge";
 import { FAST_MODELS, defaultEffortOf } from "./models";
 import { getState, setState, type AppState } from "./store";
 import type {
+  McpServerStatus,
   SessionFile,
   Effort,
   Approval,
@@ -697,6 +698,11 @@ export async function saveMcpServers(servers: Record<string, McpServerConfig>) {
 }
 
 export const restartMcp = (name: string) => guard(() => call("mcp.restart", { name }));
+export async function loginMcp(name: string, logout = false) {
+  if (!logout) toast("ブラウザでログインしてください。終わるとつながります");
+  const mcp = await guard(() => call<McpServerStatus[]>("mcp.login", { name, logout }));
+  if (mcp) setState((s) => ({ ...s, mcp }));
+}
 export const openMcpLog = (name: string) => guard(() => call("mcp.openLog", { name }));
 
 export async function revokePermission(apiName: string) {
@@ -747,8 +753,20 @@ export async function compact(conversationId: string, instructions?: string) {
 
 export const btw = (conversationId: string, question: string) => guard(() => call<{ answer: string }>("chat.btw", { conversationId, question }));
 
-export async function exportConversation(conversationId: string) {
-  const result = await guard(() => call<{ path: string }>("chat.export", { conversationId }));
+export async function exportConversation(conversationId: string, format: "md" | "html" | "pdf" = "md") {
+  if (format === "md") {
+    const result = await guard(() => call<{ path: string }>("chat.export", { conversationId }));
+    if (result) toast(`書き出しました: ${result.path}`);
+    return;
+  }
+  const conversation = getState().conversations[conversationId];
+  if (!conversation) return;
+  // PDF は紙に近い白地のほうが読みやすいので、ダークでも明るい配色で書き出す
+  const theme = format === "pdf" ? "light" : (document.documentElement.dataset.theme as "light" | "dark" | undefined) ?? "light";
+  if (format === "pdf") toast("PDF を作っています…");
+  // 書き出しの部品は会話の表示を引き込むので、起動時に読み込まず使うときに読む
+  const { conversationHtml } = await import("./exportHtml");
+  const result = await guard(() => call<{ path: string }>("chat.saveExport", { conversationId, format, html: conversationHtml(conversation, theme) }));
   if (result) toast(`書き出しました: ${result.path}`);
 }
 
@@ -845,7 +863,36 @@ export const openMail = (to: string, subject: string, body: string) => guard(() 
 
 export const openFile = (conversationId: string, fileId: string, reveal = false) => guard(() => call("files.open", { conversationId, fileId, reveal }));
 export const stopWorkflow = (id: string) => guard(() => call("workflows.stop", { id }));
-export const expandCommand = (name: string, args: string) => guard(() => call<string>("commands.expand", { name, args }));
+export const expandCommand = (name: string, args: string, values?: Record<string, string>) => guard(() => call<string>("commands.expand", { name, args, values }));
+export const getCommand = (name: string) => guard(() => call<{ name: string; description: string; body: string } | null>("commands.get", { name }));
+
+export async function saveCommand(command: { name: string; description: string; body: string; previousName?: string }) {
+  const extensions = await guard(() => call("commands.save", command));
+  if (extensions) setState((s) => ({ ...s, extensions }));
+  return !!extensions;
+}
+
+export async function deleteCommand(name: string) {
+  const extensions = await guard(() => call("commands.delete", { name }));
+  if (extensions) setState((s) => ({ ...s, extensions }));
+}
+
+// 自作コマンドの {{対象}} のような空欄。同じ名前は 1 回だけ聞く
+export const blanksOf = (body: string) => [...new Set([...body.matchAll(/\{\{\s*([^{}\n]+?)\s*\}\}/g)].map((m) => m[1]))];
+
+let blanksResolver: ((values: Record<string, string> | null) => void) | null = null;
+
+export function askBlanks(command: string, blanks: string[]) {
+  blanksResolver?.(null);
+  setState((s) => ({ ...s, dialog: { kind: "blanks", command, blanks } }));
+  return new Promise<Record<string, string> | null>((resolve) => { blanksResolver = resolve; });
+}
+
+export function answerBlanks(values: Record<string, string> | null) {
+  blanksResolver?.(values);
+  blanksResolver = null;
+  setState((s) => ({ ...s, dialog: null }));
+}
 
 // Schedules
 

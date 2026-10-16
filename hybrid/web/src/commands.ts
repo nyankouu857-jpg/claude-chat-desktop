@@ -1,6 +1,9 @@
 import {
   compact,
+  askBlanks,
+  blanksOf,
   expandCommand,
+  getCommand,
   exportConversation,
   navigate,
   openSettings,
@@ -226,8 +229,18 @@ export async function runCommand(text: string, conversationId: string | null): P
       return "done";
   }
 
+  // 自作コマンドの空欄は、送る前に中身を聞いて埋める
+  let values: Record<string, string> | undefined;
+  if (command.kind === "command") {
+    const blanks = blanksOf((await getCommand(command.name))?.body ?? "");
+    if (blanks.length > 0) {
+      const answered = await askBlanks(command.name, blanks);
+      if (!answered) return "keep";
+      values = answered;
+    }
+  }
   // 自作コマンドと Skills は本文に展開して送る
-  const expanded = await expandCommand(command.name, args);
+  const expanded = await expandCommand(command.name, args, values);
   if (expanded === undefined) return "keep";
   return (await send(conversationId, expanded)) ? "done" : "keep";
 }

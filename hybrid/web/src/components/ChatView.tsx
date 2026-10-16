@@ -91,6 +91,8 @@ export function ChatView({ id }: { id: string }) {
                 <MenuItem icon={<Workflow size={16} />} onClick={() => { close(); setState((s) => ({ ...s, dialog: { kind: "tasks", conversationId: id } })); }}>タスク一覧</MenuItem>
                 <MenuItem icon={<ListTree size={16} />} onClick={() => { close(); void compact(id); }}>ここまでを要約する</MenuItem>
                 <MenuItem icon={<FileDown size={16} />} onClick={() => { close(); void exportConversation(id); }}>Markdown に書き出す</MenuItem>
+                <MenuItem icon={<FileDown size={16} />} onClick={() => { close(); void exportConversation(id, "html"); }}>HTML に書き出す</MenuItem>
+                <MenuItem icon={<FileDown size={16} />} onClick={() => { close(); void exportConversation(id, "pdf"); }}>PDF に書き出す</MenuItem>
                 {!SINGLE_CHAT && !conversation.incognito && <MenuItem icon={<AppWindow size={16} />} onClick={() => { close(); void openChatWindow(id); }}>別の窓で開く</MenuItem>}
                 <MenuItem icon={<Trash size={16} />} danger onClick={() => {
                   close();

@@ -348,6 +348,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 var uploaded = Uploads is not null && !uploadsDropped && (await settings.GetAsync()).Chat.UploadLargePdfs
                     ? await Uploads.SubstituteAsync(client, conversation, outgoing, cancellationToken)
                     : [];
+                if (Uploads is not null && !uploadsDropped && options.CodeExecution) uploaded.AddRange(await Uploads.SubstituteOfficeAsync(client, conversation, outgoing, cancellationToken));
                 var request = BuildRequest(conversation, options, toolSpecs, outgoing);
                 // 前の応答と比べて、キャッシュが外れた理由を返してもらう
                 if (!options.Batch) request = request with { Diagnostics = new BetaDiagnosticsParam { PreviousMessageID = conversation.LastResponseId } };

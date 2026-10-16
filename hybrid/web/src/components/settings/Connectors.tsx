@@ -1,6 +1,6 @@
 import { Braces, ChevronRight, FileText, Pencil, Plus, RefreshCw, Trash } from "lucide-react";
 import { useState } from "react";
-import { askConfirm, openMcpLog, restartMcp, saveMcpServers, toast } from "../../actions";
+import { askConfirm, loginMcp, openMcpLog, restartMcp, saveMcpServers, toast } from "../../actions";
 import { useStore } from "../../store";
 import type { McpServerConfig, McpServerStatus, Settings } from "../../types";
 import { Dialog, Toggle } from "../ui";
@@ -12,6 +12,7 @@ const STATUS_LABEL: Record<McpServerStatus["status"], string> = {
   error: "エラー",
   stopped: "停止",
   disabled: "無効",
+  "needs-login": "ログインが必要",
 };
 
 function linesToRecord(text: string, separator: "=" | ":") {
@@ -173,11 +174,20 @@ function ServerCard({ status, config, servers, onEdit }: {
         />
       </div>
       {status?.error && state === "error" && <div className="server-error">{status.error}</div>}
+      {state === "needs-login" && (
+        <div className="server-login">
+          <span>このコネクタはログインして使います。ブラウザでログインすると、次からは自動でつながります。</span>
+          <button type="button" className="button small primary" onClick={() => void loginMcp(name)}>ログイン</button>
+        </div>
+      )}
       <div className="server-actions">
         <button type="button" className="link-button" disabled={!status?.tools.length} onClick={() => setOpen((o) => !o)}>
           <ChevronRight size={14} className={`chevron${open ? " open" : ""}`} /> ツール {status?.tools.length ?? 0} 個
         </button>
         <span className="spacer" />
+        {status?.signedIn && <button type="button" className="link-button" onClick={async () => {
+          if (await askConfirm("ログアウト", `${name} からログアウトしますか? 次に使うときはログインし直します`)) void loginMcp(name, true);
+        }}>ログアウト</button>}
         <button type="button" className="icon-button small" title="再起動" disabled={!!config.disabled} onClick={() => void restartMcp(name)}><RefreshCw size={15} /></button>
         <button type="button" className="icon-button small" title="ログを開く" onClick={() => void openMcpLog(name)}><FileText size={15} /></button>
         <button type="button" className="icon-button small" title="編集" onClick={onEdit}><Pencil size={15} /></button>

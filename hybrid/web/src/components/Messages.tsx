@@ -348,7 +348,7 @@ function WebSearchBlock({ query, result, active }: { query: string; result?: Wir
   );
 }
 
-function resultText(result: WireBlock | undefined) {
+export function resultText(result: WireBlock | undefined) {
   if (!result) return "";
   if (typeof result.content === "string") return result.content;
   return (result.content ?? []).map((c: WireBlock) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");
@@ -470,7 +470,7 @@ function resultImages(result: WireBlock | undefined): WireBlock[] {
 
 const CHAT_ID = /chat_id ([0-9a-f-]{36})/;
 const WORKFLOW_ID = /id (wf_[0-9a-f]+)/;
-const ARTIFACT_ID = /id (art_[0-9a-f]+)/;
+export const ARTIFACT_ID = /id (art_[0-9a-f]+)/;
 
 function AgentCard({ block, result, conversationId }: { block: WireBlock; result?: WireBlock; conversationId: string }) {
   const title = block.input?.title ?? "サブエージェント";

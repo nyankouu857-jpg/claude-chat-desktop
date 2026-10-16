@@ -151,6 +151,7 @@ sealed class ConsolePlatform(string trashDir, string exportsDir) : IPlatform
     public string? OpenChatWindow(string conversationId) => "開発用のホストでは別の窓を開けません";
     // 一度も成功しないと設定を保存できないので、受け付けたことにする
     public string? SetQuickEntryHotkey(string hotkey) => null;
+    public Task<string?> HtmlToPdfAsync(string htmlPath, string pdfPath) => Task.FromResult<string?>("開発用のホストでは PDF にできません。HTML で書き出してください");
 
     // ごみ箱の代わり
     public void MoveToTrash(string path)

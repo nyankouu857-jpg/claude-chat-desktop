@@ -35,6 +35,8 @@ public interface IPlatform
     Task<string?> CaptureScreenAsync(CancellationToken cancellationToken);
     // 会話を別の窓で開く。できなかったら理由を返す
     string? OpenChatWindow(string conversationId);
+    // HTML のファイルを PDF にする。できなかったら理由を返す
+    Task<string?> HtmlToPdfAsync(string htmlPath, string pdfPath);
     // 入力の小窓を出すキーを登録し直す。空なら外す。ほかのアプリが使っているなどで登録できなかったら理由を返す
     string? SetQuickEntryHotkey(string hotkey);
 }
@@ -105,7 +107,7 @@ public sealed class AppHost : IAsyncDisposable
         workflows = new WorkflowRunner(hub, settings, conversations, events);
         hub.WorkflowCharged = workflows.Charge;
         scheduler = new Scheduler(paths, hub, conversations, events);
-        mcp = new McpHub(paths);
+        mcp = new McpHub(paths) { OAuth = new McpOAuth(paths, protector) { OpenBrowser = platform.OpenPath } };
         terminal = new TerminalToolProvider(settings);
         bridge = new BrowserBridge(settings, secrets);
         browser = new BrowserToolProvider(settings, paths, bridge, platform);
@@ -225,6 +227,7 @@ public sealed class AppHost : IAsyncDisposable
         "chat.compact" => CompactAsync(Str(p, "conversationId"), (string?)p["instructions"]),
         "chat.btw" => BtwAsync(Str(p, "conversationId"), Str(p, "question")),
         "chat.export" => ExportAsync(Str(p, "conversationId")),
+        "chat.saveExport" => SaveExportAsync(Str(p, "conversationId"), Str(p, "format"), Str(p, "html")),
         "chat.rewind" => RewindAsync(Str(p, "conversationId"), (int?)p["messageIndex"] ?? throw new InvalidOperationException("messageIndex がありません"), (bool?)p["restoreFiles"] == true),
         "chat.rewindInfo" => RewindInfoAsync(Str(p, "conversationId")),
         "chat.switchBranch" => SwitchBranchAsync(Str(p, "conversationId"), (int?)p["index"] ?? -1, (int?)p["version"] ?? -1),
@@ -243,7 +246,12 @@ public sealed class AppHost : IAsyncDisposable
         "styles.save" => SaveStyleAsync((string?)p["id"], Str(p, "name"), Str(p, "text")),
         "styles.delete" => DeleteStyleAsync(Str(p, "id")),
         "styles.generate" => GenerateStyleAsync(Str(p, "request")),
-        "commands.expand" => ExpandCommandAsync(Str(p, "name"), (string?)p["args"] ?? ""),
+        "commands.expand" => ExpandCommandAsync(Str(p, "name"), (string?)p["args"] ?? "", p["values"] as JsonObject),
+        "commands.get" => Task.FromResult<JsonNode?>(extensions.GetCommand(Str(p, "name")) is { } found
+            ? new JsonObject { ["name"] = found.Name, ["description"] = found.Description, ["body"] = found.Body }
+            : null),
+        "commands.save" => CommandsChangedAsync(() => extensions.SaveCommand(Str(p, "name"), (string?)p["description"] ?? "", Str(p, "body"), (string?)p["previousName"])),
+        "commands.delete" => CommandsChangedAsync(() => extensions.DeleteCommand(Str(p, "name"))),
         "schedules.list" => ListSchedulesAsync(),
         "schedules.save" => SaveScheduleAsync(p),
         "schedules.delete" => DeleteScheduleAsync(Str(p, "id")),
@@ -266,6 +274,7 @@ public sealed class AppHost : IAsyncDisposable
         "mcp.list" => Task.FromResult<JsonNode?>(mcp.Describe()),
         "mcp.save" => SaveMcpAsync(p),
         "mcp.restart" => RestartMcpAsync(Str(p, "name")),
+        "mcp.login" => McpLoginAsync(Str(p, "name"), (bool?)p["logout"] == true),
         "mcp.openLog" => OpenAsync(mcp.LogPath(Str(p, "name"))),
         "permissions.revoke" => RevokePermissionAsync(Str(p, "apiName")),
         "usage.local" => LocalUsageAsync(),
@@ -646,6 +655,7 @@ public sealed class AppHost : IAsyncDisposable
         // 親のフォルダを子と共有しているので、消すのは親を消したときだけ
         if (deleting is not null) await sessionFiles.DeleteFolderAsync(deleting);
         if (await secrets.GetAsync(SecretStore.ApiKey) is { } apiKey) await uploads.ReleaseAsync(hub.GetClient(apiKey), id);
+        uploads.DeleteOriginals(id);
         hub.Forget(id);
         checkpoints.Forget(id);
         Emit("conversations.changed", null);
@@ -704,6 +714,7 @@ public sealed class AppHost : IAsyncDisposable
         await conversations.SaveAsync(fork);
         conversations.Adopt(fork);
         await uploads.ShareAsync(source.Id, fork.Id);
+        uploads.CopyOriginals(source.Id, fork.Id);
         await sessionFiles.CopyAsync(source, fork);
         Emit("conversations.changed", null);
         return fork.ToWire();
@@ -919,6 +930,16 @@ public sealed class AppHost : IAsyncDisposable
     // UserPromptSubmit フックが止めたら送らない。返した文字は Claude への補足として添える
     async Task<JsonNode> PrepareContentAsync(Conversation conversation, JsonNode content)
     {
+        // 画面は Word や Excel の元のファイルを original に付けて送ってくる。API には渡せない項目なので、取っておいて外す
+        foreach (var block in (content as JsonArray ?? []).OfType<JsonObject>())
+        {
+            if (block["original"] is not JsonValue original) continue;
+            block.Remove("original");
+            if ((string?)block["title"] is { } title && (string?)block["source"]?["data"] is { } text && (string?)original is { } data)
+            {
+                await uploads.KeepOriginalAsync(conversation, title, text, Convert.FromBase64String(data));
+            }
+        }
         var outcome = await hooks.RunUserPromptSubmitAsync(conversation, WireText.Of(content));
         if (outcome.Blocked) throw new InvalidOperationException($"UserPromptSubmit フックが送信を止めました: {outcome.Message}");
         if (outcome.Message is not { } extra) return content;
@@ -1162,6 +1183,32 @@ public sealed class AppHost : IAsyncDisposable
         return new JsonObject { ["path"] = path };
     }
 
+    // 画面が組み立てた HTML を書き出す。PDF は一度 HTML に書いてから変える
+    async Task<JsonNode?> SaveExportAsync(string conversationId, string format, string html)
+    {
+        if (format is not ("html" or "pdf")) throw new InvalidOperationException("書き出しの形式が不明です");
+        var conversation = await RequireConversationAsync(conversationId);
+        Directory.CreateDirectory(paths.ExportsDir);
+        var stem = Path.Combine(paths.ExportsDir, $"{FileNameOf(conversation.Title)}-{DateTime.Now:yyyyMMdd-HHmmss}");
+        if (format == "html")
+        {
+            await File.WriteAllTextAsync(stem + ".html", html, new UTF8Encoding(false));
+            return new JsonObject { ["path"] = stem + ".html" };
+        }
+        var temp = Path.Combine(paths.CacheDir, $"export-{Guid.NewGuid():N}.html");
+        Directory.CreateDirectory(paths.CacheDir);
+        await File.WriteAllTextAsync(temp, html, new UTF8Encoding(false));
+        try
+        {
+            if (await platform.HtmlToPdfAsync(temp, stem + ".pdf") is { } problem) throw new InvalidOperationException(problem);
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+        return new JsonObject { ["path"] = stem + ".pdf" };
+    }
+
     static string FileNameOf(string title)
     {
         var cleaned = string.Concat(title.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)).Trim().TrimEnd('.');
@@ -1335,10 +1382,23 @@ public sealed class AppHost : IAsyncDisposable
     }
 
     // 自作コマンドと Skills の本文を、送る文に展開する
-    Task<JsonNode?> ExpandCommandAsync(string name, string args)
+    Task<JsonNode?> CommandsChangedAsync(Action change)
+    {
+        change();
+        return Task.FromResult<JsonNode?>(ExtensionsView());
+    }
+
+    static readonly System.Text.RegularExpressions.Regex CommandBlank = new(@"\{\{\s*([^{}\n]+?)\s*\}\}");
+
+    Task<JsonNode?> ExpandCommandAsync(string name, string args, JsonObject? values)
     {
         var command = extensions.ListCommands().FirstOrDefault(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException($"/{name} というコマンドはありません");
+        // {{対象}} のような空欄は、使うときに画面で聞いた値で埋める。聞いていない空欄はそのまま残す
+        var filled = command.Kind == "command" && values is not null
+            ? CommandBlank.Replace(command.Body, m => (string?)values[m.Groups[1].Value] ?? m.Value)
+            : command.Body;
+        command = command with { Body = filled };
         var body = command.Body.Contains("$ARGUMENTS")
             ? command.Body.Replace("$ARGUMENTS", args)
             : args.Length > 0 ? $"{command.Body}\n\nARGUMENTS: {args}" : command.Body;
@@ -1466,6 +1526,13 @@ public sealed class AppHost : IAsyncDisposable
     async Task<JsonNode?> RestartMcpAsync(string name)
     {
         await mcp.RestartAsync(name);
+        return mcp.Describe();
+    }
+
+    async Task<JsonNode?> McpLoginAsync(string name, bool logout)
+    {
+        if (logout) await mcp.LogoutAsync(name);
+        else await mcp.LoginAsync(name);
         return mcp.Describe();
     }
 

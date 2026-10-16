@@ -1,6 +1,6 @@
 import { LoaderCircle, Square } from "lucide-react";
 import { useEffect, useState } from "react";
-import { answerConfirm, btw, generateStyle, getStyle, navigate, rewind, rewindTurns, saveFolder, saveStyle, setChoice, stop, stopWorkflow, textOf } from "../actions";
+import { answerBlanks, answerConfirm, btw, generateStyle, getStyle, navigate, rewind, rewindTurns, saveFolder, saveStyle, setChoice, stop, stopWorkflow, textOf } from "../actions";
 import { allCommands } from "../commands";
 import { getState, setState, useStore, type DialogState } from "../store";
 import type { Folder } from "../types";
@@ -210,12 +210,39 @@ function ConfirmDialog({ dialog }: { dialog: Extract<DialogState, { kind: "confi
   );
 }
 
+function BlanksDialog({ dialog }: { dialog: Extract<DialogState, { kind: "blanks" }> }) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const ready = dialog.blanks.every((b) => values[b]?.trim());
+  return (
+    <Dialog
+      title={`/${dialog.command}`}
+      onClose={() => answerBlanks(null)}
+      footer={
+        <>
+          <button type="button" className="button ghost" onClick={() => answerBlanks(null)}>キャンセル</button>
+          <button type="button" className="button primary" disabled={!ready} onClick={() => answerBlanks(values)}>送る</button>
+        </>
+      }
+    >
+      <div className="blank-fields">
+        {dialog.blanks.map((blank, i) => (
+          <label key={blank} className="field">
+            <span className="field-label">{blank}</span>
+            <textarea className="input" rows={2} autoFocus={i === 0} value={values[blank] ?? ""} onChange={(e) => setValues({ ...values, [blank]: e.target.value })} />
+          </label>
+        ))}
+      </div>
+    </Dialog>
+  );
+}
+
 const SHORTCUTS: [string, string][] = [
   ["Ctrl + Shift + O", "新しいチャット"],
   ["Ctrl + K", "チャットを検索"],
   ["Ctrl + F", "開いている会話の中を探す"],
   ["Ctrl + Shift + S", "サイドバーを開く・閉じる"],
   ["Ctrl + /", "ショートカットの一覧"],
+  ["Ctrl + プラス / マイナス / 0", "表示を拡大 / 縮小 / 元に戻す"],
   ["Esc", "応答を止める (入力欄で)"],
   ["Enter / Shift + Enter", "送信 / 改行"],
   ["/", "コマンドの候補"],
@@ -321,6 +348,7 @@ export function GlobalDialog() {
     case "help": return <HelpDialog />;
     case "folder": return <FolderDialog key={dialog.folderId ?? "new"} dialog={dialog} />;
     case "confirm": return <ConfirmDialog dialog={dialog} />;
+    case "blanks": return <BlanksDialog dialog={dialog} />;
     case "shortcuts": return <ShortcutsDialog />;
     case "style": return <StyleDialog key={dialog.styleId ?? "new"} dialog={dialog} />;
   }

@@ -50,7 +50,8 @@ export type DialogState =
   | { kind: "folder"; folderId?: string }
   | { kind: "shortcuts" }
   | { kind: "style"; styleId?: string }
-  | { kind: "confirm"; title: string; message: string; confirmLabel: string };
+  | { kind: "confirm"; title: string; message: string; confirmLabel: string }
+  | { kind: "blanks"; command: string; blanks: string[] };
 
 export interface AppState {
   ready: boolean;

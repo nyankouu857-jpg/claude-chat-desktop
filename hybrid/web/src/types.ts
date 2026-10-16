@@ -256,8 +256,9 @@ export interface McpServerStatus {
   name: string;
   kind: "local" | "remote";
   target: string;
-  status: "starting" | "running" | "error" | "stopped" | "disabled";
+  status: "starting" | "running" | "error" | "stopped" | "disabled" | "needs-login";
   error?: string;
+  signedIn?: boolean;
   tools: McpTool[];
 }
 

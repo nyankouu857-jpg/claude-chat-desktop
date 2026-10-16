@@ -24,6 +24,20 @@ public sealed class Uploads(AppPaths paths)
 
     readonly SemaphoreSlim gate = new(1, 1);
     string RegistryPath => Path.Combine(paths.DataDir, "uploads.json");
+    // Word や Excel の元のファイル。履歴には取り出した文字だけを持ち、コード実行を使うときだけこれを渡す
+    string OriginalsDir(string conversationId) => Path.Combine(paths.DataDir, "attachments", conversationId);
+
+    static readonly Dictionary<string, string> OfficeTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [".docx"] = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        [".xlsx"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        [".pptx"] = "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        [".odt"] = "application/vnd.oasis.opendocument.text",
+        [".ods"] = "application/vnd.oasis.opendocument.spreadsheet",
+        [".odp"] = "application/vnd.oasis.opendocument.presentation",
+        [".rtf"] = "application/rtf",
+        [".epub"] = "application/epub+zip",
+    };
 
     // 中身のハッシュ -> 上げたファイル
     async Task<Dictionary<string, Entry>> LoadAsync()
@@ -80,6 +94,87 @@ public sealed class Uploads(AppPaths paths)
             used.Add(fileId);
         }
         return used;
+    }
+
+    static string TextHashOf(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..32];
+
+    // 画面から届いた元のファイルを、取り出した文字と結び付けて取っておく。シークレットチャットは残さない
+    public async Task KeepOriginalAsync(Conversation conversation, string title, string text, byte[] original)
+    {
+        var extension = Path.GetExtension(title);
+        if (conversation.Incognito || !OfficeTypes.ContainsKey(extension)) return;
+        var dir = OriginalsDir(conversation.Id);
+        Directory.CreateDirectory(dir);
+        await File.WriteAllBytesAsync(Path.Combine(dir, TextHashOf(text) + extension.ToLowerInvariant()), original);
+    }
+
+    // コード実行を使う回は、文字にした Word や Excel を元のファイルに替えてコンテナに置く。表の形や数式、書式のまま扱える
+    public async Task<List<string>> SubstituteOfficeAsync(AnthropicClient client, Conversation conversation, List<JsonObject> messages, CancellationToken cancellationToken)
+    {
+        var used = new List<string>();
+        var dir = OriginalsDir(conversation.Id);
+        if (conversation.Incognito || !Directory.Exists(dir)) return used;
+        foreach (var content in messages.Select(m => m["content"]).OfType<JsonArray>())
+        {
+            for (var i = 0; i < content.Count; i++)
+            {
+                if (content[i] is not JsonObject block || (string?)block["type"] != "document" || block["source"] is not JsonObject source
+                    || (string?)source["type"] != "text" || (string?)block["title"] is not { } title || (string?)source["data"] is not { } text) continue;
+                var extension = Path.GetExtension(title).ToLowerInvariant();
+                if (!OfficeTypes.TryGetValue(extension, out var mediaType)) continue;
+                var path = Path.Combine(dir, TextHashOf(text) + extension);
+                if (!File.Exists(path)) continue;
+                var bytes = await File.ReadAllBytesAsync(path, cancellationToken);
+                var hash = Convert.ToHexString(SHA256.HashData(bytes));
+                var fileId = await FileIdAsync(hash, conversation.Id);
+                if (fileId is null)
+                {
+                    try
+                    {
+                        BinaryContent body = bytes;
+                        body = body with { FileName = Path.GetFileName(title), ContentType = new MediaTypeHeaderValue(mediaType) };
+                        fileId = (await client.Files.Upload(new FileUploadParams { File = body }, cancellationToken)).ID;
+                    }
+                    catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        // 上げられなければ、これまでどおり文字で渡す
+                        continue;
+                    }
+                    await RememberAsync(hash, fileId, conversation.Id);
+                }
+                content[i] = new JsonObject { ["type"] = "container_upload", ["file_id"] = fileId };
+                content.Insert(i + 1, new JsonObject { ["type"] = "text", ["text"] = $"添付の「{title}」は、元のファイルのままコード実行の環境に置きました。中身はコードで開いて読んでください。" });
+                i++;
+                used.Add(fileId);
+            }
+        }
+        return used;
+    }
+
+    public void DeleteOriginals(string conversationId)
+    {
+        try
+        {
+            var dir = OriginalsDir(conversationId);
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+        catch (IOException)
+        {
+            // 消せなくても会話の削除は止めない。残るのは元のファイルの写しだけ
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    // 分けたチャットでも、コード実行で元のファイルを使えるようにする
+    public void CopyOriginals(string fromId, string toId)
+    {
+        var from = OriginalsDir(fromId);
+        if (!Directory.Exists(from)) return;
+        var to = OriginalsDir(toId);
+        Directory.CreateDirectory(to);
+        foreach (var file in Directory.GetFiles(from)) File.Copy(file, Path.Combine(to, Path.GetFileName(file)), true);
     }
 
     async Task<string?> FileIdAsync(string hash, string conversationId)

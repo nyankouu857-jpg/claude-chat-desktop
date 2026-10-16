@@ -95,6 +95,38 @@ public sealed partial class Extensions(AppPaths paths, SettingsStore settings)
         return result;
     }
 
+    string CommandPath(string name)
+    {
+        if (!IsSafeName(name)) throw new InvalidOperationException("コマンドの名前は英数字と - _ だけにしてください");
+        return Path.Combine(paths.CommandsDir, name + ".md");
+    }
+
+    public CommandInfo? GetCommand(string name)
+    {
+        var path = CommandPath(name);
+        if (!File.Exists(path)) return null;
+        var (fields, body) = Parse(File.ReadAllText(path));
+        return new CommandInfo(name, fields.GetValueOrDefault("description") ?? "", body, "command");
+    }
+
+    // 画面で作った自作コマンドも、手で書いたものと同じ形のファイルにする
+    public void SaveCommand(string name, string description, string body, string? previousName)
+    {
+        var path = CommandPath(name);
+        if (previousName is not null && !previousName.Equals(name, StringComparison.OrdinalIgnoreCase) && File.Exists(path)) throw new InvalidOperationException($"/{name} はもうあります");
+        Directory.CreateDirectory(paths.CommandsDir);
+        // 説明に改行があると front matter が崩れる
+        var line = description.ReplaceLineEndings(" ").Trim();
+        File.WriteAllText(path, line.Length > 0 ? $"---\ndescription: {line}\n---\n{body.TrimEnd()}\n" : body.TrimEnd() + "\n");
+        if (previousName is not null && !previousName.Equals(name, StringComparison.OrdinalIgnoreCase)) DeleteCommand(previousName);
+    }
+
+    public void DeleteCommand(string name)
+    {
+        var path = CommandPath(name);
+        if (File.Exists(path)) File.Delete(path);
+    }
+
     const int MaxSkillFiles = 500;
     const long MaxSkillBytes = 50L * 1024 * 1024;
 

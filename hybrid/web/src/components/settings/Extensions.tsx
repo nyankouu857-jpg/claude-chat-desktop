@@ -1,9 +1,9 @@
-import { FolderOpen, Plus, RefreshCw, Trash, Upload } from "lucide-react";
+import { FolderOpen, Pencil, Plus, RefreshCw, Trash, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { importSkill, openPath, refreshExtensions, saveHooks, toast, updateSettings } from "../../actions";
+import { askConfirm, blanksOf, deleteCommand, getCommand, importSkill, openPath, refreshExtensions, saveCommand, saveHooks, toast, updateSettings } from "../../actions";
 import { useStore } from "../../store";
 import type { HookEntry, Settings } from "../../types";
-import { NumberField, Toggle } from "../ui";
+import { Dialog, NumberField, Toggle } from "../ui";
 import { Section } from "./Settings";
 
 const HOOK_EVENTS: { id: string; label: string; hint: string; matcher: boolean }[] = [
@@ -35,7 +35,51 @@ function HookList({ event, entries, onChange }: { event: (typeof HOOK_EVENTS)[nu
   );
 }
 
+type CommandDraft = { name: string; description: string; body: string; previousName?: string };
+
+function CommandDialog({ initial, onClose }: { initial: CommandDraft; onClose: () => void }) {
+  const [draft, setDraft] = useState(initial);
+  const validName = /^[A-Za-z0-9_-]+$/.test(draft.name);
+  const blanks = blanksOf(draft.body);
+  return (
+    <Dialog
+      title={initial.previousName ? `/${initial.previousName} を編集` : "自作コマンドを作る"}
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="button ghost" onClick={onClose}>キャンセル</button>
+          <button type="button" className="button primary" disabled={!validName || !draft.body.trim()} onClick={async () => {
+            if (await saveCommand(draft)) {
+              toast("保存しました");
+              onClose();
+            }
+          }}>保存</button>
+        </>
+      }
+    >
+      <label className="field">
+        <span className="field-label">名前</span>
+        <input className="input" autoFocus value={draft.name} placeholder="review" onChange={(e) => setDraft({ ...draft, name: e.target.value.trim() })} />
+        <span className="field-hint">入力欄で /{draft.name || "名前"} と打って使います。英数字と - _ だけ使えます</span>
+      </label>
+      <label className="field">
+        <span className="field-label">説明</span>
+        <input className="input" value={draft.description} placeholder="コードをレビューしてもらう" onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+      </label>
+      <label className="field">
+        <span className="field-label">送る文</span>
+        <textarea className="input" rows={8} value={draft.body} placeholder={"{{対象}} を読んで、問題点と直し方を挙げてください。"} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
+        <span className="field-hint">
+          {"{{対象}}"} のように書いた所は、使うときに中身を聞いて埋めます。$ARGUMENTS はコマンドの後ろに書いた文に置き換わります。
+          {blanks.length > 0 && ` 聞く項目: ${blanks.join("、")}`}
+        </span>
+      </label>
+    </Dialog>
+  );
+}
+
 export function Extensions({ settings }: { settings: Settings }) {
+  const [editing, setEditing] = useState<CommandDraft | null>(null);
   const commands = useStore((s) => s.extensions.commands);
   const [hooks, setHooks] = useState(settings.hooks);
   useEffect(() => setHooks(settings.hooks), [settings.hooks]);
@@ -75,13 +119,27 @@ export function Extensions({ settings }: { settings: Settings }) {
         </div>
       </Section>
 
-      <Section title="自作コマンド" description={<><code>config/commands/名前.md</code> に送りたい文を書くと、入力欄の <code>/名前</code> で呼べます。<code>$ARGUMENTS</code> と書いた所はコマンドの後ろに書いた文に置き換わります。</>}>
+      <Section title="自作コマンド" description={<>よく送る文を登録しておくと、入力欄の <code>/名前</code> で呼べます。<code>{"{{対象}}"}</code> のような空欄は使うときに聞いて埋め、<code>$ARGUMENTS</code> はコマンドの後ろに書いた文に置き換わります。<code>config/commands/名前.md</code> に手で書いても使えます。</>}>
         {custom.length === 0 ? <div className="empty-note">まだありません</div> : (
           <div className="list-card">
-            {custom.map((c) => <div key={c.name} className="list-row"><code>/{c.name}</code><span className="field-hint">{c.description}</span></div>)}
+            {custom.map((c) => (
+              <div key={c.name} className="list-row">
+                <code>/{c.name}</code>
+                <span className="field-hint">{c.description}</span>
+                <span className="spacer" />
+                <button type="button" className="icon-button small" title="編集" onClick={async () => {
+                  const command = await getCommand(c.name);
+                  if (command) setEditing({ ...command, previousName: c.name });
+                }}><Pencil size={14} /></button>
+                <button type="button" className="icon-button small" title="削除" onClick={async () => {
+                  if (await askConfirm("自作コマンドを削除", `/${c.name} を削除しますか?`)) await deleteCommand(c.name);
+                }}><Trash size={14} /></button>
+              </div>
+            ))}
           </div>
         )}
         <div className="button-row">
+          <button type="button" className="button" onClick={() => setEditing({ name: "", description: "", body: "" })}><Plus size={14} /> 新しいコマンド</button>
           <button type="button" className="button" onClick={() => void openPath("commands")}><FolderOpen size={14} /> commands のフォルダを開く</button>
         </div>
       </Section>
@@ -98,6 +156,7 @@ export function Extensions({ settings }: { settings: Settings }) {
           }}>フックを保存</button>
         </div>
       </Section>
+      {editing && <CommandDialog key={editing.previousName ?? "new"} initial={editing} onClose={() => setEditing(null)} />}
     </>
   );
 }

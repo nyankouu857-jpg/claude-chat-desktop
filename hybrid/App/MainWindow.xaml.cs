@@ -164,6 +164,7 @@ public partial class MainWindow : Window
         });
         platform.ChatWindowOpener = OpenChatWindow;
         platform.QuickEntryOpener = ToggleQuickEntry;
+        platform.WebViewEnvironment = () => environment;
         await host.StartAsync();
         core.Navigate($"{AppOrigin}/index.html");
     }
