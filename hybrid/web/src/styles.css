@@ -85,7 +85,26 @@ code { font-family: var(--font-mono); }
 
 .boot, .loading { display: grid; place-items: center; height: 100%; color: var(--text-300); }
 
-.app { display: flex; height: 100vh; overflow: hidden; }
+/* 枠の無い窓では、題名の帯もアプリの色で描く。左はサイドバー、右は本文と同じ色にして境目を見せない */
+.app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+.app-body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.app > .boot { flex: 1; }
+.titlebar { display: flex; height: 32px; flex-shrink: 0; user-select: none; app-region: drag; }
+.titlebar-side { width: 288px; flex-shrink: 0; background: var(--bg-200); border-right: 0.5px solid var(--border); transition: width 0.15s ease; }
+.titlebar-side.collapsed { width: 56px; }
+.titlebar-main { flex: 1; background: var(--bg-100); }
+.window-controls { display: flex; background: var(--bg-100); app-region: no-drag; }
+.window-controls button {
+  width: 46px; height: 32px; display: grid; place-items: center; border-radius: 0; color: var(--text-200);
+}
+.window-controls button:hover { background: rgba(128, 128, 128, 0.18); }
+.window-controls button:active { background: rgba(128, 128, 128, 0.28); }
+.window-controls button.close:hover { background: #c42b1c; color: #fff; }
+.window-controls button.close:active { background: #b1271a; color: #fff; }
+/* 帯のすぐ下の見出しの空いた所も、つかんで動かせるようにする */
+.frameless .chat-header, .frameless .sidebar-header { app-region: drag; }
+.frameless .chat-header :is(button, a, input, select, label, [role="button"], [role="link"]),
+.frameless .sidebar-header :is(button, a, input, select, label, [role="button"]) { app-region: no-drag; }
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg-100); }
 .spacer { flex: 1; }
 

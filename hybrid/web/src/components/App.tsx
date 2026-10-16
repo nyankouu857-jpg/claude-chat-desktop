@@ -13,6 +13,7 @@ import { Recents } from "./Recents";
 import { InfoPanel } from "./InfoPanel";
 import { SettingsOverlay } from "./settings/Settings";
 import { Sidebar } from "./Sidebar";
+import { FRAMELESS, TitleBar } from "./TitleBar";
 
 function useTheme() {
   const theme = useStore((s) => s.settings?.appearance.theme ?? "system");
@@ -69,11 +70,19 @@ export function App() {
   useShortcuts();
 
   if (!ready) {
-    return <div className="boot"><LoaderCircle className="spin" /></div>;
+    // 枠の無い窓なので、起動に手間取っても動かしたり閉じたりできるよう帯は先に出す
+    return (
+      <div className={`app${FRAMELESS ? " frameless" : ""}`}>
+        {FRAMELESS && <TitleBar />}
+        <div className="boot"><LoaderCircle className="spin" /></div>
+      </div>
+    );
   }
 
   return (
-    <div className="app">
+    <div className={`app${FRAMELESS ? " frameless" : ""}`}>
+      {FRAMELESS && <TitleBar />}
+      <div className="app-body">
       {!SINGLE_CHAT && <Sidebar />}
       <main className="main">
         {view.name === "new" && <NewChat />}
@@ -86,6 +95,7 @@ export function App() {
       </main>
       {showArtifact && <ArtifactPanel />}
       {showInfo && view.name === "chat" && <InfoPanel conversationId={view.id} />}
+      </div>
       <SettingsOverlay />
       <GlobalDialog />
       <div className="toasts">

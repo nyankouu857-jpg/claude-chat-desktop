@@ -40,6 +40,7 @@ public partial class MainWindow : Window
             .Where(n => n.StartsWith("web/"))
             .ToDictionary(n => n["web/".Length..].Replace('\\', '/'), n => n);
         InitializeComponent();
+        Frameless.Apply(this);
         var dark = PrefersDarkTheme();
         Background = new SolidColorBrush(dark ? Color.FromRgb(0x26, 0x26, 0x24) : Color.FromRgb(0xFA, 0xF9, 0xF5));
         Browser.DefaultBackgroundColor = dark ? System.Drawing.Color.FromArgb(0x26, 0x26, 0x24) : System.Drawing.Color.FromArgb(0xFA, 0xF9, 0xF5);
@@ -132,7 +133,7 @@ public partial class MainWindow : Window
         }
 
         var core = Browser.CoreWebView2;
-        Configure(core);
+        Configure(core, this);
         views.Add(core);
 
         host = new AppHost(paths, new DpapiProtector(), platform, json =>
@@ -160,9 +161,12 @@ public partial class MainWindow : Window
     }
 
     // メインの窓と別の窓の WebView に、同じ制限と通り道を付ける
-    void Configure(CoreWebView2 core)
+    void Configure(CoreWebView2 core, Window owner)
     {
         core.Settings.IsStatusBarEnabled = false;
+        // 画面の CSS の app-region: drag で窓をつかんで動かし、ダブルクリックで最大化できるようにする
+        core.Settings.IsNonClientRegionSupportEnabled = true;
+        Frameless.Attach(owner, core);
 #if DEBUG
         core.Settings.AreDevToolsEnabled = true;
 #else
@@ -214,6 +218,8 @@ public partial class MainWindow : Window
             // アプリの画面以外から中身を操作させない
             if (!IsAppPage(e.Source)) return;
             var message = e.TryGetWebMessageAsString();
+            // ─ ☐ ✕ などの窓の操作は、押された窓だけで済ませる
+            if (Frameless.TryHandle(owner, message)) return;
             // 重い処理で画面が固まらないよう、受け取ったら UI スレッドから離す
             if (host is { } current) _ = Task.Run(() => current.HandleAsync(message));
         };
@@ -225,7 +231,8 @@ public partial class MainWindow : Window
         if (environment is null || host is null) return "まだ起動の途中です";
         if (!Guid.TryParse(conversationId, out _)) return "チャットの ID が不正です";
         var browser = new Microsoft.Web.WebView2.Wpf.WebView2 { DefaultBackgroundColor = Browser.DefaultBackgroundColor };
-        var chatWindow = new Window { Title = "ClaudeChat", Width = 900, Height = 820, Content = browser, Background = Background, Icon = Icon };
+        var chatWindow = new Window { Title = "ClaudeChat", Width = 900, Height = 820, MinWidth = 520, MinHeight = 420, Content = browser, Background = Background, Icon = Icon };
+        Frameless.Apply(chatWindow);
         CoreWebView2? core = null;
         var closed = false;
         chatWindow.Loaded += async (_, _) =>
@@ -234,7 +241,7 @@ public partial class MainWindow : Window
             // 用意ができる前に閉じられた窓は、捨てた WebView に触らない
             if (closed) return;
             core = browser.CoreWebView2;
-            Configure(core);
+            Configure(core, chatWindow);
             views.Add(core);
             core.Navigate($"{AppOrigin}/index.html?chat={conversationId}");
         };
