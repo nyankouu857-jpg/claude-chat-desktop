@@ -300,8 +300,9 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     mode = conversation.PermissionMode;
                     options = options with { SystemPrompt = rebuild() };
                 }
-                await CompactIfLargeAsync(conversation, options, emit, cancellationToken);
+                // 上限に届いていたら、要約も含めて何も送らない
                 if (await BudgetLimitAsync() is { } limitReached) return new ChatRunResult(ChatStatus.Failed, limitReached);
+                await CompactIfLargeAsync(conversation, options, emit, cancellationToken);
                 if (!costConfirmed && await ConfirmCostAsync(conversation, options, gate, cancellationToken) is { } approved)
                 {
                     if (!approved)
@@ -333,6 +334,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     // 途中まで流れた分も課金されている。捨てる前に記録し、画面の途中の文も消す
                     await RecordInterruptedUsageAsync(conversation, options.Model, streamUsage);
                     streamUsage = null;
+                    // 待っている間に止められても、捨てた途中の文を答えとして残さない
+                    partialText.Clear();
                     emit(new JsonObject { ["type"] = "discard" });
                     var wait = TransientRetryDelays[transientRetries++];
                     Notice(emit, $"API が混み合っているか、接続が切れました。{wait.TotalSeconds:0} 秒待ってやり直します ({transientRetries}/{TransientRetryDelays.Length})");
@@ -348,7 +351,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 {
                     partialText.Clear();
                     streamUsage = null;
-                    await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, "chat", ToWire(message.Usage));
+                    await RecordUsageAsync(conversation, message.Model.Raw() ?? options.Model, "chat", ToWire(message.Usage), options.Batch);
                     var category = (string?)ToWire(message)["stop_details"]?["category"];
                     Notice(emit, category is null ? "Claude がこのリクエストへの応答を断りました" : $"Claude がこのリクエストへの応答を断りました ({category})");
                     emit(new JsonObject { ["type"] = "discard" });
@@ -619,16 +622,21 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             case "acceptEdits" when spec.Source == FileToolProvider.Source && spec.Name is not ("create_worktree" or "exit_worktree"):
                 return null;
         }
+        var preApproved = spec.AutoApprove || readOnlyCall || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")
+            || (spec.ApiName is TerminalToolProvider.RunCommandApiName or TerminalToolProvider.StartBackgroundApiName
+                && TerminalToolProvider.MatchesRule((string?)input["command"] ?? "", current.Terminal.AllowedCommands));
         if (conversation.ParentId is not null && current.Agents.AutoApproveChildren)
         {
             // 計画を抜ける許可までは子に出させない。計画は親が受け取ってユーザーに見せる
-            return spec.ApiName == PlanToolProvider.ExitPlanMode
-                ? "サブエージェントは計画モードを抜けられません。計画は最後のメッセージにまとめて親に返してください"
-                : null;
+            if (spec.ApiName == PlanToolProvider.ExitPlanMode) return "サブエージェントは計画モードを抜けられません。計画は最後のメッセージにまとめて親に返してください";
+            // 起動するときに人が 1 回確かめている (ワークフローは run_workflow の確認)。作業中は人に聞かない
+            if (preApproved || conversation.PermissionMode != "auto") return null;
+            // auto の子は確認役に見てもらい、止められたものは人に聞かずに断る
+            if (AlwaysAskInAuto(spec)) return $"サブエージェントの「自動で判断」では {spec.ApiName} は使えません。必要なら最後の報告で親に頼んでください";
+            var childVerdict = await reviewer.ReviewAsync(conversation, spec, input, await tools.DescribeTargetAsync(spec.ApiName, input, options.EnabledSources, cancellationToken), cancellationToken);
+            return childVerdict.Allowed ? null : $"自動の判定で止めました: {childVerdict.Reason}。必要なら最後の報告で親に頼んでください";
         }
-        if (spec.AutoApprove || readOnlyCall || (spec.AllowAlways && current.ToolPermissions.GetValueOrDefault(spec.ApiName) == "always")) return null;
-        if (spec.ApiName is TerminalToolProvider.RunCommandApiName or TerminalToolProvider.StartBackgroundApiName
-            && TerminalToolProvider.MatchesRule((string?)input["command"] ?? "", current.Terminal.AllowedCommands)) return null;
+        if (preApproved) return null;
 
         string? autoReason = null;
         if (conversation.PermissionMode == "auto" && !AlwaysAskInAuto(spec))
@@ -887,12 +895,19 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             while (batch.ProcessingStatus.Raw() != "ended")
             {
                 await Task.Delay(BatchPollInterval, cancellationToken);
-                batch = await client.Beta.Messages.Batches.Retrieve(batch.ID, new(), cancellationToken);
+                try
+                {
+                    batch = await client.Beta.Messages.Batches.Retrieve(batch.ID, new(), cancellationToken);
+                }
+                catch (Exception e) when (IsTransient(e))
+                {
+                    // 様子を聞けなかっただけでバッチは進んでいる。出し直すと二重に課金されるので、同じバッチを待ち続ける
+                }
             }
         }
-        catch (OperationCanceledException)
+        catch
         {
-            // 止めたあとまで処理と課金が進まないように
+            // 止めたときや諦めたとき、終わっていないバッチの処理と課金を進めない
             try
             {
                 await client.Beta.Messages.Batches.Cancel(batch.ID, new(), CancellationToken.None);
@@ -902,17 +917,30 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             }
             throw;
         }
-        await foreach (var response in client.Beta.Messages.Batches.ResultsStreaming(batch.ID, new(), cancellationToken))
+        // 結果を受け取りそこねても、出し直すと二重に課金されるので同じバッチから取り直す
+        for (var attempt = 1; ; attempt++)
         {
-            if (response.Result.TryPickSucceeded(out var succeeded)) return succeeded.Message;
-            if (response.Result.TryPickErrored(out var errored)) throw new InvalidOperationException($"バッチの送信が失敗しました: {Json.ToNode(errored.Error)?["error"]?["message"] ?? Json.ToNode(errored.Error)}");
-            throw new InvalidOperationException("バッチの送信が期限切れか取り消しで終わりました");
+            try
+            {
+                await foreach (var response in client.Beta.Messages.Batches.ResultsStreaming(batch.ID, new(), cancellationToken))
+                {
+                    if (response.Result.TryPickSucceeded(out var succeeded)) return succeeded.Message;
+                    if (response.Result.TryPickErrored(out var errored)) throw new InvalidOperationException($"バッチの送信が失敗しました: {Json.ToNode(errored.Error)?["error"]?["message"] ?? Json.ToNode(errored.Error)}");
+                    throw new InvalidOperationException("バッチの送信が期限切れか取り消しで終わりました");
+                }
+                throw new InvalidOperationException("バッチの結果が空でした");
+            }
+            catch (Exception e) when (IsTransient(e))
+            {
+                // 諦めるときも一時的な失敗として外へ出すと、呼び出し元が新しいバッチを出し直してしまう
+                if (attempt >= TransientRetryDelays.Length) throw new InvalidOperationException($"バッチの結果を受け取れませんでした: {e.Message}");
+                await Task.Delay(TransientRetryDelays[attempt - 1], cancellationToken);
+            }
         }
-        throw new InvalidOperationException("バッチの結果が空でした");
     }
 
     // 今日や今月の合計が上限に届いていたら、その理由
-    async Task<string?> BudgetLimitAsync()
+    public async Task<string?> BudgetLimitAsync()
     {
         var budget = (await settings.GetAsync()).Budget;
         if (budget.DailyLimitUsd <= 0 && budget.MonthlyLimitUsd <= 0) return null;
@@ -930,7 +958,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         var (previous, added) = PromptSize(conversation);
         // キャッシュが残っている会話は、前回までの分が安く読まれる。それ以外は書き込みの単価
         var longCache = UsesLongCache(conversation, options);
-        var warm = await ledger.LastChatRequestAsync(conversation.Id) is { } last && DateTimeOffset.UtcNow - last < (longCache ? LongCacheLifetime : CacheLifetime);
+        var warm = await ledger.LastChatRequestAsync(conversation.Id, options.Model) is { } last && DateTimeOffset.UtcNow - last < (longCache ? LongCacheLifetime : CacheLifetime);
         var cached = warm ? previous : 0;
         var written = previous + added - cached;
         var cost = (await ledger.GetPricingAsync()).Cost(new UsageRecord

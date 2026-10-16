@@ -417,7 +417,10 @@ export async function archiveConversation(id: string, archived: boolean) {
 export async function backupNow() {
   const result = await guard(() => call<{ path: string }>("app.backup"));
   if (result) toast(`バックアップしました: ${result.path}`);
+  return !!result;
 }
+
+export const backupStatus = () => guard(() => call<{ lastSuccessAt: string | null; lastError: string | null }>("app.backupStatus"));
 
 // 応答中に送った文。走り終わっていたら false が返るので、ふつうに送り直す
 export async function interject(conversationId: string, text: string) {
@@ -439,8 +442,11 @@ export async function installUpdate() {
 }
 
 export async function approve(conversationId: string, requestId: string, decision: "once" | "always" | "deny" | "rule", rule?: string) {
+  const pending = getState().live[conversationId]?.approvals.find((a) => a.requestId === requestId);
   updateLive(conversationId, (live) => ({ ...live, approvals: live.approvals.filter((a) => a.requestId !== requestId) }));
-  await guard(() => call("tools.approve", { requestId, decision, rule }));
+  const ok = await guard(async () => { await call("tools.approve", { requestId, decision, rule }); return true; });
+  // 断られたら確認はまだ待っているので、カードを戻す
+  if (!ok && pending) updateLive(conversationId, (live) => ({ ...live, approvals: [...live.approvals, pending] }));
   if (decision === "rule") await updateSettings({});
   // 中身側で権限が書き足されるので、取り消せるように設定を取り直す
   if (decision === "always") await updateSettings({});

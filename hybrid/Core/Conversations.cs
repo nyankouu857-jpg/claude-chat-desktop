@@ -150,6 +150,8 @@ public sealed class Conversation
     // index から後の履歴と、その中で分かれていた版を外して返す
     BranchVersion TakeTail(int index)
     {
+        // 境目の人の発言を差し替えるときだけ塊を使い続けられる。境目の返答をやり直すと、塊のあとに人の発言が無くなって送れない
+        var keepBlock = CompactionBlock is not null && ApiStart == index && index < Messages.Count && IsHumanTurn(Messages[index]);
         var tail = new BranchVersion { Messages = Messages.GetRange(index, Messages.Count - index) };
         Messages.RemoveRange(index, Messages.Count - index);
         foreach (var key in Forks.Keys.Where(k => k > index).ToList())
@@ -157,8 +159,8 @@ public sealed class Conversation
             tail.Forks[key] = Forks[key];
             Forks.Remove(key);
         }
-        // 要約がその先にあったら、要約前から送り直す。塊の要約はその手前までを畳んだものなので、ちょうど境目なら使い続けられる
-        if (ApiStart > index || (ApiStart == index && CompactionBlock is null)) (ApiStart, CompactionBlock) = (0, null);
+        // 要約がその先にあったら、要約前から送り直す
+        if (ApiStart > index || (ApiStart == index && !keepBlock)) (ApiStart, CompactionBlock) = (0, null);
         return tail;
     }
 

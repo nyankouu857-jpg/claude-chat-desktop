@@ -221,6 +221,7 @@ public sealed class Scheduler(AppPaths paths, ChatHub hub, ConversationStore con
         LastRunAt = s.LastRunAt,
         ExpiresAt = s.ExpiresAt,
         CreatedAt = s.CreatedAt,
+        Batch = s.Batch,
     };
 
     public void Dispose() => timer?.Dispose();

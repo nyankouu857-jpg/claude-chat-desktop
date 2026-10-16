@@ -1,6 +1,6 @@
 import { ArrowLeft, ExternalLink, FolderOpen, Link2, Maximize2, Minimize2, RefreshCw, TriangleAlert, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { backupNow, checkUpdate, closeSettings, createShortcuts, installUpdate, openPath, openSettings, setSettingsFull, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
+import { askConfirm, backupNow, backupStatus, checkUpdate, closeSettings, createShortcuts, installUpdate, openPath, openSettings, setSettingsFull, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
 import { findBuiltin } from "../../builtins";
 import { LANGUAGES } from "../../languages";
 import { ALL_MODELS, EFFORTS } from "../../models";
@@ -157,7 +157,9 @@ function Updates({ settings }: { settings: Settings }) {
         <Toggle checked={settings.updates.autoInstall} onChange={(v) => void updateSettings({ updates: { autoInstall: v, ...(v ? { checkOnStartup: true } : {}) } })} label="新しい版があれば自動で更新する" />
       </div>
       <div className="settings-actions">
-        {update?.available && <button type="button" className="button primary" disabled={update.installing} onClick={() => void installUpdate()}>{update.installing ? "更新しています..." : "更新して起動し直す"}</button>}
+        {update?.available && <button type="button" className="button primary" disabled={update.installing} onClick={async () => {
+          if (await askConfirm("更新して起動し直しますか?", "新しい版をダウンロードして入れ替え、アプリを起動し直します。応答中のチャットは止まります。", "更新する")) await installUpdate();
+        }}>{update.installing ? "更新しています..." : "更新して起動し直す"}</button>}
         <button type="button" className="button" disabled={checking} onClick={async () => {
           setChecking(true);
           await checkUpdate();
@@ -415,7 +417,10 @@ function Permissions({ settings }: { settings: Settings }) {
 function Backup({ settings }: { settings: Settings }) {
   const backup = settings.backup;
   const [folder, setFolder] = useState(backup.folder);
+  const [status, setStatus] = useState<{ lastSuccessAt: string | null; lastError: string | null } | null>(null);
   useEffect(() => setFolder(backup.folder), [backup.folder]);
+  const refreshStatus = async () => setStatus((await backupStatus()) ?? null);
+  useEffect(() => { void refreshStatus(); }, []);
   return (
     <Section title="自動バックアップ" description="1 日 1 回、設定と会話などのデータ (config と data) を zip にまとめて保存します。巻き戻し用の控えは大きいので入れません。戻すときは zip の中身をアプリのフォルダに上書きしてください。">
       <div className="switch-row">
@@ -425,7 +430,10 @@ function Backup({ settings }: { settings: Settings }) {
         <Toggle checked={backup.enabled} onChange={(v) => void updateSettings({ backup: { enabled: v } })} label="自動でバックアップする" />
       </div>
       <Field label="置き場所 (空ならドキュメントの ClaudeChat-backups。アプリのフォルダの外にしてください)">
-        <input className="input" value={folder} placeholder="例: D:\\Backup\\ClaudeChat" onChange={(e) => setFolder(e.target.value)} onBlur={() => { if (folder !== backup.folder) void updateSettings({ backup: { folder } }); }} />
+        <input className="input" value={folder} placeholder="例: D:\\Backup\\ClaudeChat" onChange={(e) => setFolder(e.target.value)} onBlur={async () => {
+          // 断られた置き場所は入力欄に残さず、保存されている値に戻す
+          if (folder !== backup.folder && !(await updateSettings({ backup: { folder } }))) setFolder(backup.folder);
+        }} />
       </Field>
       <div className="switch-row">
         <div>
@@ -434,8 +442,10 @@ function Backup({ settings }: { settings: Settings }) {
         </div>
         <NumberField value={backup.keep} min={1} max={365} onCommit={(v) => void updateSettings({ backup: { keep: v } })} />
       </div>
+      {status?.lastError && <div className="warning-box"><TriangleAlert size={16} />前回の自動バックアップに失敗しました: {status.lastError}</div>}
+      {status?.lastSuccessAt && <div className="field-hint">このアプリを起動してからの最後のバックアップ: {new Date(status.lastSuccessAt).toLocaleString()}</div>}
       <div className="button-row">
-        <button type="button" className="button" onClick={() => void backupNow()}>今すぐバックアップ</button>
+        <button type="button" className="button" onClick={async () => { await backupNow(); await refreshStatus(); }}>今すぐバックアップ</button>
       </div>
     </Section>
   );

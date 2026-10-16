@@ -17,6 +17,8 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <WebRoot>$(MSBuildProjectDirectory)\..\web</WebRoot>
     <ApplicationIcon>app.ico</ApplicationIcon>
+    <!-- 手元のビルドが latest で上書きされないよう、コミットは CI のビルドにだけ埋め込む -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

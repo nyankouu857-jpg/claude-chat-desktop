@@ -44,14 +44,14 @@ export function Agents({ settings }: { settings: Settings }) {
         <div className="switch-row">
           <div>
             <div>サブエージェントは確認なしで動かす</div>
-            <div className="field-hint">親と話している間に子の確認待ちで止まらないよう、子のツールは承認なしで動き、子からユーザーへの質問もしません。計画モードの制限とフックは子にも効きます。コマンドの実行なども確認なしになるので、気になるときはオフにしてください</div>
+            <div className="field-hint">親と話している間に子の確認待ちで止まらないよう、サブエージェントを始めるときに 1 回だけ確認し、そのあと子のツールは承認なしで動きます。子からユーザーへの質問もしません。「自動で判断」の会話の子は、作業中も確認役が見て、止めたものは人に聞かずに断ります。計画モードの制限とフックは子にも効きます</div>
           </div>
           <Toggle checked={agents.autoApproveChildren} onChange={(v) => void updateSettings({ agents: { autoApproveChildren: v } })} label="サブエージェントは確認なしで動かす" />
         </div>
         <div className="switch-row">
           <div>
             <div>終わったサブエージェントのチャットを消す</div>
-            <div className="field-hint">結果は親に渡し終えているので、うまく終わった子のチャットは一覧から消します。失敗や停止で終わった子は、原因を見られるよう残します</div>
+            <div className="field-hint">結果は親に渡し終えているので、うまく終わった子のチャットは消します。ファイルの書き換えやコマンドなど、読むだけでないツールを使った子は、何をしたか確かめて巻き戻せるよう、消さずにアーカイブします。失敗や停止で終わった子は残します</div>
           </div>
           <Toggle checked={agents.deleteFinishedChildren} onChange={(v) => void updateSettings({ agents: { deleteFinishedChildren: v } })} label="終わったサブエージェントのチャットを消す" />
         </div>

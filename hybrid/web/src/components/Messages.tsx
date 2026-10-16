@@ -184,8 +184,9 @@ function peerHeader(peer: PeerMessage): { icon: ReactNode; title: string } {
   }
 }
 
-// 終わったサブエージェントは自動で消えるので、消えたチャットへのリンクは出さない
-const useChatExists = (id?: string) => useStore((s) => !!id && s.summaries.some((c) => c.id === id));
+// 終わったサブエージェントは自動で消えるので、消えたチャットへのリンクは出さない。
+// シークレットの子は一覧に載らないが消されもしないので、状態が届いていれば開ける
+const useChatExists = (id?: string) => useStore((s) => !!id && (s.summaries.some((c) => c.id === id) || (s.view.name === "chat" && !!s.conversations[s.view.id]?.incognito && id in s.statuses)));
 
 function PeerCard({ peer }: { peer: PeerMessage }) {
   // 作業の依頼と予定は読めないと困るので開いておく
@@ -341,15 +342,30 @@ function resultText(result: WireBlock | undefined) {
 // 確認カードから足せるコマンドのルール。サーバーと同じく、記号の少ない素直なコマンドだけ
 const PLAIN_COMMAND = /^[A-Za-z0-9 _\-./\\:=,+*~'"]+$/;
 
+// サーバーの TerminalToolProvider.Launchers と同じ。別のコードを動かすコマンドは、まったく同じものだけ許す
+const LAUNCHERS = new Set(["pwsh", "powershell", "cmd", "bash", "sh", "zsh", "wsl", "python", "python3", "py", "node", "npx", "pnpx", "bunx", "deno", "bun", "uv", "uvx", "pipx",
+  "ruby", "perl", "php", "java", "start", "start-process", "saps", "invoke-expression", "iex", "invoke-command", "icm", "start-job",
+  "env", "sudo", "runas", "cscript", "wscript", "mshta", "rundll32", "regsvr32", "msiexec", "schtasks", "xargs"]);
+
 function suggestedRule(command: string) {
   const trimmed = command.trim();
   if (!PLAIN_COMMAND.test(trimmed)) return null;
-  // npm test --watch なら「npm test」。1 語だけのコマンドはそのまま
-  return trimmed.split(/\s+/).slice(0, 2).join(" ");
+  const first = trimmed.split(" ")[0].replace(/\\/g, "/").split("/").at(-1)!.replace(/\.[^.]*$/, "").toLowerCase();
+  if (LAUNCHERS.has(first)) return { rule: trimmed, exact: true };
+  // npm test --watch なら「npm test」。空白はサーバーの前方一致と合うよう元のまま切り出す
+  return { rule: trimmed.match(/^\S+(\s+\S+)?/)![0], exact: false };
 }
 
 function ApprovalInput({ approval }: { approval: Approval }) {
   const input = (approval.input ?? {}) as Record<string, any>;
+  if (approval.apiName === "agents__spawn_agent" && typeof input.prompt === "string") {
+    return (
+      <>
+        <pre className="approval-input">{input.prompt}</pre>
+        <div className="approval-desc">許可すると、このサブエージェントは作業中に確認なしでツールを使います (設定の「エージェント」で変えられます)</div>
+      </>
+    );
+  }
   if (approval.source === "files" && (approval.tool === "edit_file" || approval.tool === "write_file")) {
     const preview = <FileChangePreview tool={approval.tool} input={input} />;
     if (preview) return <div className="approval-diff">{preview}</div>;
@@ -404,7 +420,11 @@ function ApprovalCard({ conversationId, approval }: { conversationId: string; ap
       <div className="approval-actions">
         {approval.allowAlways !== false && <button type="button" className="button primary" onClick={() => approve(conversationId, approval.requestId, "always")}>常に許可</button>}
         <button type="button" className={`button${approval.allowAlways === false ? " primary" : ""}`} onClick={() => approve(conversationId, approval.requestId, "once")}>{approval.allowAlways === false ? "許可" : "今回だけ許可"}</button>
-        {rule && <button type="button" className="button" title="設定の「ツールの権限」から外せます" onClick={() => approve(conversationId, approval.requestId, "rule", rule)}>「{rule}」で始まるものは今後確認しない</button>}
+        {rule && (
+          <button type="button" className="button" title="設定の「ツールの権限」から外せます" onClick={() => approve(conversationId, approval.requestId, "rule", rule.rule)}>
+            {rule.exact ? "このコマンドは今後確認しない" : `「${rule.rule}」で始まるものは今後確認しない`}
+          </button>
+        )}
         <button type="button" className="button ghost" onClick={() => approve(conversationId, approval.requestId, "deny")}>拒否</button>
       </div>
       {approval.allowAlways === false && !approval.autoReason && <div className="approval-note">内容によって何でもできる操作なので、毎回確認します</div>}
@@ -445,7 +465,7 @@ function AgentCard({ block, result, conversationId }: { block: WireBlock; result
   const status = useStore((s) => (childId ? s.statuses[childId] : undefined));
   const childExists = useChatExists(childId);
   // 消えるのはうまく終わった子だけ。残っている状態は消える直前の「待機中」なので出さない
-  const discarded = !!result && !childExists && status !== "running" && status !== "waiting";
+  const discarded = !!result && !result.is_error && !childExists && status !== "running" && status !== "waiting";
   return (
     <div className="tool-card agent-card">
       <div className="tool-card-header static">

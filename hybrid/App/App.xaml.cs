@@ -18,6 +18,7 @@ public partial class App : Application
     EventWaitHandle? showRequest;
     // 更新で起動し直したときは、前のプロセスが片付けを終えるまで待つ
     static readonly TimeSpan UpdateHandoverWait = TimeSpan.FromSeconds(30);
+    static readonly TimeSpan ReplacedExeKeep = TimeSpan.FromMinutes(5);
 
     static bool TryAcquire(Mutex mutex, TimeSpan wait)
     {
@@ -52,7 +53,14 @@ public partial class App : Application
             MessageBox.Show(args.Exception.Message, "ClaudeChat", MessageBoxButton.OK, MessageBoxImage.Error);
             args.Handled = true;
         };
-        WindowsPlatform.DeleteReplacedExe();
+        // 新しい版がすぐ落ちたときに前の exe へ戻せるよう、しばらく動いてから消す
+        var cleanup = new System.Windows.Threading.DispatcherTimer { Interval = ReplacedExeKeep };
+        cleanup.Tick += (_, _) =>
+        {
+            cleanup.Stop();
+            WindowsPlatform.DeleteReplacedExe();
+        };
+        cleanup.Start();
         CreateShortcutsOnFirstRun(paths);
         var platform = new WindowsPlatform();
         var background = e.Args.Contains(BackgroundFlag);
@@ -124,7 +132,22 @@ sealed partial class WindowsPlatform : IPlatform
             if (!File.Exists(exe) && File.Exists(old)) File.Move(old, exe);
             return $"exe を入れ替えられませんでした。書き込めないフォルダに置いているかもしれません: {e.Message}";
         }
-        Process.Start(new ProcessStartInfo(exe, App.UpdatedFlag) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) });
+        // ログオン時に裏で起動したまま一度も開いていなければ、新しい版も窓を出さない
+        var hidden = Application.Current.Dispatcher.Invoke(() => Application.Current.MainWindow is { IsVisible: false });
+        var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) };
+        start.ArgumentList.Add(App.UpdatedFlag);
+        if (hidden) start.ArgumentList.Add(App.BackgroundFlag);
+        try
+        {
+            Process.Start(start);
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            // 新しい exe が起動できないなら、前の exe に戻して今のまま使い続ける
+            File.Move(exe, newExePath, overwrite: true);
+            File.Move(old, exe);
+            return $"新しい版を起動できませんでした: {e.Message}";
+        }
         Application.Current.Dispatcher.BeginInvoke(() => (Application.Current.MainWindow as MainWindow)?.Exit());
         return null;
     }

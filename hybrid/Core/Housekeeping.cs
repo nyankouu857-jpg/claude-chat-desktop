@@ -1,17 +1,24 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace ClaudeChat.Core;
 
 // 毎日 1 回の片付け。使っていないチャットのアーカイブと、データのバックアップ
-public sealed class Housekeeping(AppPaths paths, SettingsStore settings, ConversationStore conversations, ChatHub hub, Action conversationsChanged) : IDisposable
+public sealed class Housekeeping(AppPaths paths, SettingsStore settings, ConversationStore conversations, ChatHub hub, Action conversationsChanged, Action<string> backupFailed) : IDisposable
 {
     // 起動直後は画面の読み込みと重ならないよう少し待つ
     static readonly TimeSpan FirstRunDelay = TimeSpan.FromMinutes(1);
     static readonly TimeSpan CheckInterval = TimeSpan.FromHours(1);
     static readonly TimeSpan BackupInterval = TimeSpan.FromHours(24);
-    const string BackupPrefix = "ClaudeChat-";
     readonly CancellationTokenSource stopping = new();
     readonly SemaphoreSlim backingUp = new(1, 1);
+
+    // 同じ置き場所を別の代表フォルダと共有しても、互いの zip を古いものとして消し合わないよう、代表フォルダごとに名前を分ける
+    string BackupPrefix => "ClaudeChat-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Normalize(paths.Root).ToLowerInvariant())))[..8] + "-";
+
+    public DateTime? LastSuccessAt { get; private set; }
+    public string? LastError { get; private set; }
 
     public void Start() => _ = Task.Run(async () =>
     {
@@ -35,12 +42,23 @@ public sealed class Housekeeping(AppPaths paths, SettingsStore settings, Convers
         try
         {
             await ArchiveIdleAsync();
-            var backup = (await settings.GetAsync()).Backup;
-            if (backup.Enabled && (LastBackupAt(FolderOf(backup)) is not { } last || DateTime.Now - last > BackupInterval)) await BackupAsync();
         }
         catch (Exception)
         {
             // 片付けに失敗してもアプリは止めない。次の回にまたやる
+        }
+        var backup = (await settings.GetAsync()).Backup;
+        if (!backup.Enabled || (LastBackupAt(FolderOf(backup)) is { } last && DateTime.Now - last < BackupInterval)) return;
+        try
+        {
+            await BackupAsync();
+        }
+        catch (Exception e)
+        {
+            // 取れていないまま日が過ぎないよう、続けて失敗しても最初の 1 回は知らせる
+            var first = LastError is null;
+            LastError = e.Message;
+            if (first) backupFailed(e.Message);
         }
     }
 
@@ -70,11 +88,22 @@ public sealed class Housekeeping(AppPaths paths, SettingsStore settings, Convers
         return Path.Combine(documents.Length > 0 ? documents : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "ClaudeChat-backups");
     }
 
-    static DateTime? LastBackupAt(string folder)
+    DateTime? LastBackupAt(string folder)
     {
-        if (!Directory.Exists(folder)) return null;
+        if (!Path.IsPathFullyQualified(folder) || !Directory.Exists(folder)) return null;
         var times = Directory.EnumerateFiles(folder, BackupPrefix + "*.zip").Select(File.GetLastWriteTime).ToList();
         return times.Count > 0 ? times.Max() : null;
+    }
+
+    static string Normalize(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+
+    // 置き場所の条件。相対パスは起動のしかたで場所が変わり、代表フォルダの中はフォルダごと消えたときに一緒に消え、次のバックアップに自分も入る
+    public static string? FolderProblem(string folder, string root)
+    {
+        if (folder.Trim().Length == 0) return null;
+        if (!Path.IsPathFullyQualified(folder.Trim())) return "バックアップの置き場所は、ドライブから始まるフルパスで指定してください";
+        var target = Normalize(folder.Trim()) + Path.DirectorySeparatorChar;
+        return target.StartsWith(Normalize(root) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ? "バックアップの置き場所は、アプリのフォルダの外にしてください" : null;
     }
 
     // config と data をひとつの zip にする。巻き戻し用の控えは大きく、無くても会話は困らないので入れない
@@ -82,12 +111,9 @@ public sealed class Housekeeping(AppPaths paths, SettingsStore settings, Convers
     {
         var backup = (await settings.GetAsync()).Backup;
         var configured = FolderOf(backup);
-        // 相対パスだと、起動のしかたで置き場所が変わってしまう
-        if (!Path.IsPathRooted(configured)) throw new InvalidOperationException("バックアップの置き場所は、ドライブから始まるフルパスで指定してください");
-        var folder = Path.GetFullPath(configured);
-        var root = Path.GetFullPath(paths.Root);
-        // 代表フォルダの中に置くと、フォルダごと消えたときに一緒に消え、次のバックアップに自分自身も入る
-        if ((folder + Path.DirectorySeparatorChar).StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("バックアップの置き場所は、アプリのフォルダの外にしてください");
+        if (FolderProblem(configured, paths.Root) is { } problem) throw new InvalidOperationException(problem);
+        var folder = Normalize(configured);
+        var root = Normalize(paths.Root);
         await backingUp.WaitAsync();
         try
         {
@@ -96,7 +122,7 @@ public sealed class Housekeeping(AppPaths paths, SettingsStore settings, Convers
             var partial = target + ".partial";
             try
             {
-                await WriteZipAsync(partial, root);
+                await WriteZipAsync(partial, root, folder);
             }
             catch
             {
@@ -104,6 +130,8 @@ public sealed class Housekeeping(AppPaths paths, SettingsStore settings, Convers
                 throw;
             }
             File.Move(partial, target, overwrite: true);
+            LastSuccessAt = DateTime.Now;
+            LastError = null;
             foreach (var old in Directory.EnumerateFiles(folder, BackupPrefix + "*.zip").OrderByDescending(File.GetLastWriteTime).Skip(Math.Max(1, backup.Keep)))
             {
                 File.Delete(old);
@@ -116,7 +144,7 @@ public sealed class Housekeeping(AppPaths paths, SettingsStore settings, Convers
         }
     }
 
-    async Task WriteZipAsync(string target, string root)
+    async Task WriteZipAsync(string target, string root, string backupFolder)
     {
         await using var file = File.Create(target);
         using var zip = new ZipArchive(file, ZipArchiveMode.Create);
@@ -124,7 +152,8 @@ public sealed class Housekeeping(AppPaths paths, SettingsStore settings, Convers
         {
             foreach (var path in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
             {
-                if (path.StartsWith(paths.CheckpointsDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) continue;
+                if (path.StartsWith(paths.CheckpointsDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                    || path.StartsWith(backupFolder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) continue;
                 try
                 {
                     // 書き込み中のファイルも読めるように共有で開く

@@ -159,7 +159,7 @@ export function Sidebar() {
   const known = new Set(summaries.map((s) => s.id));
   const childrenOf = new Map<string, ConversationSummary[]>();
   for (const s of summaries) {
-    if (s.parentId && known.has(s.parentId)) childrenOf.set(s.parentId, [...(childrenOf.get(s.parentId) ?? []), s]);
+    if (s.parentId && known.has(s.parentId) && !s.archived) childrenOf.set(s.parentId, [...(childrenOf.get(s.parentId) ?? []), s]);
   }
   // 親が消えた子は一番上に出す。アーカイブしたものは「チャット」の画面にだけ出す
   const roots = summaries.filter((s) => (!s.parentId || !known.has(s.parentId)) && !s.archived);

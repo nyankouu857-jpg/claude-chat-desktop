@@ -27,7 +27,8 @@ public sealed class AgentToolProvider(ChatHub hub, ConversationStore conversatio
                 Schema(("prompt", "string", "The full task for the sub-agent", true), ("title", "string", "A short name shown to the user", true), ("background", "boolean", "Run without waiting", false),
                     ("model", "string", $"Optional; defaults to this chat's model. Set it only when the task clearly calls for it (a cheaper model for simple bulk work, a stronger one for hard reasoning). {ModelChoice}", false),
                     ("effort", "string", $"Optional; defaults to this chat's effort. {EffortChoice}", false)),
-                AutoApprove: true, ReadOnly: true),
+                // 子が作業中に確認なしでツールを使うときは、起動の時点で人に 1 回確かめてもらう
+                AutoApprove: settings.Current?.Agents.AutoApproveChildren != true, ReadOnly: true),
             new(RunWorkflow, Source, "run_workflow", "ワークフローを実行",
                 WorkflowRunner.ToolDescription,
                 Schema(("script", "string", "Workflow script (JavaScript). Omit when using name", false), ("name", "string", "A bundled workflow: research", false), ("args", "object", "Value exposed to the script as args", false), ("title", "string", "A short name shown to the user", true),

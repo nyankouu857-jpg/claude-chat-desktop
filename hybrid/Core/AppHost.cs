@@ -82,7 +82,8 @@ public sealed class AppHost : IAsyncDisposable
         hub.DeleteConversation = async id => await DeleteConversationAsync(id);
         updater = new Updater(platform, http);
         hub.Alert = Alert;
-        housekeeping = new Housekeeping(paths, settings, conversations, hub, () => Emit("conversations.changed", null));
+        housekeeping = new Housekeeping(paths, settings, conversations, hub, () => Emit("conversations.changed", null),
+            problem => platform.Notify("バックアップに失敗しました", problem));
         workflows = new WorkflowRunner(hub, settings, conversations, events);
         scheduler = new Scheduler(paths, hub, conversations, events);
         mcp = new McpHub(paths);
@@ -129,6 +130,8 @@ public sealed class AppHost : IAsyncDisposable
         await mcp.ApplyAsync(current.McpServers);
         scheduler.Start();
         housekeeping.Start();
+        // settings.json を手で直したときや、exe を移したときも、ログオン時の起動をそろえる。できない環境では何もしない
+        platform.SetStartWithWindows(current.Desktop.StartWithWindows);
     }
 
     void Send(JsonObject message) => send(message.ToJsonString(Json.Wire));
@@ -163,6 +166,7 @@ public sealed class AppHost : IAsyncDisposable
         "conversations.rename" => UpdateConversationAsync(Str(p, "id"), c => c.Title = NonEmpty(Str(p, "title"))),
         "conversations.archive" => UpdateConversationAsync(Str(p, "id"), c => c.Archived = (bool?)p["archived"] == true),
         "app.backup" => BackupAsync(),
+        "app.backupStatus" => BackupStatusAsync(),
         "conversations.star" => UpdateConversationAsync(Str(p, "id"), c => c.Starred = (bool?)p["starred"] == true),
         "conversations.move" => MoveConversationAsync(Str(p, "id"), (string?)p["folderId"]),
         "conversations.delete" => DeleteConversationAsync(Str(p, "id")),
@@ -272,10 +276,18 @@ public sealed class AppHost : IAsyncDisposable
         if (text.Trim().Length == 0) throw new InvalidOperationException("送る文がありません");
         var outcome = await hooks.RunUserPromptSubmitAsync(conversation, text);
         if (outcome.Blocked) throw new InvalidOperationException($"UserPromptSubmit フックが止めました: {outcome.Message}");
+        // ふつうの送信と同じく、フックが返した補足を添える
+        if (outcome.Message is { } extra) text += $"\n\n<hook-feedback event=\"UserPromptSubmit\">\n{extra}\n</hook-feedback>";
         return new JsonObject { ["queued"] = hub.Interject(conversationId, text) };
     }
 
     async Task<JsonNode?> BackupAsync() => new JsonObject { ["path"] = await housekeeping.BackupAsync() };
+
+    Task<JsonNode?> BackupStatusAsync() => Task.FromResult<JsonNode?>(new JsonObject
+    {
+        ["lastSuccessAt"] = housekeeping.LastSuccessAt?.ToString("O"),
+        ["lastError"] = housekeeping.LastError,
+    });
 
     public bool CloseToTray => settings.Current?.Desktop.CloseToTray ?? true;
 
@@ -295,11 +307,14 @@ public sealed class AppHost : IAsyncDisposable
         return (await updater.CheckAsync(timeout.Token)).ToWire();
     }
 
+    // 押した人が確認済みなので、応答中でも入れ替える
     async Task<JsonNode?> InstallUpdateAsync()
     {
-        if (await updater.InstallAsync(CancellationToken.None) is { } problem) throw new InvalidOperationException(problem);
+        if (await updater.InstallAsync(() => null, CancellationToken.None) is { } problem) throw new InvalidOperationException(problem);
         return null;
     }
+
+    string? NothingRunning() => hub.RunningView().Count == 0 ? null : "応答中のチャットがあるので、入れ替えを次の機会にしました";
 
     static readonly TimeSpan UpdateCheckTimeout = TimeSpan.FromSeconds(20);
 
@@ -314,17 +329,18 @@ public sealed class AppHost : IAsyncDisposable
             var info = await updater.CheckAsync(timeout.Token);
             if (!info.Available) return;
             // 予定の実行などで応答中のチャットがあれば、止めないよう知らせるだけにする
-            if (updates.AutoInstall && hub.RunningView().Count == 0)
+            if (updates.AutoInstall && NothingRunning() is null)
             {
                 Emit("update.installing", info.ToWire());
                 try
                 {
-                    var problem = await updater.InstallAsync(CancellationToken.None);
+                    var problem = await updater.InstallAsync(NothingRunning, CancellationToken.None);
                     if (problem is null) return;
                     Emit("update.failed", problem);
                 }
-                catch (Exception e) when (e is HttpRequestException or InvalidOperationException or IOException or UnauthorizedAccessException)
+                catch (Exception e) when (e is not OperationCanceledException)
                 {
+                    // 画面が「更新しています」のまま残らないよう、どんな失敗でも知らせる
                     Emit("update.failed", e.Message);
                 }
             }
@@ -413,6 +429,7 @@ public sealed class AppHost : IAsyncDisposable
                 if (string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path) || !Directory.Exists(path)) throw new InvalidOperationException($"フォルダが見つかりません: {path}");
             }
         }
+        if ((string?)patch["backup"]?["folder"] is { } backupFolder && Housekeeping.FolderProblem(backupFolder, paths.Root) is { } backupProblem) throw new InvalidOperationException(backupProblem);
         var hookPatch = patch["hooks"]?.Deserialize<Dictionary<string, List<HookEntry>>>(Json.Wire);
         var updated = await settings.UpdateAsync(s =>
         {
@@ -463,6 +480,7 @@ public sealed class AppHost : IAsyncDisposable
         var current = await settings.ReloadAsync();
         await mcp.ApplyAsync(current.McpServers);
         await bridge.SyncAsync();
+        platform.SetStartWithWindows(current.Desktop.StartWithWindows);
         return await InitAsync();
     }
 
@@ -799,6 +817,7 @@ public sealed class AppHost : IAsyncDisposable
         var conversation = await RequireConversationAsync(conversationId);
         if (conversation.MessageCount - conversation.ApiStart < 2) throw new InvalidOperationException("要約するほどの会話がありません");
         var engine = await hub.EngineAsync();
+        if (await engine.BudgetLimitAsync() is { } limitReached) throw new InvalidOperationException(limitReached);
         var options = await hub.OptionsForAsync(conversation);
         await hub.ExclusiveAsync(conversation, async token =>
         {
@@ -837,6 +856,7 @@ public sealed class AppHost : IAsyncDisposable
         var outcome = await hooks.RunUserPromptSubmitAsync(conversation, question);
         if (outcome.Blocked) throw new InvalidOperationException($"UserPromptSubmit フックが止めました: {outcome.Message}");
         var engine = await hub.EngineAsync();
+        if (await engine.BudgetLimitAsync() is { } limitReached) throw new InvalidOperationException(limitReached);
         var options = await hub.OptionsForAsync(conversation);
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         var answer = await engine.AskAsideAsync(conversation, options, $"<btw>\nA quick side question from the user. Answer briefly from what you already know in this conversation; it will not be added to the conversation.\n{question}\n</btw>", "btw", timeout.Token);

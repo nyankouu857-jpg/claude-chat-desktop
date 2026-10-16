@@ -66,11 +66,26 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
 
     public static bool IsPlainCommand(string command) => PlainCommand().IsMatch(command);
 
+    // それ自体が別のコードを動かすコマンド。前方一致で許すと、後ろに付けたスクリプトや -EncodedCommand が確認なしで動くので、まったく同じコマンドだけを許す
+    static readonly HashSet<string> Launchers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "pwsh", "powershell", "cmd", "bash", "sh", "zsh", "wsl", "python", "python3", "py", "node", "npx", "pnpx", "bunx", "deno", "bun", "uv", "uvx", "pipx",
+        "ruby", "perl", "php", "java", "start", "Start-Process", "saps", "Invoke-Expression", "iex", "Invoke-Command", "icm", "Start-Job",
+        "env", "sudo", "runas", "cscript", "wscript", "mshta", "rundll32", "regsvr32", "msiexec", "schtasks", "xargs",
+    };
+
+    // C:\Python\python.exe のようにパスや拡張子が付いていても見分ける
+    public static bool IsLauncher(string command)
+    {
+        var first = command.Trim().Split(' ', 2)[0].Replace('\\', '/');
+        return Launchers.Contains(Path.GetFileNameWithoutExtension(first[(first.LastIndexOf('/') + 1)..]));
+    }
+
     public static bool MatchesRule(string command, IEnumerable<string> rules)
     {
         var trimmed = command.Trim();
         if (!IsPlainCommand(trimmed)) return false;
-        return rules.Select(r => r.Trim()).Any(r => r.Length > 0 && (trimmed == r || trimmed.StartsWith(r + " ", StringComparison.Ordinal)));
+        return rules.Select(r => r.Trim()).Any(r => r.Length > 0 && (trimmed == r || (!IsLauncher(r) && trimmed.StartsWith(r + " ", StringComparison.Ordinal))));
     }
 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
@@ -186,11 +201,24 @@ public sealed partial class TerminalToolProvider(SettingsStore settings) : ITool
 
     static string WriteScriptFile(string command, string extension, Encoding encoding)
     {
-        var dir = Path.Combine(Path.GetTempPath(), "ClaudeChat-commands");
-        Directory.CreateDirectory(dir);
-        var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + extension);
-        File.WriteAllText(path, command, encoding);
-        return path;
+        // Windows の一時フォルダは人ごとに分かれているが、Linux の /tmp は共有なので、ほかの人に読まれたり差し替えられたりしないよう自分だけのフォルダに置く
+        if (OperatingSystem.IsWindows())
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "ClaudeChat-commands");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + extension);
+            File.WriteAllText(path, command, encoding);
+            return path;
+        }
+        var own = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "ClaudeChat-commands");
+        Directory.CreateDirectory(own, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var file = Path.Combine(own, Guid.NewGuid().ToString("N") + extension);
+        using (var stream = new FileStream(file, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite }))
+        using (var writer = new StreamWriter(stream, encoding))
+        {
+            writer.Write(command);
+        }
+        return file;
     }
 
     static void DeleteScriptFile(string path)

@@ -23,7 +23,7 @@ jobs:
       - run: npm run typecheck
         working-directory: hybrid/web
       # アプリが latest リリースと比べて更新を知らせるため、コミットを版に埋め込む
-      - run: dotnet publish hybrid/App -c Release -o publish/ClaudeChat -p:SourceRevisionId=${{ github.sha }}
+      - run: dotnet publish hybrid/App -c Release -o publish/ClaudeChat -p:IncludeSourceRevisionInInformationalVersion=true -p:SourceRevisionId=${{ github.sha }}
       - uses: actions/upload-artifact@v4
         with:
           name: ClaudeChat
@@ -64,6 +64,8 @@ jobs:
   # 公開リポジトリの Releases は GitHub にログインしなくてもダウンロードできる
   release:
     needs: [hybrid, electron, native]
+    # 手で別のブランチから動かしたビルドを、アプリの更新先にしない
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write

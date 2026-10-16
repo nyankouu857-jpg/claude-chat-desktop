@@ -67,7 +67,8 @@ public sealed class Updater(IPlatform platform, HttpClient http)
     }
 
     // 新しい exe を今の exe の隣に取り出してから入れ替える。途中で失敗しても今の exe は壊さない
-    public async Task<string?> InstallAsync(CancellationToken cancellationToken)
+    // canSwap は入れ替える直前に呼ぶ。ダウンロードの間に始まった応答を止めないよう、理由を返したら入れ替えない
+    public async Task<string?> InstallAsync(Func<string?> canSwap, CancellationToken cancellationToken)
     {
         var exe = Environment.ProcessPath ?? throw new InvalidOperationException("今の exe の場所が分かりません");
         var release = await GetJsonAsync($"https://api.github.com/repos/{Repo}/releases/tags/latest", cancellationToken);
@@ -90,7 +91,7 @@ public sealed class Updater(IPlatform platform, HttpClient http)
                 var entry = archive.GetEntry(ExeEntry) ?? throw new InvalidOperationException($"ダウンロードした zip に {ExeEntry} がありません");
                 entry.ExtractToFile(fresh, overwrite: true);
             }
-            return platform.InstallUpdate(fresh);
+            return canSwap() ?? platform.InstallUpdate(fresh);
         }
         finally
         {

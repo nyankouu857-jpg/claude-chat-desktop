@@ -207,6 +207,8 @@ public sealed class ChatHub(
         try
         {
             await prepare();
+            // アーカイブした会話でも、予定やほかのチャットから届いて動き出したら一覧に戻す
+            conversation.Archived = false;
             await conversations.SaveAsync(conversation);
             events.Emit("conversations.changed", null);
         }
@@ -350,8 +352,12 @@ public sealed class ChatHub(
         {
             // サブエージェントの終わりは親が受け取るので、知らせるのは人が始めた会話だけ
             if (conversation.ParentId is null && result.Status != ChatStatus.Aborted) Alert?.Invoke(conversation, result.Status == ChatStatus.Done ? "返答が終わりました" : "返答が失敗しました", false);
-            // 最後のツールの後に届いた指示は、ユーザーの発言として続けて送る
-            foreach (var text in TakeInterjections(conversation.Id)) await DeliverAsync(conversation, text, 0);
+            // 最後のツールの後に届いた指示は、ユーザーの発言として続けて送る。止めたときは送らない
+            var leftovers = TakeInterjections(conversation.Id);
+            if (result.Status != ChatStatus.Aborted)
+            {
+                foreach (var text in leftovers) await DeliverAsync(conversation, text, 0);
+            }
             // 往復の回数は引き継ぐ。知らせのたびに 0 に戻すと、知らせ合いが止まらなくなる
             var hops = RunHopsOf(conversation.Id);
             if (backgroundChildren.TryRemove(conversation.Id, out _) && conversation.ParentId is { } parentId && await conversations.GetAsync(parentId) is { } parent)
@@ -380,10 +386,11 @@ public sealed class ChatHub(
     // 会話を消すときの後片付け (チェックポイントなど) は AppHost が持っている
     public Func<string, Task>? DeleteConversation { get; set; }
 
-    // サブエージェントは使い捨て。失敗や停止は原因を見られるよう残す
+    // サブエージェントは使い捨て。失敗や停止は原因を見られるよう残す。何かを変えた子はアーカイブにとどめる
     async Task DiscardFinishedChildAsync(Conversation child, ChatRunResult result)
     {
-        if (result.Status != ChatStatus.Done || child.ParentId is null || DeleteConversation is not { } delete) return;
+        // シークレットの子は一覧に出ず、アプリを閉じれば消えるので、親から開けるよう残す
+        if (result.Status != ChatStatus.Done || child.ParentId is null || child.Incognito || DeleteConversation is not { } delete) return;
         if (!(await settings.GetAsync()).Agents.DeleteFinishedChildren) return;
         // 誰かが話しかけて次の番が始まった、または始まるのを待っている子は消さない
         if (StatusOf(child) != Idle) return;
@@ -391,8 +398,21 @@ public sealed class ChatHub(
         {
             if (inboxes.TryGetValue(child.Id, out var pending) && pending.Count > 0) return;
         }
+        if (ChangedAnything(child))
+        {
+            child.Archived = true;
+            await conversations.SaveAsync(child, touch: false);
+            events.Emit("conversations.changed", null);
+            return;
+        }
         await delete(child.Id);
     }
+
+    // 書き込みやコマンドなど読むだけでないツールを使った子は、確認なしで何をしたか後から確かめ、巻き戻せるよう消さずにアーカイブする
+    bool ChangedAnything(Conversation child) => child.CopyMessages()
+        .SelectMany(m => (m["content"] as JsonArray ?? []).OfType<JsonObject>())
+        .Where(b => (string?)b["type"] == "tool_use")
+        .Any(b => Tools.Find((string?)b["name"] ?? "", null) is not { ReadOnly: true });
 
     static string Escape(string s) => s.Replace("\"", "'");
 
@@ -406,6 +426,8 @@ public sealed class ChatHub(
 
     public void Stop(string conversationId)
     {
+        // 止めたのに、応答中に送った指示で動き出さないように
+        interjections.TryRemove(conversationId, out _);
         if (running.TryGetValue(conversationId, out var cancellation)) cancellation.Cancel();
     }
 

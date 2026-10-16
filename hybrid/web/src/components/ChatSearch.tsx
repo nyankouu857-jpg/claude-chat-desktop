@@ -1,6 +1,9 @@
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
 
+// 流れてくる応答で何度も探し直さないよう、変化が落ち着くのを待つ
+const RESEARCH_DELAY_MS = 200;
+
 // CSS の Highlight API。DOM を書き換えずに色を付けられるので、React の描画とぶつからない
 type HighlightRegistry = { set(name: string, highlight: unknown): void; delete(name: string): void };
 const highlights = (globalThis as { CSS?: { highlights?: HighlightRegistry } }).CSS?.highlights;
@@ -39,7 +42,13 @@ export function ChatSearch({ scroller }: { scroller: RefObject<HTMLDivElement | 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [ranges, setRanges] = useState<Range[]>([]);
-  const [current, setCurrent] = useState(0);
+  const [current, setCurrentState] = useState(0);
+  // 探し直すときに今の位置を読むため。state だけだと監視の中から最新の値が見えない
+  const currentRef = useRef(0);
+  const setCurrent = (value: number) => {
+    currentRef.current = value;
+    setCurrentState(value);
+  };
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -58,16 +67,34 @@ export function ChatSearch({ scroller }: { scroller: RefObject<HTMLDivElement | 
   }, []);
 
   useEffect(() => {
-    if (!open || !query.trim() || !scroller.current) {
+    const root = scroller.current;
+    if (!open || !query.trim() || !root) {
       setRanges([]);
       clear();
       return;
     }
-    const found = findRanges(scroller.current, query.trim());
+    const found = findRanges(root, query.trim());
     setRanges(found);
     setCurrent(0);
     paint(found, 0);
     found[0]?.startContainer.parentElement?.scrollIntoView({ block: "center" });
+    // 応答が流れてきたり描き直されたりすると前の範囲は無効になるので、少し間を置いて探し直す。位置は動かさない
+    let timer = 0;
+    const observer = new MutationObserver(() => {
+      clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        const again = findRanges(root, query.trim());
+        const kept = Math.min(currentRef.current, Math.max(0, again.length - 1));
+        setRanges(again);
+        setCurrent(kept);
+        paint(again, kept);
+      }, RESEARCH_DELAY_MS);
+    });
+    observer.observe(root, { childList: true, subtree: true, characterData: true });
+    return () => {
+      observer.disconnect();
+      clearTimeout(timer);
+    };
   }, [open, query, scroller]);
 
   const move = (step: number) => {

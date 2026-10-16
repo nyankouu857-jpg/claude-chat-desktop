@@ -202,8 +202,9 @@ public sealed class UsageLedger(AppPaths paths)
         return (today, month);
     }
 
-    public async Task<DateTimeOffset?> LastChatRequestAsync(string conversationId) =>
-        (await RecentAsync()).LastOrDefault(r => r.ConversationId == conversationId && r.Kind == "chat")?.At;
+    // キャッシュはモデルごとなので、切り替えた直後は前の送信があってもキャッシュは無い
+    public async Task<DateTimeOffset?> LastChatRequestAsync(string conversationId, string model) =>
+        (await RecentAsync()).LastOrDefault(r => r.ConversationId == conversationId && r.Kind == "chat" && r.Model == model)?.At;
 
     Task<List<UsageRecord>> ReadAllAsync() => ReadFilesAsync(Directory.EnumerateFiles(paths.UsageDir, "*.jsonl"));
 
@@ -246,7 +247,7 @@ public sealed class UsageLedger(AppPaths paths)
             {
                 ["costUsd"] = list.Sum(r => r.CostUsd ?? 0),
                 ["requests"] = list.Count,
-                ["input"] = list.Sum(r => r.Input + r.CacheWrite + r.CacheRead),
+                ["input"] = list.Sum(r => r.Input + r.CacheWrite + r.CacheWrite1h + r.CacheRead),
                 ["output"] = list.Sum(r => r.Output),
                 ["cacheRead"] = list.Sum(r => r.CacheRead),
                 ["webSearches"] = list.Sum(r => r.WebSearches),
@@ -276,7 +277,7 @@ public sealed class UsageLedger(AppPaths paths)
                 ["model"] = g.Key,
                 ["costUsd"] = g.Sum(r => r.CostUsd ?? 0),
                 ["requests"] = g.Count(),
-                ["input"] = g.Sum(r => r.Input + r.CacheWrite + r.CacheRead),
+                ["input"] = g.Sum(r => r.Input + r.CacheWrite + r.CacheWrite1h + r.CacheRead),
                 ["output"] = g.Sum(r => r.Output),
             })
             .ToArray());
