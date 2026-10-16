@@ -175,3 +175,6 @@ export function tokens(n: number) {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
 }
+
+// ブラウザの拡大と同じ刻み
+export const ZOOM_STEPS = [70, 80, 90, 100, 110, 125, 150, 175, 200];

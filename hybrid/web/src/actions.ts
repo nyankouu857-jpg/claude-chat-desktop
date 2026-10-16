@@ -497,6 +497,14 @@ export async function send(conversationId: string | null, content: WireMessage["
   return true;
 }
 
+// 入力の小窓から送る。新しいチャットにして、メインの窓で開く
+export async function sendQuick(text: string) {
+  const result = await guard(() => call<{ conversationId: string }>("chat.send", { conversationId: null, content: text, permissionMode: "default", ...chatOptions() }));
+  if (!result) return false;
+  await guard(() => call("app.showChat", { conversationId: result.conversationId }));
+  return true;
+}
+
 export const stop = (conversationId: string) => guard(() => call("chat.stop", { conversationId }));
 
 export async function openChatWindow(conversationId: string) {
@@ -514,6 +522,11 @@ export async function forkConversation(conversationId: string, upTo: number) {
   setState((s) => putConversation(s, conversation));
   navigate({ name: "chat", id: conversation.id });
   toast("ここまでを新しいチャットに分けました");
+}
+
+export async function saveCode(name: string, text: string) {
+  const path = await guard(() => call<string | null>("files.saveCode", { name, text }));
+  if (path) toast(`保存しました: ${path}`);
 }
 
 export const changedFiles = (conversationId: string) => guard(() => call<Record<string, string[]>>("chat.changedFiles", { conversationId }));

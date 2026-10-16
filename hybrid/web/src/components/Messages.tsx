@@ -1,9 +1,9 @@
 import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FastForward, FileOutput, FilePen, GitFork, Undo2, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, Mail, MessageSquare, PanelsTopLeft, Pencil, Play, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
-import { answer, approve, askConfirm, changedFiles, edit, forkConversation, navigate, openArtifact, openFile, openMail, retry, setQuote, stopWorkflow, switchBranch, textOf, undoFiles } from "../actions";
+import { answer, approve, askConfirm, changedFiles, saveCode, edit, forkConversation, navigate, openArtifact, openFile, openMail, retry, setQuote, stopWorkflow, switchBranch, textOf, undoFiles } from "../actions";
 import { MODELS } from "../models";
 import { findBuiltin } from "../builtins";
-import { renderMarkdown } from "../markdown";
+import { codeFileName, renderMarkdown } from "../markdown";
 import { setState, useStore } from "../store";
 import type { Approval, LiveReply, WireBlock, WireMessage } from "../types";
 import { FileChip } from "./Composer";
@@ -125,6 +125,13 @@ export const Markdown = memo(function Markdown({ text, cites }: { text: string; 
       dangerouslySetInnerHTML={{ __html: rendered.html }}
       onClick={(e) => {
         const target = e.target as HTMLElement;
+        const saveButton = target.closest<HTMLElement>("[data-save]");
+        if (saveButton) {
+          const [owner, index] = (target.closest(".code-block")?.getAttribute("data-code") ?? "").split(/-(?=\d+$)/);
+          if (owner !== rendered.nonce) return;
+          void saveCode(codeFileName(rendered.languages[Number(index)] ?? ""), rendered.codes[Number(index)] ?? "");
+          return;
+        }
         const copyButton = target.closest<HTMLElement>("[data-copy]");
         if (copyButton) {
           const [owner, index] = (target.closest(".code-block")?.getAttribute("data-code") ?? "").split(/-(?=\d+$)/);

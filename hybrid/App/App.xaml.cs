@@ -193,6 +193,14 @@ sealed partial class WindowsPlatform : IPlatform
         return dialog.ShowDialog(Application.Current.MainWindow) == true ? dialog.FolderName : null;
     });
 
+    public string? PickSaveFile(string suggestedName, string? initialFolder) => Application.Current.Dispatcher.Invoke(() =>
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog { Title = "コードを保存", FileName = suggestedName, InitialDirectory = initialFolder ?? "", AddExtension = false };
+        // 別の窓で開いたチャットから保存したときは、その窓の前に出す
+        var owner = Application.Current.Windows.OfType<Window>().FirstOrDefault(w => w.IsActive) ?? Application.Current.MainWindow;
+        return dialog.ShowDialog(owner) == true ? dialog.FileName : null;
+    });
+
     public void MoveToTrash(string path)
     {
         var operation = new ShFileOperation

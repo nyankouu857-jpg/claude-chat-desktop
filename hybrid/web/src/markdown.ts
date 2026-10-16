@@ -7,6 +7,7 @@ const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt
 
 // コピーボタンが写すのは、Markdown のコードブロックの元の文字だけ。本文に書かれた偽のコードブロックの、隠した文字を写させない
 let codes: string[] = [];
+let languages: string[] = [];
 let nonce = "";
 
 // チャットの改行をそのまま改行として見せたいので breaks を有効に
@@ -20,7 +21,8 @@ marked.use({
         ? hljs.highlight(text, { language }).value
         : escapeHtml(text);
       const index = codes.push(text) - 1;
-      return `<div class="code-block" data-code="${nonce}-${index}"><div class="code-header"><span>${escapeHtml(language || "text")}</span><button type="button" class="code-copy" data-copy>コピー</button></div><pre><code class="hljs">${highlighted}</code></pre></div>`;
+      languages[index] = language;
+      return `<div class="code-block" data-code="${nonce}-${index}"><div class="code-header"><span>${escapeHtml(language || "text")}</span><span class="code-actions"><button type="button" class="code-copy" data-save>保存</button><button type="button" class="code-copy" data-copy>コピー</button></span></div><pre><code class="hljs">${highlighted}</code></pre></div>`;
     },
   },
 });
@@ -44,16 +46,32 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 export interface RenderedMarkdown {
   html: string;
   codes: string[];
+  languages: string[];
   nonce: string;
 }
 
 export function renderMarkdown(text: string): RenderedMarkdown {
   codes = [];
+  languages = [];
   nonce = crypto.randomUUID();
   // 回答の中のフォームから別のページへ送られないように。style はアプリ全体の見た目を変えて、承認のボタンを偽装できてしまう
   const html = DOMPurify.sanitize(marked.parse(text, { async: false }) as string, {
-    ADD_ATTR: ["data-copy", "target"],
+    ADD_ATTR: ["data-copy", "data-save", "target"],
     FORBID_TAGS: ["form", "iframe", "object", "embed", "video", "audio", "source", "picture", "style", "area", "map", "link", "meta", "base"],
   });
-  return { html, codes, nonce };
+  return { html, codes, languages, nonce };
 }
+
+const EXTENSIONS: Record<string, string> = {
+  python: "py", py: "py", javascript: "js", js: "js", jsx: "jsx", typescript: "ts", ts: "ts", tsx: "tsx", html: "html", css: "css", scss: "scss",
+  json: "json", yaml: "yml", yml: "yml", xml: "xml", sql: "sql", bash: "sh", sh: "sh", shell: "sh", powershell: "ps1", ps1: "ps1", bat: "bat", cmd: "cmd",
+  csharp: "cs", cs: "cs", java: "java", kotlin: "kt", go: "go", rust: "rs", ruby: "rb", php: "php", c: "c", cpp: "cpp", swift: "swift",
+  markdown: "md", md: "md", csv: "csv", toml: "toml", ini: "ini", dockerfile: "Dockerfile", vue: "vue", svelte: "svelte", r: "r", lua: "lua",
+};
+
+// 保存のダイアログに最初に入れておく名前
+export const codeFileName = (language: string) => {
+  const extension = EXTENSIONS[language.toLowerCase()];
+  if (extension === "Dockerfile") return extension;
+  return `code.${extension ?? "txt"}`;
+};

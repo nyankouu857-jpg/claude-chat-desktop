@@ -1,7 +1,7 @@
 import { LoaderCircle } from "lucide-react";
 import { useEffect } from "react";
-import { SINGLE_CHAT, navigate, toggleSidebar } from "../actions";
-import { setState, useStore } from "../store";
+import { SINGLE_CHAT, navigate, toast, toggleSidebar, updateSettings } from "../actions";
+import { getState, setState, useStore } from "../store";
 import { ArtifactPanel } from "./ArtifactPanel";
 import { ArtifactsPage } from "./Artifacts";
 import { ChatView } from "./ChatView";
@@ -14,10 +14,13 @@ import { InfoPanel } from "./InfoPanel";
 import { SettingsOverlay } from "./settings/Settings";
 import { Sidebar } from "./Sidebar";
 import { FRAMELESS, TitleBar } from "./TitleBar";
+import { ZOOM_STEPS } from "./ui";
 
-function useTheme() {
+export function useTheme() {
   const theme = useStore((s) => s.settings?.appearance.theme ?? "system");
   const font = useStore((s) => s.settings?.appearance.chatFont ?? "default");
+  const zoom = useStore((s) => s.settings?.appearance.zoom ?? 100);
+  const chatWidth = useStore((s) => s.settings?.appearance.chatWidth ?? "standard");
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const apply = () => {
@@ -31,7 +34,22 @@ function useTheme() {
   useEffect(() => {
     document.documentElement.dataset.chatFont = font;
   }, [font]);
+  useEffect(() => {
+    document.documentElement.style.zoom = String(zoom / 100);
+    document.documentElement.dataset.chatWidth = chatWidth;
+  }, [zoom, chatWidth]);
 }
+
+// WebView2 の拡大は窓ごとに覚えないので、画面の側で持って設定に残す
+function stepZoom(direction: -1 | 0 | 1) {
+  const current = getState().settings?.appearance.zoom ?? 100;
+  const next = direction === 0 ? 100 : direction > 0 ? ZOOM_STEPS.find((z) => z > current) : [...ZOOM_STEPS].reverse().find((z) => z < current);
+  if (!next || next === current) return;
+  void updateSettings({ appearance: { zoom: next } });
+  toast(`表示 ${next}%`);
+}
+
+let lastWheelZoom = 0;
 
 // claude.ai のキーボードショートカットにならう
 function useShortcuts() {
@@ -39,7 +57,17 @@ function useShortcuts() {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       const key = e.key.toLowerCase();
-      if (e.shiftKey && key === "o") {
+      // 日本語配列の + は Shift + ; なので、; も拡大として受ける
+      if (key === "+" || key === "=" || key === ";") {
+        e.preventDefault();
+        stepZoom(1);
+      } else if (key === "-") {
+        e.preventDefault();
+        stepZoom(-1);
+      } else if (key === "0") {
+        e.preventDefault();
+        stepZoom(0);
+      } else if (e.shiftKey && key === "o") {
         e.preventDefault();
         navigate({ name: "new" });
       } else if (!e.shiftKey && key === "k") {
@@ -53,8 +81,20 @@ function useShortcuts() {
         setState((s) => ({ ...s, dialog: { kind: "shortcuts" } }));
       }
     };
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      // タッチパッドは一度に何十回も送ってくるので、1 回のひねりで 1 段だけ
+      if (e.timeStamp - lastWheelZoom < 150) return;
+      lastWheelZoom = e.timeStamp;
+      stepZoom(e.deltaY < 0 ? 1 : -1);
+    };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    document.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("wheel", onWheel);
+    };
   }, []);
 }
 

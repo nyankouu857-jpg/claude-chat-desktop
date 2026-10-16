@@ -41,6 +41,8 @@ public partial class MainWindow : Window
             .ToDictionary(n => n["web/".Length..].Replace('\\', '/'), n => n);
         InitializeComponent();
         Frameless.Apply(this);
+        Placement.Load(paths.DataDir);
+        var restored = Placement.Restore(this, "main", out var wasMaximized);
         var dark = PrefersDarkTheme();
         Background = new SolidColorBrush(dark ? Color.FromRgb(0x26, 0x26, 0x24) : Color.FromRgb(0xFA, 0xF9, 0xF5));
         Browser.DefaultBackgroundColor = dark ? System.Drawing.Color.FromArgb(0x26, 0x26, 0x24) : System.Drawing.Color.FromArgb(0xFA, 0xF9, 0xF5);
@@ -51,17 +53,22 @@ public partial class MainWindow : Window
             ShowInTaskbar = false;
             WindowState = WindowState.Minimized;
         }
+        else if (restored && wasMaximized)
+        {
+            WindowState = WindowState.Maximized;
+        }
         Loaded += async (_, _) =>
         {
             platform.ShowTrayIcon(this, BringToFront, Exit);
             await InitializeAsync();
             if (!background) return;
             Hide();
-            WindowState = WindowState.Normal;
+            WindowState = restored && wasMaximized ? WindowState.Maximized : WindowState.Normal;
             ShowInTaskbar = true;
         };
         Closing += async (_, e) =>
         {
+            if (IsVisible) Placement.Save(this, "main");
             if (!exiting && host?.CloseToTray == true)
             {
                 e.Cancel = true;
@@ -156,6 +163,7 @@ public partial class MainWindow : Window
             });
         });
         platform.ChatWindowOpener = OpenChatWindow;
+        platform.QuickEntryOpener = ToggleQuickEntry;
         await host.StartAsync();
         core.Navigate($"{AppOrigin}/index.html");
     }
@@ -164,6 +172,8 @@ public partial class MainWindow : Window
     void Configure(CoreWebView2 core, Window owner)
     {
         core.Settings.IsStatusBarEnabled = false;
+        // 拡大は画面の側で設定に残す。WebView2 の拡大と二重に掛からないよう止める
+        core.Settings.IsZoomControlEnabled = false;
         // 画面の CSS の app-region: drag で窓をつかんで動かし、ダブルクリックで最大化できるようにする
         core.Settings.IsNonClientRegionSupportEnabled = true;
         Frameless.Attach(owner, core);
@@ -233,6 +243,8 @@ public partial class MainWindow : Window
         var browser = new Microsoft.Web.WebView2.Wpf.WebView2 { DefaultBackgroundColor = Browser.DefaultBackgroundColor };
         var chatWindow = new Window { Title = "ClaudeChat", Width = 900, Height = 820, MinWidth = 520, MinHeight = 420, Content = browser, Background = Background, Icon = Icon };
         Frameless.Apply(chatWindow);
+        var placementKey = $"chat:{conversationId}";
+        if (Placement.Restore(chatWindow, placementKey, out var wasMaximized) && wasMaximized) chatWindow.WindowState = WindowState.Maximized;
         CoreWebView2? core = null;
         var closed = false;
         chatWindow.Loaded += async (_, _) =>
@@ -245,6 +257,7 @@ public partial class MainWindow : Window
             views.Add(core);
             core.Navigate($"{AppOrigin}/index.html?chat={conversationId}");
         };
+        chatWindow.Closing += (_, _) => Placement.Save(chatWindow, placementKey);
         chatWindow.Closed += (_, _) =>
         {
             closed = true;
@@ -253,6 +266,73 @@ public partial class MainWindow : Window
         };
         chatWindow.Show();
         return null;
+    }
+
+    Window? quickEntry;
+
+    // 入力の小窓。一度作ったら隠して使い回し、次に呼んだときすぐ出す
+    void ToggleQuickEntry()
+    {
+        if (environment is null || host is null) return;
+        if (quickEntry is { IsVisible: true })
+        {
+            quickEntry.Hide();
+            return;
+        }
+        if (quickEntry is null)
+        {
+            var browser = new Microsoft.Web.WebView2.Wpf.WebView2 { DefaultBackgroundColor = Browser.DefaultBackgroundColor };
+            var window = new Window
+            {
+                Title = "ClaudeChat",
+                // 入力欄 1 つと下の案内が収まる大きさ
+                Width = 680,
+                Height = 168,
+                Content = browser,
+                Background = Background,
+                Icon = Icon,
+                Topmost = true,
+                ShowInTaskbar = false,
+                ResizeMode = ResizeMode.NoResize,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+            };
+            Frameless.Apply(window);
+            // ほかの所を押したら引っ込む。書きかけの文は画面に残る
+            window.Deactivated += (_, _) => window.Hide();
+            window.Closing += (_, e) =>
+            {
+                e.Cancel = true;
+                window.Hide();
+            };
+            window.Loaded += async (_, _) =>
+            {
+                await browser.EnsureCoreWebView2Async(environment);
+                var core = browser.CoreWebView2;
+                Configure(core, window);
+                views.Add(core);
+                core.Navigate($"{AppOrigin}/index.html?quick=1");
+            };
+            window.IsVisibleChanged += (_, _) =>
+            {
+                if (!window.IsVisible) return;
+                browser.Focus();
+                try
+                {
+                    browser.CoreWebView2?.PostWebMessageAsString("{\"event\":\"quick.shown\",\"data\":null}");
+                }
+                catch (Exception)
+                {
+                    // 読み込み前なら、読み込んだときに入力欄へ移る
+                }
+            };
+            quickEntry = window;
+        }
+        // 主の画面の上から 3 割ほどの所。ランチャーと同じく目線の高さに出す
+        var area = SystemParameters.WorkArea;
+        quickEntry.Left = area.Left + (area.Width - quickEntry.Width) / 2;
+        quickEntry.Top = area.Top + area.Height * 0.28;
+        quickEntry.Show();
+        quickEntry.Activate();
     }
 
     // アーティファクトのページが上の窓に読み込まれると、画面と同じ扱いで中身を操作できてしまう。画面そのものだけを通す

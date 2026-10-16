@@ -6,7 +6,7 @@ import { LANGUAGES } from "../../languages";
 import { ALL_MODELS, AUTO_MODEL, EFFORTS } from "../../models";
 import { useStore } from "../../store";
 import type { Settings, SettingsTab } from "../../types";
-import { NumberField, Toggle } from "../ui";
+import { NumberField, Toggle, ZOOM_STEPS } from "../ui";
 import { Agents } from "./Agents";
 import { Connectors } from "./Connectors";
 import { Computer } from "./Computer";
@@ -103,9 +103,12 @@ function General({ settings }: { settings: Settings }) {
   );
 }
 
+// ほかのアプリとぶつかりにくい組み合わせだけ選ばせる
+const QUICK_ENTRY_KEYS = ["Ctrl+Alt+Space", "Ctrl+Shift+Space", "Alt+Shift+Space", "Ctrl+Alt+C"];
+
 function Desktop({ settings }: { settings: Settings }) {
   const desktop = settings.desktop;
-  const row = (key: keyof Settings["desktop"], label: string, hint: string) => (
+  const row = (key: "closeToTray" | "startWithWindows" | "notifyWhenDone" | "notifyWhenWaiting", label: string, hint: string) => (
     <div className="switch-row">
       <div>
         <div>{label}</div>
@@ -121,6 +124,16 @@ function Desktop({ settings }: { settings: Settings }) {
         {row("startWithWindows", "Windows にログオンしたら起動する", "窓を出さずにトレイに入ります。予定を確実に動かしたいときに使います")}
         {row("notifyWhenDone", "返答が終わったら通知する", "アプリを見ていないときだけ、Windows の通知で知らせます。押すとそのチャットを開きます")}
         {row("notifyWhenWaiting", "確認や質問を待っているときに通知する", "ツールの確認や Claude からの質問で止まっているときに知らせます")}
+        <div className="switch-row">
+          <div>
+            <div>入力の小窓を出すキー</div>
+            <div className="field-hint">ほかのアプリを使っている最中でも、このキーで小さな入力欄を出します。送ると新しいチャットになり、メインの窓で開きます。トレイにしまっている間も使えます</div>
+          </div>
+          <select className="input" value={desktop.quickEntryHotkey} onChange={(e) => void updateSettings({ desktop: { quickEntryHotkey: e.target.value } })}>
+            <option value="">使わない</option>
+            {[...new Set([...QUICK_ENTRY_KEYS, desktop.quickEntryHotkey].filter(Boolean))].map((k) => <option key={k} value={k}>{k.replaceAll("+", " + ")}</option>)}
+          </select>
+        </div>
       </Section>
       <Section title="チャットの整理">
         <div className="switch-row">
@@ -183,7 +196,12 @@ function ThemeCard({ id, label, current }: { id: Settings["appearance"]["theme"]
 }
 
 function Appearance({ settings }: { settings: Settings }) {
-  const { theme, chatFont } = settings.appearance;
+  const { theme, chatFont, zoom, chatWidth } = settings.appearance;
+  const widths: { id: Settings["appearance"]["chatWidth"]; label: string; hint: string }[] = [
+    { id: "standard", label: "標準", hint: "claude.ai と同じ幅" },
+    { id: "wide", label: "広め", hint: "表や長いコードに" },
+    { id: "full", label: "窓いっぱい", hint: "横長の画面に" },
+  ];
   const fonts: { id: Settings["appearance"]["chatFont"]; label: string; sample: string }[] = [
     { id: "default", label: "デフォルト", sample: "明朝体で読む" },
     { id: "sans", label: "システム", sample: "ゴシック体で読む" },
@@ -207,6 +225,27 @@ function Appearance({ settings }: { settings: Settings }) {
               <span className="field-hint">{f.sample}</span>
             </button>
           ))}
+        </div>
+      </Section>
+      <Section title="チャットの幅">
+        <div className="font-options">
+          {widths.map((w) => (
+            <button key={w.id} type="button" className={`font-option${chatWidth === w.id ? " selected" : ""}`} onClick={() => void updateSettings({ appearance: { chatWidth: w.id } })}>
+              <span>{w.label}</span>
+              <span className="field-hint">{w.hint}</span>
+            </button>
+          ))}
+        </div>
+      </Section>
+      <Section title="表示の大きさ">
+        <div className="switch-row">
+          <div>
+            <div>画面全体の拡大率</div>
+            <div className="field-hint">Ctrl + プラス / マイナスか、Ctrl を押しながらホイールでも変えられます。Ctrl + 0 で 100% に戻ります</div>
+          </div>
+          <select className="input" value={zoom} onChange={(e) => void updateSettings({ appearance: { zoom: Number(e.target.value) } })}>
+            {ZOOM_STEPS.map((z) => <option key={z} value={z}>{z}%</option>)}
+          </select>
         </div>
       </Section>
     </>

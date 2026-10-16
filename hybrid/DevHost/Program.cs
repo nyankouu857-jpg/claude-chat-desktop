@@ -30,7 +30,7 @@ async Task PumpAsync(WebSocket socket, Channel<string> outbox)
     }
 }
 
-await using var host = new AppHost(paths, new PlainSecretProtector(), new ConsolePlatform(Path.Combine(paths.DataDir, "trash")), Broadcast);
+await using var host = new AppHost(paths, new PlainSecretProtector(), new ConsolePlatform(Path.Combine(paths.DataDir, "trash"), paths.ExportsDir), Broadcast);
 await host.StartAsync();
 
 var listener = new HttpListener();
@@ -116,7 +116,7 @@ static Dictionary<string, string> ParseArgs(string[] args)
     return result;
 }
 
-sealed class ConsolePlatform(string trashDir) : IPlatform
+sealed class ConsolePlatform(string trashDir, string exportsDir) : IPlatform
 {
     public string Version => "dev";
     public string? Commit => null;
@@ -125,6 +125,12 @@ sealed class ConsolePlatform(string trashDir) : IPlatform
 
     // ブラウザからはフォルダ選択ダイアログを出せない
     public string? PickFolder() => null;
+    // ダイアログを出せないので、書き出し用のフォルダに置く
+    public string? PickSaveFile(string suggestedName, string? initialFolder)
+    {
+        Directory.CreateDirectory(exportsDir);
+        return Path.Combine(exportsDir, suggestedName);
+    }
 
     // 画面の無いところで動くので、本物のマウスは無い
     public bool CanRealClick => false;
@@ -143,6 +149,8 @@ sealed class ConsolePlatform(string trashDir) : IPlatform
     public Task<string?> CaptureScreenAsync(CancellationToken cancellationToken) => throw new InvalidOperationException("この環境では画面を撮れません");
     // ブラウザなら画面の側で新しいタブを開ける
     public string? OpenChatWindow(string conversationId) => "開発用のホストでは別の窓を開けません";
+    // 一度も成功しないと設定を保存できないので、受け付けたことにする
+    public string? SetQuickEntryHotkey(string hotkey) => null;
 
     // ごみ箱の代わり
     public void MoveToTrash(string path)

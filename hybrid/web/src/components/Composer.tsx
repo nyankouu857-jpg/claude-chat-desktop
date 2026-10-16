@@ -1,5 +1,5 @@
 import { ArrowUp, Camera, Check, ChevronDown, ChevronRight, Circle, CircleDot, Code, FastForward, WifiOff, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Quote, Settings2, Square, Telescope, Type, X, Zap } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cancelOffline, captureScreen, clearPrefill, extractDocumentText, hurry, interject, openSettings, send, setChoice, setMode, setQuote, stop, toast } from "../actions";
 import { BUILTIN_SOURCES } from "../builtins";
 import { allCommands, runCommand } from "../commands";
@@ -421,6 +421,24 @@ function useSlashItems(query: string | null) {
   }, [query, extensions]);
 }
 
+// 送る前の文はチャットごとに取っておく。切り替えや再起動で消えると、長く書いた指示を失う
+const draftKeyOf = (conversationId: string | null) => `draft:${conversationId ?? "new"}`;
+function readDraft(key: string) {
+  try {
+    return localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+function writeDraft(key: string, text: string) {
+  try {
+    if (text) localStorage.setItem(key, text);
+    else localStorage.removeItem(key);
+  } catch {
+    // 保存できない環境では、下書きを残さないだけ
+  }
+}
+
 export function Composer({ conversationId, autoFocus, prefill }: { conversationId: string | null; autoFocus?: boolean; prefill?: { text: string; nonce: number } }) {
   const running = useStore((s) => (conversationId ? !!s.live[conversationId] : false));
   const offlineQueued = useStore((s) => s.offlineQueued);
@@ -431,7 +449,10 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
   // リサーチの結果が届く前に別の質問を始めると、結果がその応答の後ろに回ってしまう
   const researching = useStore((s) => !!conversationId && Object.values(s.workflows).some((w) => w.parentId === conversationId && w.name === "research" && w.status === "running"));
   const storedPrefill = useStore((s) => (conversationId ? s.prefill[conversationId] : undefined));
-  const [text, setText] = useState("");
+  const draftKey = draftKeyOf(conversationId);
+  const [text, setText] = useState(() => readDraft(draftKey));
+  // 今の text がどのチャットの下書きか。切り替えた直後に前のチャットの文を書き込まないため
+  const draftOwner = useRef(draftKey);
   const [slashIndex, setSlashIndex] = useState(0);
   // 「/」で始まり、まだ空白を打っていない間だけ候補を出す
   const slashQuery = /^\/[A-Za-z0-9_-]*$/.test(text) ? text.slice(1) : null;
@@ -441,6 +462,16 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
   const [sending, setSending] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  useLayoutEffect(() => {
+    if (draftOwner.current === draftKey) return;
+    draftOwner.current = draftKey;
+    setText(readDraft(draftKey));
+  }, [draftKey]);
+
+  useEffect(() => {
+    writeDraft(draftOwner.current, text);
+  }, [text]);
 
   useEffect(() => {
     if (autoFocus) textarea.current?.focus();

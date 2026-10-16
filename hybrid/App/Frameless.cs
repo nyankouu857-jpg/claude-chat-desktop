@@ -67,6 +67,12 @@ static class Frameless
         window.Closed += (_, _) => states.Remove(window);
     }
 
+    public static bool IsFullscreen(Window window) => states.TryGetValue(window, out var state) && state.Fullscreen;
+
+    // 全画面は最大化の一種として出しているので、全画面に入る前に最大化していたかで答える
+    public static bool IsMaximized(Window window) =>
+        states.TryGetValue(window, out var state) && state.Fullscreen ? state.WasMaximized : window.WindowState == WindowState.Maximized;
+
     // 画面が描いた ─ ☐ ✕ や、つかんだ所の知らせを受け取る WebView
     public static void Attach(Window window, CoreWebView2 view)
     {

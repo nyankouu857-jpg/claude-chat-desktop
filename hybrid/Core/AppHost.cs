@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Anthropic;
@@ -10,6 +11,8 @@ public interface IPlatform
     string Version { get; }
     void OpenPath(string path);
     string? PickFolder();
+    // 保存先を人に選んでもらう。やめたら null
+    string? PickSaveFile(string suggestedName, string? initialFolder);
     void MoveToTrash(string path);
     // 画面上の本物のマウスでブラウザを押せるか。Windows のアプリだけ
     bool CanRealClick { get; }
@@ -32,6 +35,8 @@ public interface IPlatform
     Task<string?> CaptureScreenAsync(CancellationToken cancellationToken);
     // 会話を別の窓で開く。できなかったら理由を返す
     string? OpenChatWindow(string conversationId);
+    // 入力の小窓を出すキーを登録し直す。空なら外す。ほかのアプリが使っているなどで登録できなかったら理由を返す
+    string? SetQuickEntryHotkey(string hotkey);
 }
 
 // 画面 (WebView2 やブラウザ) とのやり取りを一手に引き受ける。通信路には依存しない
@@ -148,6 +153,7 @@ public sealed class AppHost : IAsyncDisposable
         housekeeping.Start();
         // settings.json を手で直したときや、exe を移したときも、ログオン時の起動をそろえる。できない環境では何もしない
         platform.SetStartWithWindows(current.Desktop.StartWithWindows);
+        platform.SetQuickEntryHotkey(current.Desktop.QuickEntryHotkey);
     }
 
     void Send(JsonObject message) => send(message.ToJsonString(Json.Wire));
@@ -194,6 +200,7 @@ public sealed class AppHost : IAsyncDisposable
         "chat.undoFiles" => UndoFilesAsync(Str(p, "conversationId"), (int?)p["humanIndex"] ?? throw new InvalidOperationException("humanIndex がありません")),
         "screen.capture" => CaptureScreenAsync(),
         "app.openChatWindow" => OpenChatWindowAsync(Str(p, "conversationId")),
+        "app.showChat" => ShowChatAsync(Str(p, "conversationId")),
         "usage.budget" => BudgetViewAsync(),
         "session.open" => SessionOpenAsync(Str(p, "conversationId"), (string?)p["fileId"]),
         "conversations.search" => SearchConversationsAsync(Str(p, "query")),
@@ -226,6 +233,7 @@ public sealed class AppHost : IAsyncDisposable
         "artifacts.export" => ExportArtifactAsync(Str(p, "conversationId"), Str(p, "id")),
         "artifacts.list" => ListArtifactsAsync(),
         "files.extractText" => Task.FromResult<JsonNode?>(DocumentText.Extract(Str(p, "name"), Convert.FromBase64String(Str(p, "data")))),
+        "files.saveCode" => SaveCodeAsync(Str(p, "name"), Str(p, "text")),
         "files.open" => OpenFileAsync(Str(p, "conversationId"), Str(p, "fileId"), (bool?)p["reveal"] == true),
         "workflows.list" => Task.FromResult<JsonNode?>(workflows.ListView()),
         "workflows.stop" => StopWorkflowAsync(Str(p, "id")),
@@ -484,10 +492,17 @@ public sealed class AppHost : IAsyncDisposable
         }
         if ((string?)patch["backup"]?["folder"] is { } backupFolder && Housekeeping.FolderProblem(backupFolder, paths.Root) is { } backupProblem) throw new InvalidOperationException(backupProblem);
         var hookPatch = patch["hooks"]?.Deserialize<Dictionary<string, List<HookEntry>>>(Json.Wire);
+        var previousHotkey = settings.Current?.Desktop.QuickEntryHotkey ?? "";
         var updated = await settings.UpdateAsync(s =>
         {
             if (patch["profile"] is JsonObject profile) s.Profile = Merge(s.Profile, profile);
-            if (patch["appearance"] is JsonObject appearance) s.Appearance = Merge(s.Appearance, appearance);
+            if (patch["appearance"] is JsonObject appearance)
+            {
+                s.Appearance = Merge(s.Appearance, appearance);
+                // 小さすぎても大きすぎても、設定画面まで戻れなくなる
+                s.Appearance.Zoom = Math.Clamp(s.Appearance.Zoom, 70, 200);
+                if (s.Appearance.ChatWidth is not ("standard" or "wide" or "full")) s.Appearance.ChatWidth = "standard";
+            }
             if (patch["chat"] is JsonObject chat)
             {
                 s.Chat = Merge(s.Chat, chat);
@@ -524,6 +539,12 @@ public sealed class AppHost : IAsyncDisposable
             await settings.UpdateAsync(s => s.Desktop.StartWithWindows = false);
             throw new InvalidOperationException(problem);
         }
+        if (patch["desktop"]?["quickEntryHotkey"] is JsonValue && platform.SetQuickEntryHotkey(updated.Desktop.QuickEntryHotkey) is { } taken)
+        {
+            await settings.UpdateAsync(s => s.Desktop.QuickEntryHotkey = previousHotkey);
+            platform.SetQuickEntryHotkey(previousHotkey);
+            throw new InvalidOperationException(taken);
+        }
         return SettingsView(settings.Current ?? updated);
     }
 
@@ -540,6 +561,7 @@ public sealed class AppHost : IAsyncDisposable
         await mcp.ApplyAsync(current.McpServers);
         await bridge.SyncAsync();
         platform.SetStartWithWindows(current.Desktop.StartWithWindows);
+        platform.SetQuickEntryHotkey(current.Desktop.QuickEntryHotkey);
         return await InitAsync();
     }
 
@@ -714,6 +736,27 @@ public sealed class AppHost : IAsyncDisposable
         });
         Emit("conversations.changed", null);
         return new JsonObject { ["conversation"] = conversation.ToWire(), ["files"] = restored };
+    }
+
+    // 回答のコードを、人が選んだ場所にファイルとして保存する。選ぶのは人なので、許可フォルダの外でもよい
+    async Task<JsonNode?> SaveCodeAsync(string name, string text)
+    {
+        var current = await settings.GetAsync();
+        var folder = current.Files.Folders.FirstOrDefault(f => !f.ReadOnly && Directory.Exists(f.Path))?.Path;
+        var safeName = string.Concat(Path.GetFileName(name).Split(Path.GetInvalidFileNameChars()));
+        if (platform.PickSaveFile(safeName.Length > 0 ? safeName : "code.txt", folder) is not { } path) return null;
+        // BOM を付けると、シェルスクリプトや一部のツールが先頭の 1 文字目を読み違える
+        await File.WriteAllTextAsync(path, text, new UTF8Encoding(false));
+        return path;
+    }
+
+    // 入力の小窓から送ったチャットを、メインの窓で開いて前に出す
+    Task<JsonNode?> ShowChatAsync(string conversationId)
+    {
+        if (!Guid.TryParse(conversationId, out _)) throw new InvalidOperationException("チャットの ID が不正です");
+        platform.ShowWindow();
+        Emit("app.navigate", new JsonObject { ["conversationId"] = conversationId });
+        return Task.FromResult<JsonNode?>(null);
     }
 
     async Task<JsonNode?> OpenChatWindowAsync(string conversationId)

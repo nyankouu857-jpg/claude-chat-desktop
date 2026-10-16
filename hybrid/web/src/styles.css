@@ -375,9 +375,9 @@ code { font-family: var(--font-mono); }
 .star-filled { color: var(--brand); fill: var(--brand); flex-shrink: 0; }
 .cost-chip { font-size: 12px; color: var(--text-300); padding: 4px 10px; border-radius: 999px; border: 0.5px solid var(--border); cursor: default; }
 .chat-scroll { flex: 1; overflow-y: auto; }
-.message-list { max-width: 768px; margin: 0 auto; padding: 16px 24px 32px; }
+.message-list { max-width: var(--chat-width); margin: 0 auto; padding: 16px 24px 32px; }
 .composer-dock { padding: 0 24px 18px; }
-.composer-dock .composer { max-width: 768px; margin: 0 auto; }
+.composer-dock .composer { max-width: var(--chat-width); margin: 0 auto; }
 
 .user-turn { display: flex; flex-direction: column; align-items: flex-end; margin: 8px 0 22px; }
 .user-bubble {
@@ -439,6 +439,7 @@ code { font-family: var(--font-mono); }
 }
 .code-block { border: 0.5px solid var(--border); border-radius: 10px; overflow: hidden; margin: 0 0 1em; background: var(--code-bg); font-family: var(--font-ui); }
 .code-header { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 6px 14px; font-size: 12px; color: var(--text-300); border-bottom: 0.5px solid var(--border); }
+.code-actions { display: flex; gap: 2px; }
 .code-copy { font-size: 12px; color: var(--text-300); padding: 3px 8px; border-radius: 6px; }
 .code-copy:hover { background: var(--hover); color: var(--text-100); }
 .code-block pre { margin: 0; padding: 12px 14px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
@@ -1015,7 +1016,7 @@ code { font-family: var(--font-mono); }
 .schedule-row { gap: 12px; }
 .schedule-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .peer-turn.attached { width: 100%; margin: 6px 0 0; }
-.running-workflows { max-width: 768px; margin: 0 auto 8px; display: grid; gap: 6px; }
+.running-workflows { max-width: var(--chat-width); margin: 0 auto 8px; display: grid; gap: 6px; }
 .running-workflow { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 0.5px solid var(--border); border-radius: 10px; background: var(--bg-000); font-size: 13px; }
 .running-workflow-title { font-weight: 600; color: var(--text-100); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .running-workflow .button { margin-left: auto; }
@@ -1268,3 +1269,17 @@ kbd { font-family: var(--font-mono); font-size: 12px; padding: 1px 6px; border: 
 .tag-chip:hover:not(.static) { color: var(--text-100); }
 .tag-chip.on { border-color: var(--accent); color: var(--accent); }
 .tag-chip.static { cursor: default; }
+
+/* 入力の小窓 */
+
+.quick-entry { height: 100vh; display: flex; flex-direction: column; justify-content: center; gap: 8px; padding: 14px 18px; background: var(--bg-100); app-region: drag; }
+.quick-box { display: flex; align-items: flex-start; gap: 12px; padding: 12px 12px 12px 14px; border: 0.5px solid var(--border); border-radius: 16px; background: var(--bg-000); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06); app-region: no-drag; }
+.quick-spark { color: var(--accent); padding-top: 4px; }
+.quick-input { flex: 1; border: none; outline: none; resize: none; background: transparent; color: var(--text-100); font: inherit; font-size: 16px; line-height: 1.5; max-height: 72px; }
+.quick-hint { display: flex; justify-content: space-between; padding: 0 6px; font-size: 12px; color: var(--text-400); }
+.quick-toast { position: fixed; left: 18px; right: 18px; bottom: 6px; font-size: 12px; color: var(--danger); text-align: center; }
+
+/* チャットの幅。標準は claude.ai と同じ */
+:root { --chat-width: 768px; }
+:root[data-chat-width="wide"] { --chat-width: 1040px; }
+:root[data-chat-width="full"] { --chat-width: 100%; }

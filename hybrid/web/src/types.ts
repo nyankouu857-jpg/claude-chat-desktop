@@ -186,7 +186,7 @@ export interface McpServerConfig {
 
 export interface Settings {
   profile: { fullName: string; nickname: string; occupation: string; preferences: string; language?: string | null };
-  appearance: { theme: "light" | "dark" | "system"; chatFont: "default" | "sans" | "large" };
+  appearance: { theme: "light" | "dark" | "system"; chatFont: "default" | "sans" | "large"; zoom: number; chatWidth: "standard" | "wide" | "full" };
   chat: {
     model: string;
     effort: Effort;
@@ -212,7 +212,7 @@ export interface Settings {
   browser: { enabled: boolean; executablePath?: string | null; mode: "dedicated" | "extension" };
   agents: { enabled: boolean; maxConcurrent: number; maxWorkflowAgents: number; maxMessageHops: number; autoApproveChildren: boolean; deleteFinishedChildren: boolean };
   updates: { checkOnStartup: boolean; autoInstall: boolean };
-  desktop: { closeToTray: boolean; startWithWindows: boolean; notifyWhenDone: boolean; notifyWhenWaiting: boolean };
+  desktop: { closeToTray: boolean; startWithWindows: boolean; notifyWhenDone: boolean; notifyWhenWaiting: boolean; quickEntryHotkey: string };
   backup: { enabled: boolean; folder: string; keep: number };
   budget: { confirmRequestUsd: number; dailyLimitUsd: number; monthlyLimitUsd: number };
   features: { memory: boolean; confirmMemoryWrites: boolean; artifacts: boolean; chatSearch: boolean; disabledSkills: string[]; allowBypassMode: boolean };

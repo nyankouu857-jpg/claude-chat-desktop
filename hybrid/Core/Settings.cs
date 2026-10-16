@@ -19,6 +19,10 @@ public sealed class AppearanceSettings
 {
     public string Theme { get; set; } = "system";
     public string ChatFont { get; set; } = "default";
+    // 画面全体の拡大率 (%)
+    public int Zoom { get; set; } = 100;
+    // standard は claude.ai と同じ幅、wide は広め、full は窓いっぱい
+    public string ChatWidth { get; set; } = "standard";
 }
 
 public sealed class ChatDefaults
@@ -80,6 +84,8 @@ public sealed class DesktopSettings
     // 窓を見ていないときだけ Windows の通知で知らせる
     public bool NotifyWhenDone { get; set; } = true;
     public bool NotifyWhenWaiting { get; set; } = true;
+    // どのアプリを使っていても入力の小窓を出すキー。空で使わない
+    public string QuickEntryHotkey { get; set; } = "Ctrl+Alt+Space";
 }
 
 public sealed class UpdateSettings
