@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { clearPrefill, extractDocumentText, openSettings, send, setChoice, setMode, setQuote, stop, toast } from "../actions";
 import { BUILTIN_SOURCES } from "../builtins";
 import { allCommands, runCommand } from "../commands";
-import { EFFORTS, MODELS, defaultEffortOf, modelLabel } from "../models";
+import { EFFORTS, MODELS, OTHER_MODELS, defaultEffortOf, effortsOf, modelLabel } from "../models";
 import { getState, setState, useStore } from "../store";
 import type { PermissionMode, Todo, WireBlock } from "../types";
 import { Dropdown, MenuItem, Toggle } from "./ui";
@@ -145,6 +145,9 @@ export function FileChip({ name, kind }: { name: string; kind: "pdf" | "text" })
 
 function ModelMenu() {
   const choice = useStore((s) => s.choice);
+  const isOther = OTHER_MODELS.some((m) => m.id === choice.model);
+  const [othersOpen, setOthersOpen] = useState(isOther);
+  const efforts = EFFORTS.filter((e) => effortsOf(choice.model)?.includes(e.id) ?? true);
   return (
     <Dropdown
       align="right"
@@ -166,9 +169,22 @@ function ModelMenu() {
             </MenuItem>
           ))}
           <div className="menu-separator" />
+          <MenuItem checked={isOther && !othersOpen} onClick={() => setOthersOpen((o) => !o)}>
+            <span className="menu-expand">他のモデル <ChevronRight size={13} className={othersOpen ? "rotated" : ""} /></span>
+          </MenuItem>
+          {othersOpen && (
+            <div className="menu-sublist">
+              {OTHER_MODELS.map((m) => (
+                <MenuItem key={m.id} checked={choice.model === m.id} onClick={() => { setChoice({ model: m.id, effort: m.defaultEffort }); close(); }}>
+                  {m.label}
+                </MenuItem>
+              ))}
+            </div>
+          )}
+          <div className="menu-separator" />
           <div className="menu-heading">思考の深さ</div>
           <div className="effort-row">
-            {EFFORTS.map((e) => (
+            {efforts.map((e) => (
               <button
                 key={e.id}
                 type="button"

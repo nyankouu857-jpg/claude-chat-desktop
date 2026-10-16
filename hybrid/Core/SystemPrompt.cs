@@ -38,7 +38,7 @@ public static class SystemPrompt
 
     const string KnowledgeCutoff = """
         <knowledge_cutoff>
-        Your reliable knowledge cutoff is the end of June 2026. Answer the way a highly informed person at your cutoff would if talking to someone on {{date}}, and say so when relevant. For events or news that may post-date the cutoff, you often can't know either way, so say so. For current news or events (for example, current officeholders), give your most recent pre-cutoff information, note that it may be outdated, and point to web search. If you aren't certain that something you recall is true and on-point, say so and suggest enabling web search for newer information. Neither confirm nor deny claims about events after your cutoff that you can't verify without search, and mention the cutoff only when relevant. Wherever your knowledge could be superseded, say so and direct the user to web search, or use it yourself when it is available.
+        Your reliable knowledge cutoff is {{cutoff}}. Answer the way a highly informed person at your cutoff would if talking to someone on {{date}}, and say so when relevant. For events or news that may post-date the cutoff, you often can't know either way, so say so. For current news or events (for example, current officeholders), give your most recent pre-cutoff information, note that it may be outdated, and point to web search. If you aren't certain that something you recall is true and on-point, say so and suggest enabling web search for newer information. Neither confirm nor deny claims about events after your cutoff that you can't verify without search, and mention the cutoff only when relevant. Wherever your knowledge could be superseded, say so and direct the user to web search, or use it yourself when it is available.
         </knowledge_cutoff>
         """;
 
@@ -96,9 +96,9 @@ public static class SystemPrompt
         var parts = new List<string>();
         if (settings.Chat.AppendAppContext)
         {
-            parts.Add(AppContext.Replace("{{date}}", date).Replace("{{model}}", ModelName(context.Model)));
+            parts.Add(AppContext.Replace("{{date}}", date).Replace("{{model}}", ModelCatalog.DisplayName(context.Model)));
             parts.Add(SearchGuidance);
-            parts.Add(KnowledgeCutoff.Replace("{{date}}", date));
+            parts.Add(KnowledgeCutoff.Replace("{{date}}", date).Replace("{{cutoff}}", ModelCatalog.KnowledgeCutoff(context.Model)));
             parts.Add(ToneAndFormatting);
             if (profile.Nickname.Length > 0) parts.Add($"The user would like to be called {profile.Nickname}.");
             else if (profile.FullName.Length > 0) parts.Add($"The user's name is {profile.FullName}.");
@@ -136,15 +136,6 @@ public static class SystemPrompt
         if (preferences.Length > 0) parts.Add($"The user's preferences. Apply ones about format and approach; use background details only when relevant. Don't mention them.\n<userPreferences>\n{preferences}\n</userPreferences>");
         return string.Join("\n\n", parts);
     }
-
- static string ModelName(string model) => model switch
-    {
-        "claude-opus-5-5" => "Claude Opus 5.5",
-        "claude-fable-5-1" => "Claude Fable 5.1",
-        "claude-sonnet-5-5" => "Claude Sonnet 5.5",
-        "claude-haiku-5-5" => "Claude Haiku 5.5",
-        _ => $"Claude ({model})",
-    };
 
     const string PlanMode = """
         <plan_mode>

@@ -45,6 +45,12 @@ public sealed class PricingTable
             ["claude-opus-5"] = new() { Input = 5m, Output = 25m, CacheWrite = 6.25m, CacheRead = 0.5m },
             ["claude-opus-4-8"] = new() { Input = 5m, Output = 25m, CacheWrite = 6.25m, CacheRead = 0.5m },
             ["claude-sonnet-5"] = new() { Input = 2m, Output = 10m, CacheWrite = 2.5m, CacheRead = 0.2m },
+            // 「他のモデル」で選べる前の世代
+            ["claude-fable-5"] = new() { Input = 10m, Output = 50m, CacheWrite = 12.5m, CacheRead = 1m },
+            ["claude-opus-4-7"] = new() { Input = 5m, Output = 25m, CacheWrite = 6.25m, CacheRead = 0.5m },
+            ["claude-opus-4-6"] = new() { Input = 5m, Output = 25m, CacheWrite = 6.25m, CacheRead = 0.5m },
+            ["claude-sonnet-4-6"] = new() { Input = 3m, Output = 15m, CacheWrite = 3.75m, CacheRead = 0.3m },
+            ["claude-haiku-4-5"] = new() { Input = 1m, Output = 5m, CacheWrite = 1.25m, CacheRead = 0.1m },
         },
     };
 
@@ -112,10 +118,14 @@ public sealed class UsageLedger(AppPaths paths)
 
     public void ReloadPricing() => pricing = null;
 
-    // 前の版が書いた誤った初期値だけを直す。手で変えた値には触らない
+    // 前の版が書いた誤った初期値だけを直し、後から増えたモデルを足す。手で変えた値には触らない
     static bool CorrectOldDefaults(PricingTable table)
     {
         var changed = false;
+        foreach (var (model, price) in PricingTable.Default().Models)
+        {
+            if (table.Models.TryAdd(model, price)) changed = true;
+        }
         if (table.Models.TryGetValue("claude-sonnet-5-5", out var sonnet) && sonnet.CacheRead == 0.2m)
         {
             sonnet.CacheRead = 0.1m;

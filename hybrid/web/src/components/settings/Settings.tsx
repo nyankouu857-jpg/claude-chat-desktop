@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { createShortcuts, navigate, openPath, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
 import { findBuiltin } from "../../builtins";
 import { LANGUAGES } from "../../languages";
-import { EFFORTS, MODELS } from "../../models";
+import { ALL_MODELS, EFFORTS } from "../../models";
 import { useStore } from "../../store";
 import type { Settings, SettingsTab } from "../../types";
 import { NumberField, Toggle } from "../ui";
@@ -191,7 +191,7 @@ function Api({ settings }: { settings: Settings }) {
 
       <Section title="既定のモデル" description="新しいチャットで最初に選ばれるモデルです。入力欄のモデル選択でいつでも切り替えられます。">
         <div className="radio-list">
-          {MODELS.map((m) => (
+          {ALL_MODELS.map((m) => (
             <label key={m.id} className={`radio-row${chat.model === m.id ? " selected" : ""}`}>
               <input type="radio" checked={chat.model === m.id} onChange={() => void updateSettings({ chat: { model: m.id } })} />
               <span className="radio-title">{m.label}</span>

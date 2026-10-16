@@ -108,40 +108,60 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         var parameters = new MessageCreateParams
         {
             Model = options.Model,
-            // 上限は付けたくないが必須の値なので、選べるどのモデルも受け付ける最大にする。料金は実際に出た分だけ
-            MaxTokens = 128000,
+            // 上限は付けたくないが必須の値なので、そのモデルが受け付ける最大にする。料金は実際に出た分だけ
+            MaxTokens = ModelCatalog.MaxOutputTokens(options.Model),
             Messages = (messages ?? conversation.CopyApiMessages()).Select(ToParam).ToList(),
-            Thinking = new BetaThinkingConfigAdaptive
-            {
-                Display = Display.Summarized,
-                // 日付入りのシステムプロンプトやツールの増減で前の思考ブロックが無効になっても 400 にしない
-                BlockBinding = new BetaThinkingBlockBinding { PrefixMismatchBehavior = BetaThinkingPrefixMismatchBehavior.DropBlock },
-            },
-            OutputConfig = new BetaOutputConfig
-            {
-                Effort = ParseEffort(options.Effort),
-                Format = options.OutputSchema is { } schema ? FromJson<BetaJsonOutputFormat>(new JsonObject { ["type"] = "json_schema", ["schema"] = schema.DeepClone() }) : null,
-            },
+            // 日付入りのシステムプロンプトやツールの増減で前の思考ブロックが無効になっても 400 にしない
+            Thinking = ModelCatalog.UsesThinkingBudget(options.Model)
+                ? new BetaThinkingConfigEnabled
+                {
+                    BudgetTokens = ModelCatalog.ThinkingBudget(options.Effort),
+                    BlockBinding = new BetaThinkingBlockBinding { PrefixMismatchBehavior = BetaThinkingPrefixMismatchBehavior.DropBlock },
+                }
+                : new BetaThinkingConfigAdaptive
+                {
+                    Display = Display.Summarized,
+                    BlockBinding = new BetaThinkingBlockBinding { PrefixMismatchBehavior = BetaThinkingPrefixMismatchBehavior.DropBlock },
+                },
             CacheControl = new BetaCacheControlEphemeral(),
-            ContextManagement = new BetaContextManagementConfig
-            {
-                Edits =
-                [
-                    new BetaCompact20260112Edit
-                    {
-                        Trigger = new BetaInputTokensTrigger { ValueValue = Math.Max(MinCompactThreshold, options.CompactThreshold) },
-                        Instructions = CompactInstructions,
-                    },
-                ],
-            },
         };
+        var format = options.OutputSchema is { } schema ? FromJson<BetaJsonOutputFormat>(new JsonObject { ["type"] = "json_schema", ["schema"] = schema.DeepClone() }) : null;
+        // 思考の量をトークン数で決める世代は effort を受け付けないので、項目ごと送らない
+        if (!ModelCatalog.UsesThinkingBudget(options.Model))
+        {
+            parameters = parameters with { OutputConfig = new BetaOutputConfig { Effort = ParseEffort(ModelCatalog.EffortFor(options.Model, options.Effort)), Format = format } };
+        }
+        else if (format is not null)
+        {
+            parameters = parameters with { OutputConfig = new BetaOutputConfig { Format = format } };
+        }
+        if (ModelCatalog.SupportsCompaction(options.Model))
+        {
+            parameters = parameters with
+            {
+                ContextManagement = new BetaContextManagementConfig
+                {
+                    Edits =
+                    [
+                        new BetaCompact20260112Edit
+                        {
+                            Trigger = new BetaInputTokensTrigger { ValueValue = Math.Max(MinCompactThreshold, options.CompactThreshold) },
+                            Instructions = CompactInstructions,
+                        },
+                    ],
+                },
+            };
+        }
         if (!string.IsNullOrWhiteSpace(options.SystemPrompt)) parameters = parameters with { System = options.SystemPrompt };
 
         var toolList = ServerTools(options).ToList();
         toolList.AddRange(toolSpecs.Select(ToTool));
         if (toolList.Count > 0) parameters = parameters with { Tools = toolList };
 
-        List<ApiEnum<string, AnthropicBeta>> betas = ["compact-2026-01-12", "thinking-binding-controls-2026-08-01"];
+        List<ApiEnum<string, AnthropicBeta>> betas = ["thinking-binding-controls-2026-08-01"];
+        if (ModelCatalog.SupportsCompaction(options.Model)) betas.Add("compact-2026-01-12");
+        // トークン数で思考する世代は、ツールの合間に考えるのにこの印が要る
+        if (ModelCatalog.UsesThinkingBudget(options.Model)) betas.Add("interleaved-thinking-2025-05-14");
         if (options.CodeExecution && options.OfficeSkills)
         {
             // コンテナでスキルを使うにはコード実行のベータも要る。スキル側の印は古い API のために残す
@@ -161,8 +181,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             // 同じコンテナを使い続けると、前に作ったファイルや変数が残っている
             parameters = parameters with { Container = containerId };
         }
-        // Haiku 5.5 にはサーバー側フォールバックが無い
-        if (!IsHaiku(options.Model))
+        // Haiku や前の世代はサーバー側のフォールバックを受け付けない
+        if (ModelCatalog.SupportsDefaultFallback(options.Model))
         {
             betas.Add("server-side-fallback-2026-07-01");
             parameters = parameters with { Fallbacks = new Default() };
@@ -642,8 +662,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         messages.Add(new JsonObject { ["role"] = "user", ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = prompt }) });
         var request = BuildRequest(conversation, options, tools.GetTools(options.EnabledSources), messages) with
         {
-            // 要約や脇道の質問は長くならない
-            MaxTokens = 16000,
+            // 要約や脇道の質問は長くならない。トークン数で思考する世代は、思考の分より多くないと受け付けられない
+            MaxTokens = ModelCatalog.UsesThinkingBudget(options.Model) ? Math.Max(16000, ModelCatalog.ThinkingBudget(options.Effort) + 8000) : 16000,
             ToolChoice = FromJson<BetaToolChoice>(new JsonObject { ["type"] = "none" }),
         };
         var message = await client.Beta.Messages.Create(request, cancellationToken);

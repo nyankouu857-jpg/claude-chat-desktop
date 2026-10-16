@@ -11,7 +11,7 @@ import {
   toast,
   updateSettings,
 } from "./actions";
-import { EFFORTS, MODELS } from "./models";
+import { ALL_MODELS, EFFORTS } from "./models";
 import { getState, setState, type DialogState } from "./store";
 import type { PermissionMode } from "./types";
 
@@ -140,9 +140,12 @@ export async function runCommand(text: string, conversationId: string | null): P
       return "done";
     }
     case "model": {
-      const model = MODELS.find((m) => m.id === args || m.label.toLowerCase().startsWith(args.toLowerCase()) || m.id.includes(args.toLowerCase()));
+      const wanted = args.toLowerCase();
+      // 「opus 5」で Opus 5.5 を選ばないよう、名前が完全に合うものを先に探す
+      const model = ALL_MODELS.find((m) => m.id === wanted || m.label.toLowerCase() === wanted)
+        ?? ALL_MODELS.find((m) => m.label.toLowerCase().startsWith(wanted) || m.id.includes(wanted));
       if (!args || !model) {
-        toast(`モデルは ${MODELS.map((m) => m.label).join(" / ")} から選んでください`, "error");
+        toast(`モデルは ${ALL_MODELS.map((m) => m.label).join(" / ")} から選んでください`, "error");
         return "keep";
       }
       setChoice({ model: model.id });
