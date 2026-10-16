@@ -95,6 +95,9 @@ public sealed partial class Extensions(AppPaths paths, SettingsStore settings)
         return result;
     }
 
+    const int MaxSkillFiles = 500;
+    const long MaxSkillBytes = 50L * 1024 * 1024;
+
     // claude.ai の「Skill をアップロード」。SKILL.md が直下か、1 つ下のフォルダにある ZIP を受け付ける
     public string ImportSkill(byte[] zipBytes)
     {
@@ -111,9 +114,12 @@ public sealed partial class Extensions(AppPaths paths, SettingsStore settings)
         if (!IsSafeName(name)) throw new InvalidOperationException("SKILL.md の name は英数字とハイフンにしてください");
         var root = Path.GetFullPath(Path.Combine(paths.SkillsDir, name));
         if (Directory.Exists(root)) throw new InvalidOperationException($"{name} という Skill はもうあります");
+        var entries = zip.Entries.Where(e => e.FullName.StartsWith(prefix, StringComparison.Ordinal) && e.Name.Length > 0).ToList();
+        // 小さな ZIP で何 GB も書かせない
+        if (entries.Count > MaxSkillFiles || entries.Sum(e => e.Length) > MaxSkillBytes) throw new InvalidOperationException("Skill の中身が大きすぎます");
         try
         {
-            foreach (var entry in zip.Entries.Where(e => e.FullName.StartsWith(prefix, StringComparison.Ordinal) && e.Name.Length > 0))
+            foreach (var entry in entries)
             {
                 var target = Path.GetFullPath(Path.Combine(root, entry.FullName[prefix.Length..]));
                 // ../ を含む名前で skills の外へ書かせない

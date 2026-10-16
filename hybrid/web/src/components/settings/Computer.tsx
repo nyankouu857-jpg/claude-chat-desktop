@@ -1,6 +1,6 @@
 import { Copy, FolderOpen, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
-import { askConfirm, browserExtensionStatus, resetBrowserToken, toast, updateSettings, writeBrowserExtension } from "../../actions";
+import { askConfirm, browserExtensionStatus, resetBrowserToken, toast, updateSettings, writeBrowserExtension, type BrowserExtensionStatus } from "../../actions";
 import type { Settings } from "../../types";
 import { NumberField, Toggle } from "../ui";
 import { Section } from "./Settings";
@@ -8,8 +8,9 @@ import { Section } from "./Settings";
 // 拡張機能は 30 秒ごとにつなぎに来るので、画面を開いている間だけ様子を見る
 const STATUS_POLL_MS = 2000;
 
-function ExtensionSetup({ token }: { token?: string | null }) {
-  const [status, setStatus] = useState<{ connected: boolean; version?: string | null; error?: string | null } | null>(null);
+function ExtensionSetup() {
+  const [status, setStatus] = useState<BrowserExtensionStatus | null>(null);
+  const token = status?.token;
   const [folder, setFolder] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
@@ -46,13 +47,15 @@ function ExtensionSetup({ token }: { token?: string | null }) {
             <input className="input mono" readOnly value={token ?? ""} />
             <button type="button" className="button small" disabled={!token} onClick={async () => { await navigator.clipboard.writeText(token ?? ""); toast("コピーしました"); }}><Copy size={14} /> コピー</button>
             <button type="button" className="button small ghost" title="接続コードを作り直す" onClick={async () => {
-              if (await askConfirm("接続コードを作り直す", "今つながっている拡張機能は切れます。拡張機能に新しいコードを入れ直してください。")) await resetBrowserToken();
+              if (!(await askConfirm("接続コードを作り直す", "今つながっている拡張機能は切れます。拡張機能に新しいコードを入れ直してください。"))) return;
+              const next = await resetBrowserToken();
+              if (next) setStatus(next);
             }}><RefreshCw size={14} /></button>
           </div>
         </li>
       </ol>
       <div className="field-hint">
-        Claude が操作するのは、Claude が開いた「ClaudeChat」グループのタブだけです。ふだん開いているタブ (メールなど) は読みません。操作中のタブには Chrome が「デバッグを開始しました」という帯を出します。アプリを更新したら、もう一度書き出して chrome://extensions で再読み込みしてください。
+        Claude が操作するのは、Claude が開いた「ClaudeChat」グループのタブだけです。ふだん開いているタブは一覧にも出しません。Claude が開いたタブが、開くのを許可していないサイト (メールなど) に移ったときは、もう一度確認するまで中身を読みません。いつもの Chrome では「常に許可」は使えず、ページを開く・クリック・入力は毎回確認します。操作中のタブには Chrome が「デバッグを開始しました」という帯を出し、そこで「キャンセル」を押すと、そのタブはもう操作しません。アプリを更新したら、もう一度書き出して chrome://extensions で再読み込みしてください。
       </div>
     </div>
   );
@@ -111,7 +114,7 @@ export function Computer({ settings }: { settings: Settings }) {
           <button type="button" className={browser.mode === "extension" ? "on" : ""} onClick={() => void updateSettings({ browser: { mode: "extension" } })}>いつもの Chrome</button>
         </div>
         {browser.mode === "extension" ? (
-          browser.enabled ? <ExtensionSetup token={browser.extensionToken} /> : <div className="field-hint">ブラウザ操作をオンにすると、つなぎ方が出ます</div>
+          browser.enabled ? <ExtensionSetup /> : <div className="field-hint">ブラウザ操作をオンにすると、つなぎ方が出ます</div>
         ) : (
           <>
             <div className="field-hint">ふだんのブラウザとは別の窓で動きます。ログインが必要なサイトは、その窓で一度ログインしてください。ログイン情報などは代表フォルダの data/browser-profile に保存されます</div>

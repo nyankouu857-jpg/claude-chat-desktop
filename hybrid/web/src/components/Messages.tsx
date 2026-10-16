@@ -60,20 +60,44 @@ export interface Cite {
 
 // 本文中の引用の位置の印。Markdown として解釈されない私用領域の文字で挟む
 const citeMark = (n: number) => `\uE000${n}\uE001`;
-const escapeAttr = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 
 export const ARTIFACT_TYPE_LABELS: Record<string, string> = { html: "HTML", react: "React", markdown: "文書", svg: "画像", mermaid: "図", code: "コード" };
 
 function citeChip(cites: Cite[]) {
   const first = cites[0];
+  const url = first.url && /^https?:\/\//i.test(first.url) ? first.url : null;
   let label = first.title ?? "出典";
-  try { if (first.url) label = new URL(first.url).hostname.replace(/^www\./, ""); } catch { /* 表示用なので壊れた URL は題名で出す */ }
-  const tip = cites.map((c) => [c.title, c.citedText && `「${c.citedText}」`].filter(Boolean).join(" ")).join("\n");
-  const more = cites.length > 1 ? ` +${cites.length - 1}` : "";
-  return first.url
-    ? `<a class="cite-chip" href="${escapeAttr(first.url)}" title="${escapeAttr(tip)}">${escapeAttr(label)}${more}</a>`
-    : `<span class="cite-chip" title="${escapeAttr(tip)}">${escapeAttr(label)}${more}</span>`;
+  try { if (url) label = new URL(url).hostname.replace(/^www\./, ""); } catch { /* 表示用なので壊れた URL は題名で出す */ }
+  const chip = document.createElement(url ? "a" : "span");
+  chip.className = "cite-chip";
+  if (url) chip.setAttribute("href", url);
+  chip.title = cites.map((c) => [c.title, c.citedText && `「${c.citedText}」`].filter(Boolean).join(" ")).join("\n");
+  chip.textContent = label + (cites.length > 1 ? ` +${cites.length - 1}` : "");
+  return chip;
+}
+
+// 出典のチップは消毒の後に DOM として差し込む。文字列で差し込むと、属性の中に紛れた印からタグを抜け出せてしまう
+function withCites(html: string, cites: Cite[][]) {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+  const marked: Text[] = [];
+  while (walker.nextNode()) if ((walker.currentNode as Text).data.includes("\uE000")) marked.push(walker.currentNode as Text);
+  for (const node of marked) {
+    const fragment = document.createDocumentFragment();
+    node.data.split(/\uE000(\d+)\uE001/).forEach((part, i) => {
+      if (i % 2 === 0) fragment.append(part);
+      else if (cites[Number(part)]) fragment.append(citeChip(cites[Number(part)]));
+    });
+    node.replaceWith(fragment);
+  }
+  for (const element of template.content.querySelectorAll("*")) {
+    for (const attribute of [...element.attributes]) {
+      if (/[\uE000\uE001]/.test(attribute.value)) element.setAttribute(attribute.name, attribute.value.replace(/[\uE000\uE001]\d*/g, ""));
+    }
+  }
+  return template.innerHTML;
 }
 
 // 同じ出典を同じ文の後ろに何度も並べない
@@ -90,30 +114,33 @@ function uniqueCites(citations: WireBlock[]): Cite[] {
 }
 
 export const Markdown = memo(function Markdown({ text, cites }: { text: string; cites?: Cite[][] }) {
-  const html = useMemo(() => {
-    const rendered = renderMarkdown(text);
-    return cites?.length ? rendered.replace(/\uE000(\d+)\uE001/g, (_, n) => (cites[Number(n)] ? citeChip(cites[Number(n)]) : "")) : rendered;
+  const rendered = useMemo(() => {
+    const result = renderMarkdown(text);
+    return cites?.length ? { ...result, html: withCites(result.html, cites) } : result;
   }, [text, cites]);
   return (
     <div
       className="markdown"
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={{ __html: rendered.html }}
       onClick={(e) => {
         const target = e.target as HTMLElement;
         const copyButton = target.closest<HTMLElement>("[data-copy]");
         if (copyButton) {
-          const code = target.closest(".code-block")?.querySelector("code");
-          if (code) void navigator.clipboard.writeText(code.textContent ?? "");
+          const [owner, index] = (target.closest(".code-block")?.getAttribute("data-code") ?? "").split(/-(?=\d+$)/);
+          if (owner !== rendered.nonce) return;
+          void navigator.clipboard.writeText(rendered.codes[Number(index)] ?? "");
           copyButton.textContent = "コピーしました";
           // 押せたと分かる程度の時間
           setTimeout(() => { copyButton.textContent = "コピー"; }, 2000);
           return;
         }
-        const link = target.closest("a");
-        if (link && /^https?:/.test(link.href)) {
+        // SVG の a は href が文字列ではないので、属性で見る。どのリンクでも画面そのものは遷移させない
+        const link = target.closest("a, area");
+        if (link) {
           e.preventDefault();
+          const href = link.getAttribute("href") ?? link.getAttribute("xlink:href") ?? "";
           // WebView2 側で既定のブラウザに回す
-          window.open(link.href, "_blank", "noopener,noreferrer");
+          if (/^https?:\/\//i.test(href)) window.open(href, "_blank", "noopener,noreferrer");
         }
       }}
     />
@@ -606,7 +633,8 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
   const lastIndex = turn.blocks.length - 1;
   turn.blocks.forEach((block, i) => {
     if (block.type === "text") {
-      textBuffer += block.text ?? "";
+      // 出典の印と同じ文字が本文にあると、印として扱われてしまう
+      textBuffer += (block.text ?? "").replace(/[\uE000\uE001]/g, "");
       // claude.ai と同じく、出典を使った文のすぐ後ろに出典を付ける
       if (Array.isArray(block.citations) && block.citations.length > 0) {
         const unique = uniqueCites(block.citations);
@@ -647,7 +675,7 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
 
   const body = turn.blocks.filter((b) => b.type === "text").map((b) => b.text).join("");
   // コピーしたときにも出典が残るように
-  const fullText = sources.size > 0 ? `${body}\n\n${[...sources].map(([url, title]) => `- [${title}](${url})`).join("\n")}` : body;
+  const fullText = sources.size > 0 ? `${body}\n\n${[...sources].map(([url, title]) => `- [${title.replace(/[[\]()]/g, "\\$&")}](${url})`).join("\n")}` : body;
   const forkView = useStore((s) => s.conversations[conversationId]?.forkView?.[String(turn.start)]);
   return (
     <div className="assistant-turn">

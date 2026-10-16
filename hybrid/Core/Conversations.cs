@@ -277,7 +277,9 @@ public sealed class ConversationStore(AppPaths paths)
     List<ConversationSummary>? summaries;
 
     string IndexPath => Path.Combine(paths.ConversationsDir, "index.json");
-    string FilePath(string id) => Path.Combine(paths.ConversationsDir, $"{id}.json");
+    // ID はツールや画面からも来る。..\ や絶対パスで会話のフォルダの外の JSON を読ませない
+    static bool IsValidId(string id) => Guid.TryParse(id, out _);
+    string FilePath(string id) => IsValidId(id) ? Path.Combine(paths.ConversationsDir, $"{id}.json") : throw new InvalidOperationException("チャットの ID が不正です");
 
     async Task<List<ConversationSummary>> LoadIndexAsync() =>
         summaries ??= await Json.ReadAsync<List<ConversationSummary>>(IndexPath) ?? [];
@@ -300,7 +302,7 @@ public sealed class ConversationStore(AppPaths paths)
         await gate.WaitAsync();
         try
         {
-            if (deletedIds.Contains(id)) return null;
+            if (deletedIds.Contains(id) || !IsValidId(id)) return null;
             if (cache.TryGetValue(id, out var cached)) return cached;
             var loaded = await Json.ReadAsync<Conversation>(FilePath(id));
             if (loaded is not null) cache[id] = loaded;

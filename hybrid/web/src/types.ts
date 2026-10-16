@@ -192,7 +192,7 @@ export interface Settings {
   files: FileAccess;
   terminal: { enabled: boolean; timeoutSeconds: number };
   programs: { enabled: boolean };
-  browser: { enabled: boolean; executablePath?: string | null; mode: "dedicated" | "extension"; extensionToken?: string | null };
+  browser: { enabled: boolean; executablePath?: string | null; mode: "dedicated" | "extension" };
   agents: { enabled: boolean; maxConcurrent: number; maxWorkflowAgents: number; maxMessageHops: number };
   features: { memory: boolean; confirmMemoryWrites: boolean; artifacts: boolean; chatSearch: boolean; disabledSkills: string[]; allowBypassMode: boolean };
   hooks: Record<string, HookEntry[]>;

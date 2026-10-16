@@ -16,6 +16,10 @@ public sealed class Folder
 
 public sealed class FolderStore(AppPaths paths)
 {
+    // ID はナレッジとメモリのフォルダ名になる。.. や絶対パスで外のフォルダを指させない
+    public static string RequireId(string id) =>
+        Guid.TryParseExact(id, "N", out _) ? id : throw new InvalidOperationException("プロジェクトの ID が不正です");
+
     readonly SemaphoreSlim gate = new(1, 1);
     List<Folder>? folders;
 
@@ -46,8 +50,7 @@ public sealed class FolderStore(AppPaths paths)
     {
         if (string.IsNullOrWhiteSpace(folder.Name)) throw new InvalidOperationException("プロジェクト名を入れてください");
         if (!Scopes.Contains(folder.MessagingScope)) throw new InvalidOperationException("通信の範囲が不正です");
-        // ID はナレッジとメモリのフォルダ名になる。画面から来た値で外へ出られないようにする
-        if (!Guid.TryParseExact(folder.Id, "N", out _)) throw new InvalidOperationException("プロジェクトの ID が不正です");
+        RequireId(folder.Id);
         await gate.WaitAsync();
         try
         {

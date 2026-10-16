@@ -1057,3 +1057,7 @@ kbd { font-family: var(--font-mono); font-size: 12px; padding: 1px 6px; border: 
 .extension-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 13.5px; }
 .extension-steps li > div { margin-bottom: 6px; }
 .field-hint.mono { font-family: var(--font-mono); }
+.artifact-error-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.artifact-error-text pre { margin: 0; max-height: 72px; overflow: auto; white-space: pre-wrap; font-family: var(--font-mono); font-size: 11.5px; }
+/* 回答の中の style 属性で、ほかの場所 (承認のカードなど) に重ねて表示させない */
+.markdown { contain: paint; }

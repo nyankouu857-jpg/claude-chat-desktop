@@ -61,12 +61,12 @@ public sealed class AppHost : IAsyncDisposable
         scheduler = new Scheduler(paths, hub, conversations, events);
         mcp = new McpHub(paths);
         terminal = new TerminalToolProvider(settings);
-        bridge = new BrowserBridge(settings);
+        bridge = new BrowserBridge(settings, secrets);
         browser = new BrowserToolProvider(settings, paths, bridge);
         // 同じ名前があれば先に並べたものが勝つので、MCP は最後
         hub.Tools = new ToolRegistry(
         [
-            new FileToolProvider(settings, platform, checkpoints),
+            new FileToolProvider(settings, platform, checkpoints, paths),
             terminal,
             new ProgramToolProvider(settings),
             browser,
@@ -158,7 +158,7 @@ public sealed class AppHost : IAsyncDisposable
         "workflows.list" => Task.FromResult<JsonNode?>(workflows.ListView()),
         "workflows.stop" => StopWorkflowAsync(Str(p, "id")),
         "extensions.list" => Task.FromResult<JsonNode?>(ExtensionsView()),
-        "skills.import" => Task.FromResult<JsonNode?>(extensions.ImportSkill(Convert.FromBase64String(Str(p, "data")))),
+        "skills.import" => ImportSkillAsync(Str(p, "data")),
         "styles.get" => Task.FromResult<JsonNode?>(extensions.GetOutputStyle(Str(p, "id"))),
         "styles.save" => SaveStyleAsync((string?)p["id"], Str(p, "name"), Str(p, "text")),
         "styles.delete" => DeleteStyleAsync(Str(p, "id")),
@@ -193,7 +193,7 @@ public sealed class AppHost : IAsyncDisposable
         "pricing.reload" => ReloadPricingAsync(),
         "app.open" => OpenTargetAsync(Str(p, "target")),
         "app.pickFolder" => Task.FromResult<JsonNode?>(platform.PickFolder()),
-        "browser.extensionStatus" => Task.FromResult<JsonNode?>(new JsonObject { ["connected"] = bridge.Connected, ["version"] = bridge.Version, ["error"] = bridge.ListenError }),
+        "browser.extensionStatus" => BrowserStatusAsync(),
         "browser.writeExtension" => WriteExtensionAsync(),
         "browser.resetToken" => ResetBrowserTokenAsync(),
         "chat.systemPrompt" => PreviewSystemPromptAsync((string?)p["conversationId"]),
@@ -299,8 +299,6 @@ public sealed class AppHost : IAsyncDisposable
             if (patch["programs"] is JsonObject programs) s.Programs = Merge(s.Programs, programs);
             if (patch["browser"] is JsonObject browserPatch)
             {
-                // 接続コードは作り直しの窓口からだけ変える
-                browserPatch.Remove("extensionToken");
                 s.Browser = Merge(s.Browser, browserPatch);
                 if (s.Browser.Mode is not ("dedicated" or "extension")) s.Browser.Mode = "dedicated";
             }
@@ -376,6 +374,7 @@ public sealed class AppHost : IAsyncDisposable
     {
         if (folderId is not null && await folders.GetAsync(folderId) is null) throw new InvalidOperationException("プロジェクトが見つかりません");
         var conversation = await RequireConversationAsync(id);
+        if (conversation.Incognito) throw new InvalidOperationException("シークレットチャットはプロジェクトに入れられません");
         foreach (var target in new[] { conversation }.Concat(await DescendantsAsync(id)))
         {
             target.FolderId = folderId;
@@ -453,6 +452,7 @@ public sealed class AppHost : IAsyncDisposable
     // 中の会話は消さずにフォルダの外へ出す
     async Task<JsonNode?> DeleteFolderAsync(string id)
     {
+        if (await folders.GetAsync(FolderStore.RequireId(id)) is null) throw new InvalidOperationException("プロジェクトが見つかりません");
         foreach (var summary in (await conversations.ListAsync()).Where(s => s.FolderId == id))
         {
             if (await conversations.GetAsync(summary.Id) is not { } c) continue;
@@ -616,6 +616,9 @@ public sealed class AppHost : IAsyncDisposable
         var options = await OptionsAsync(conversation, p);
         await hub.StartAsync(conversation, () =>
         {
+            // 範囲外の番号でファイルの控えまで消さない
+            var messages = conversation.CopyMessages();
+            if (index < 0 || index >= messages.Count || !Conversation.IsHumanTurn(messages[index])) throw new InvalidOperationException("編集する発言がありません");
             checkpoints.ForgetFrom(conversation.Id, index);
             conversation.BranchFrom(index);
             conversation.Append(new JsonObject { ["role"] = "user", ["content"] = content });
@@ -774,13 +777,16 @@ public sealed class AppHost : IAsyncDisposable
         var conversation = await RequireConversationAsync(conversationId);
         Artifact artifact;
         lock (conversation.Artifacts) artifact = conversation.Artifacts.FirstOrDefault(a => a.Id == id) ?? throw new InvalidOperationException("アーティファクトが見つかりません");
+        var codeExtension = CodeExtension(artifact.Language);
+        // 言語は Claude が決める。.bat や .js のように、開くと動くファイルは作らない
+        if (ExecutableExtensions.Contains(codeExtension, StringComparer.OrdinalIgnoreCase)) codeExtension += ".txt";
         var extension = artifact.Type switch
         {
             "html" => ".html",
             "react" => ".jsx",
             "svg" => ".svg",
             "mermaid" => ".mmd",
-            "code" => CodeExtension(artifact.Language),
+            "code" => codeExtension,
             _ => ".md",
         };
         var path = Path.Combine(paths.ExportsDir, $"{FileNameOf(artifact.Title)}-v{artifact.Version}{extension}");
@@ -842,6 +848,17 @@ public sealed class AppHost : IAsyncDisposable
         return Task.FromResult<JsonNode?>(null);
     }
 
+    // 人から受け取った Skill は、説明が毎回 Claude への指示に入る。中身を確かめてからオンにしてもらう
+    async Task<JsonNode?> ImportSkillAsync(string data)
+    {
+        var name = extensions.ImportSkill(Convert.FromBase64String(data));
+        await settings.UpdateAsync(s =>
+        {
+            if (!s.Features.DisabledSkills.Contains(name, StringComparer.OrdinalIgnoreCase)) s.Features.DisabledSkills.Add(name);
+        });
+        return name;
+    }
+
     Task<JsonNode?> SaveStyleAsync(string? id, string name, string text)
     {
         var saved = extensions.SaveOutputStyle(id, name, text);
@@ -878,9 +895,9 @@ public sealed class AppHost : IAsyncDisposable
     }
 
     // アーティファクトは iframe で別のページとして出す。アプリの画面の CSP ではインラインのスクリプトが動かないため。
-    // 画像の読み込みだけでも中身を外へ送り出せるので、外への通信は cdnjs だけにする。
+    // 画像の読み込みやポップアップだけでも中身を外へ送り出せるので、外への通信は cdnjs だけにし、新しい窓も開かせない。
     // CSP の sandbox は、このページが直接開かれたときもアプリと別オリジンにするため
-    public const string ArtifactCsp = "default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com; img-src data: blob: https://cdnjs.cloudflare.com; font-src data: https://cdnjs.cloudflare.com; media-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; sandbox allow-scripts allow-popups allow-modals";
+    public const string ArtifactCsp = "default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com; img-src data: blob: https://cdnjs.cloudflare.com; font-src data: https://cdnjs.cloudflare.com; media-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals";
 
     public static bool IsArtifactPath(string path) => path.StartsWith("artifact/", StringComparison.Ordinal);
 
@@ -1036,12 +1053,18 @@ public sealed class AppHost : IAsyncDisposable
         return Task.FromResult<JsonNode?>(dir);
     }
 
+    async Task<JsonNode?> BrowserStatusAsync() => new JsonObject
+    {
+        ["connected"] = bridge.Connected,
+        ["version"] = bridge.Version,
+        ["error"] = bridge.ListenError,
+        ["token"] = await bridge.TokenAsync(),
+    };
+
     async Task<JsonNode?> ResetBrowserTokenAsync()
     {
-        await settings.UpdateAsync(s => s.Browser.ExtensionToken = null);
-        await bridge.DisconnectAsync();
-        await bridge.SyncAsync();
-        return SettingsView(settings.Current!);
+        await bridge.ResetTokenAsync();
+        return await BrowserStatusAsync();
     }
 
     Task<JsonNode?> OpenTargetAsync(string target) => OpenAsync(target switch
@@ -1069,6 +1092,14 @@ public sealed class AppHost : IAsyncDisposable
         terminal.Dispose();
         await browser.DisposeAsync();
         await bridge.DisposeAsync();
+        try
+        {
+            if (Directory.Exists(AppPaths.IncognitoFilesDir)) Directory.Delete(AppPaths.IncognitoFilesDir, recursive: true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // 開いたままのファイルがある。次に閉じるときに消える
+        }
         http.Dispose();
     }
 }

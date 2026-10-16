@@ -505,7 +505,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             try
             {
                 var metadata = await client.Beta.Files.RetrieveMetadata(fileId, cancellationToken: cancellationToken);
-                var dir = Path.Combine(paths.FilesDir, conversation.Id);
+                var dir = Path.Combine(conversation.Incognito ? AppPaths.IncognitoFilesDir : paths.FilesDir, conversation.Id);
                 Directory.CreateDirectory(dir);
                 var path = UniquePath(dir, SafeFileName(metadata.Filename));
                 using (var response = await client.Beta.Files.Download(fileId, cancellationToken: cancellationToken))
@@ -569,7 +569,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             var record = await ledger.RecordAsync(new UsageRecord
             {
                 At = DateTimeOffset.UtcNow,
-                ConversationId = conversation.Id,
+                ConversationId = conversation.Incognito ? null : conversation.Id,
                 Kind = kind,
                 Model = (string?)iteration["model"] ?? model,
                 Input = (long?)iteration["input_tokens"] ?? 0,
@@ -632,7 +632,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         await ledger.RecordAsync(new UsageRecord
         {
             At = DateTimeOffset.UtcNow,
-            ConversationId = conversation.Id,
+            ConversationId = conversation.Incognito ? null : conversation.Id,
             Kind = "title",
             Model = TitleModel,
             Input = response.Usage.InputTokens,

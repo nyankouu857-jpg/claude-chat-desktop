@@ -44,8 +44,13 @@ public sealed class FileToolProvider : IToolProvider
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
     }
 
-    public FileToolProvider(SettingsStore settings, IPlatform platform, Checkpoints checkpoints)
+    // アプリの代表フォルダ。ここの設定や拡張機能のファイルを書き換えられると、確認なしにツールを許可したり、
+    // いつもの Chrome を自由に動かす拡張機能に差し替えたりできてしまう。ほかのチャットの中身も読ませない
+    static string? appRoot;
+
+    public FileToolProvider(SettingsStore settings, IPlatform platform, Checkpoints checkpoints, AppPaths paths)
     {
+        appRoot = Normalize(paths.Root);
         this.settings = settings;
         this.platform = platform;
         this.checkpoints = checkpoints;
@@ -150,6 +155,7 @@ public sealed class FileToolProvider : IToolProvider
         var folder = FolderOf(full, access);
         if (folder.Root is null) throw new ToolException($"{full} は許可されたフォルダの外です。list_allowed_folders で確認してください");
         if (forWrite && folder.ReadOnly) throw new ToolException($"{folder.Root} は読み取り専用です");
+        if (appRoot is not null && (IsInside(full, appRoot) || (forWrite && IsInside(appRoot, full)))) throw new ToolException("ClaudeChat 自身のフォルダは読み書きできません");
         // .git のフックや設定を書き換えられると、次の git 操作で確認なしにコードが動く
         if (forWrite && full[folder.Root.Length..].Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(part => part.Equals(".git", StringComparison.OrdinalIgnoreCase)))
         {
@@ -165,6 +171,7 @@ public sealed class FileToolProvider : IToolProvider
             var target = info.ResolveLinkTarget(returnFinalTarget: true)?.FullName;
             var targetFolder = target is null ? default : FolderOf(Normalize(target), access);
             if (targetFolder.Root is null) throw new ToolException($"{current} は許可フォルダの外を指すリンクです");
+            if (appRoot is not null && IsInside(Normalize(target!), appRoot)) throw new ToolException("ClaudeChat 自身のフォルダは読み書きできません");
             if (forWrite && targetFolder.ReadOnly) throw new ToolException($"{current} は読み取り専用フォルダを指すリンクです");
         }
         return full;

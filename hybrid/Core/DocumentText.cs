@@ -11,6 +11,9 @@ public static partial class DocumentText
     public static readonly string[] Extensions = [".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".epub", ".rtf"];
     // 取り出した文字の上限。添付のテキストと同じくらいに抑える
     const int MaxChars = 2_000_000;
+    // 小さな ZIP が展開すると何 GB にもなる文書で、アプリを止めさせない
+    const long MaxXmlCharsPerPart = 20_000_000;
+    const int MaxParts = 2000;
 
     public static string Extract(string fileName, byte[] bytes)
     {
@@ -28,6 +31,7 @@ public static partial class DocumentText
     static string FromZip(string extension, byte[] bytes)
     {
         using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+        if (zip.Entries.Count > MaxParts) throw new InvalidOperationException("中のファイルが多すぎるので読めません");
         var builder = new StringBuilder();
         switch (extension)
         {
@@ -38,6 +42,7 @@ public static partial class DocumentText
                 // スライドの順番どおりに並べる
                 foreach (var entry in zip.Entries.Where(e => SlidePath().IsMatch(e.FullName)).OrderBy(e => int.Parse(SlidePath().Match(e.FullName).Groups[1].Value)))
                 {
+                    if (builder.Length > MaxChars) break;
                     builder.Append($"## スライド {SlidePath().Match(entry.FullName).Groups[1].Value}\n");
                     AppendParagraphs(Load(entry), "p", "t", builder);
                     builder.Append('\n');
@@ -52,6 +57,7 @@ public static partial class DocumentText
             case ".epub":
                 foreach (var entry in zip.Entries.Where(e => e.FullName.EndsWith(".xhtml", StringComparison.OrdinalIgnoreCase) || e.FullName.EndsWith(".html", StringComparison.OrdinalIgnoreCase)).OrderBy(e => e.FullName))
                 {
+                    if (builder.Length > MaxChars) break;
                     AppendParagraphs(Load(entry), "p", null, builder);
                 }
                 break;
@@ -64,7 +70,14 @@ public static partial class DocumentText
     static XDocument Load(ZipArchiveEntry entry)
     {
         using var stream = entry.Open();
-        return XDocument.Load(stream);
+        // DTD の実体参照を何重にも展開させる文書 (billion laughs) を読まない
+        using var reader = System.Xml.XmlReader.Create(stream, new System.Xml.XmlReaderSettings
+        {
+            DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+            XmlResolver = null,
+            MaxCharactersInDocument = MaxXmlCharsPerPart,
+        });
+        return XDocument.Load(reader);
     }
 
     static void AppendWordXml(ZipArchive zip, string path, StringBuilder builder)
@@ -93,6 +106,7 @@ public static partial class DocumentText
             : [];
         foreach (var sheet in zip.Entries.Where(e => SheetPath().IsMatch(e.FullName)).OrderBy(e => int.Parse(SheetPath().Match(e.FullName).Groups[1].Value)))
         {
+            if (builder.Length > MaxChars) break;
             builder.Append($"## シート {SheetPath().Match(sheet.FullName).Groups[1].Value}\n");
             foreach (var row in Load(sheet).Descendants().Where(e => e.Name.LocalName == "row"))
             {

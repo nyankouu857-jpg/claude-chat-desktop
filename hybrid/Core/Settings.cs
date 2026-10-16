@@ -96,8 +96,6 @@ public sealed class BrowserSettings
     public string? ExecutablePath { get; set; }
     // dedicated: アプリ専用のプロフィール / extension: 拡張機能を通していつもの Chrome
     public string Mode { get; set; } = "dedicated";
-    // 拡張機能と取り決める接続コード。最初に extension を選んだときに作る
-    public string? ExtensionToken { get; set; }
 }
 
 public sealed class FileAccessSettings

@@ -99,8 +99,11 @@ async Task HandleAsync(HttpListenerContext context)
         return;
     }
     var file = Path.GetFullPath(Path.Combine(webRoot, relative.Length == 0 ? "index.html" : relative));
-    if (!file.StartsWith(webRoot) || !File.Exists(file)) file = Path.Combine(webRoot, "index.html");
+    // 区切りまで見ないと、隣の dist-old のようなフォルダも読めてしまう
+    if (!file.StartsWith(webRoot + Path.DirectorySeparatorChar) || !File.Exists(file)) file = Path.Combine(webRoot, "index.html");
     context.Response.ContentType = ContentTypes.Of(file);
+    // ほかのサイトに枠で埋め込まれて、押し間違いを誘われないように
+    context.Response.Headers["Content-Security-Policy"] = "frame-ancestors 'none'";
     var bytes = await File.ReadAllBytesAsync(file);
     await context.Response.OutputStream.WriteAsync(bytes);
     context.Response.Close();

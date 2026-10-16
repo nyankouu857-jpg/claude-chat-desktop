@@ -27,6 +27,9 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
     string? currentTargetId;
     // 設定で接続先を変えたら、前の接続先のタブを使い続けない
     string? sessionMode;
+    // いつもの Chrome で、確認なしに読んでよいサイト。ユーザーが open を許可したものだけ。
+    // 開いたページが勝手にメールなどへ移っても、ログイン中の中身を確認なしで Claude に渡さない
+    readonly HashSet<string> approvedHosts = new(StringComparer.OrdinalIgnoreCase);
     int port;
 
     const string SnapshotScript = """
@@ -123,7 +126,9 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
         if (!Enabled || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
-        return Tools().Select(t => new ToolSpec(Prefix + t.Name, Source, t.Name, t.Title, t.Name == "open" ? t.Description + OpenNote : t.Description, t.Schema, t.AutoApprove, t.AllowAlways)).ToList();
+        // いつもの Chrome ではあなたの名前で操作するので、「常に許可」は出さない。専用の窓で許可した分も持ち越さない
+        var allowAlways = Mode != "extension";
+        return Tools().Select(t => new ToolSpec(Prefix + t.Name, Source, t.Name, t.Title, t.Name == "open" ? t.Description + OpenNote : t.Description, t.Schema, t.AutoApprove, t.AllowAlways && allowAlways)).ToList();
     }
 
     public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
@@ -138,6 +143,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
             {
                 await ResetSessionAsync();
                 currentTargetId = null;
+                approvedHosts.Clear();
                 sessionMode = Mode;
             }
             var result = await tool.Run(input, cancellationToken);
@@ -355,8 +361,24 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         }
     }
 
+    static string HostKey(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed)) return "";
+        var host = parsed.Host.ToLowerInvariant();
+        return host.StartsWith("www.") ? host[4..] : host;
+    }
+
+    async Task GuardHostAsync(IPageChannel page, CancellationToken cancellationToken)
+    {
+        if (Mode != "extension") return;
+        var url = (string?)await EvalAsync(page, "location.href", cancellationToken) ?? "";
+        if (url == "about:blank" || approvedHosts.Contains(HostKey(url))) return;
+        throw new ToolException($"このタブは {HostKey(url)} に移っています。いつもの Chrome では、確認なしに読めるのは open で開いたサイトだけです。中身が必要なら、open で {url} を開き直してください (ユーザーに確認が出ます)");
+    }
+
     async Task<string> DescribePageAsync(IPageChannel page, CancellationToken cancellationToken)
     {
+        await GuardHostAsync(page, cancellationToken);
         var raw = (string?)await EvalAsync(page, SnapshotScript.Replace("__MAX__", MaxElements.ToString()), cancellationToken) ?? "{}";
         var snapshot = JsonNode.Parse(raw)!.AsObject();
         var text = (string?)snapshot["text"] ?? "";
@@ -427,6 +449,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         var isWeb = Uri.TryCreate(url, UriKind.Absolute, out var parsed) && parsed.Scheme is "http" or "https";
         if (!isWeb && url != "about:blank") throw new ToolException("開けるのは http と https のページだけです。PC のファイルはフォルダ操作のツールで読んでください");
         var page = await PageAsync(cancellationToken, newTab: (bool?)input["new_tab"] == true);
+        approvedHosts.Add(HostKey(url));
         var result = await page.SendAsync("Page.navigate", new JsonObject { ["url"] = url }, cancellationToken);
         if ((string?)result["errorText"] is { Length: > 0 } error) throw new ToolException($"{url} を開けませんでした: {error}");
         await WaitForLoadAsync(page, cancellationToken);
@@ -439,6 +462,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
     async Task<ToolCallResult> ScreenshotAsync(CancellationToken cancellationToken)
     {
         var page = await PageAsync(cancellationToken);
+        await GuardHostAsync(page, cancellationToken);
         // PNG だと API の画像上限を超えやすい
         var shot = await page.SendAsync("Page.captureScreenshot", new JsonObject { ["format"] = "jpeg", ["quality"] = 70 }, cancellationToken);
         return new ToolCallResult(new JsonArray(new JsonObject
@@ -460,7 +484,10 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         await WaitForLoadAsync(page, cancellationToken);
         var title = await EvalAsync(page, "JSON.stringify([location.href, document.title])", cancellationToken);
         var info = JsonNode.Parse((string?)title ?? "[]") as JsonArray;
-        return Text($"要素 {reference} をクリックしました。今のページ: {info?[1]} ({info?[0]})。結果を確かめるには snapshot を使ってください");
+        var url = (string?)info?[0] ?? "";
+        // 確認していないサイトに移ったら、題名 (受信件数などが入る) も渡さない
+        var pageTitle = Mode == "extension" && !approvedHosts.Contains(HostKey(url)) ? "" : $"{info?[1]} ";
+        return Text($"要素 {reference} をクリックしました。今のページ: {pageTitle}({url})。結果を確かめるには snapshot を使ってください");
     }
 
     async Task<ToolCallResult> TypeAsync(JsonObject input, CancellationToken cancellationToken)
@@ -551,7 +578,9 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
             return Text($"タブを切り替えました\n\n{await DescribePageAsync(page, cancellationToken)}");
         }
         if (pages.Count == 0) return Text("開いているタブはありません。open で開いてください");
-        return Text(string.Join("\n", pages.Select(t => $"{(t.Id == currentTargetId ? "* " : "  ")}{t.Id}  {t.Title}  ({t.Url})")));
+        // 確認していないサイトのタブは、題名にメールの件名などが出ることがあるので伏せる
+        string TitleOf((string Id, string Title, string Url) tab) => Mode == "extension" && !approvedHosts.Contains(HostKey(tab.Url)) && tab.Url != "about:blank" ? "(確認していないサイト)" : tab.Title;
+        return Text(string.Join("\n", pages.Select(t => $"{(t.Id == currentTargetId ? "* " : "  ")}{t.Id}  {TitleOf(t)}  ({t.Url})")));
     }
 
     async Task<ToolCallResult> EvaluateAsync(JsonObject input, CancellationToken cancellationToken)

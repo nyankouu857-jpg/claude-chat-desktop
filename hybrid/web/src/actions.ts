@@ -131,8 +131,10 @@ export async function importSkill(file: File) {
   });
   const name = await guard(() => call<string>("skills.import", { data }));
   if (name) {
+    // 取り込んだ Skill は止めた状態で入るので、設定の一覧も読み直す
+    await updateSettings({});
     await refreshExtensions();
-    toast(`Skill「${name}」を追加しました`);
+    toast(`Skill「${name}」を追加しました。中身を確かめてからオンにしてください`);
   }
 }
 
@@ -494,13 +496,17 @@ export const setQuote = (conversationId: string, text: string | null) =>
     return { ...s, quotes: text ? { ...quotes, [conversationId]: text } : quotes };
   });
 
-export const browserExtensionStatus = () => call<{ connected: boolean; version?: string | null; error?: string | null }>("browser.extensionStatus");
+export interface BrowserExtensionStatus {
+  connected: boolean;
+  version?: string | null;
+  error?: string | null;
+  token?: string | null;
+}
+
+export const browserExtensionStatus = () => call<BrowserExtensionStatus>("browser.extensionStatus");
 export const writeBrowserExtension = () => guard(() => call<string>("browser.writeExtension"));
 
-export async function resetBrowserToken() {
-  const settings = await guard(() => call<Settings>("browser.resetToken"));
-  if (settings) setState((s) => ({ ...s, settings }));
-}
+export const resetBrowserToken = () => guard(() => call<BrowserExtensionStatus>("browser.resetToken"));
 
 export const extractDocumentText = (name: string, data: string) => call<string>("files.extractText", { name, data });
 

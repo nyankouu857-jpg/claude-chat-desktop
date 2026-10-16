@@ -21,9 +21,13 @@ public static partial class ArtifactPages
         ("chart.js", "Chart", ["Chart.js/4.4.1/chart.umd.min.js"]),
     ];
 
-    // 中で起きたエラーを画面へ知らせる。「修正を試す」に使う
+    // 中で起きたエラーを画面へ知らせる。「修正を試す」に使う。
+    // WebRTC は CSP の connect-src で止まらず、会話の中身を外へ送り出せるので、ページのスクリプトより先に取り上げる
     const string ErrorReporter = """
         <script>
+        for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel", "RTCSessionDescription", "RTCIceCandidate"]) {
+          Object.defineProperty(window, name, { value: undefined, writable: false, configurable: false });
+        }
         window.__reportError = (message) => parent.postMessage({ type: "artifact-error", message: String(message) }, "*");
         window.addEventListener("error", (e) => window.__reportError(e.error?.stack || e.message));
         window.addEventListener("unhandledrejection", (e) => window.__reportError(e.reason?.stack || e.reason));
@@ -34,7 +38,7 @@ public static partial class ArtifactPages
     {
         "html" => WithErrorReporter(content),
         "react" => React(content),
-        "svg" => $"<!doctype html><meta charset=\"utf-8\"><style>body{{margin:0;display:flex;justify-content:center;background:#fff}}svg{{max-width:100%;height:auto}}</style>{content}",
+        "svg" => $"<!doctype html><meta charset=\"utf-8\">{ErrorReporter}<style>body{{margin:0;display:flex;justify-content:center;background:#fff}}svg{{max-width:100%;height:auto}}</style>{content}",
         "mermaid" => $$"""
             <!doctype html><meta charset="utf-8">
             <style>body{margin:16px;background:#fff;font-family:sans-serif}</style>
@@ -46,13 +50,13 @@ public static partial class ArtifactPages
         _ => null,
     };
 
-    // doctype より前に何か置くと互換モードになるので、head の直後に差し込む
+    // ページのどのスクリプトよりも先に動かす。doctype より前に置くと互換モードになるので、その直後に差し込む
     static string WithErrorReporter(string html)
     {
-        var head = HeadTag().Match(html);
-        if (head.Success) return html.Insert(head.Index + head.Length, ErrorReporter);
         var doctype = Doctype().Match(html);
-        return doctype.Success ? html.Insert(doctype.Index + doctype.Length, ErrorReporter) : ErrorReporter + html;
+        return doctype.Success && doctype.Index == html.Length - html.TrimStart().Length
+            ? html.Insert(doctype.Index + doctype.Length, ErrorReporter)
+            : ErrorReporter + html;
     }
 
     static string React(string code)
@@ -131,9 +135,6 @@ public static partial class ArtifactPages
             </body></html>
             """;
     }
-
-    [GeneratedRegex(@"<head(\s[^>]*)?>", RegexOptions.IgnoreCase)]
-    private static partial Regex HeadTag();
 
     [GeneratedRegex(@"<!doctype[^>]*>", RegexOptions.IgnoreCase)]
     private static partial Regex Doctype();

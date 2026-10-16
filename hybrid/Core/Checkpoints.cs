@@ -24,7 +24,8 @@ public sealed class Checkpoints(AppPaths paths, IPlatform platform)
     // 同じ発言の中で最初に触る前の状態だけを残す
     public void Record(string path)
     {
-        if (ToolContext.Current?.Conversation is not { } conversation) return;
+        // シークレットチャットで触ったファイルの控えや一覧をディスクに残さない
+        if (ToolContext.Current?.Conversation is not { Incognito: false } conversation) return;
         var turn = conversation.LastHumanIndex();
         if (turn < 0) return;
         lock (sync)

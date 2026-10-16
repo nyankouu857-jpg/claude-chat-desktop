@@ -121,7 +121,8 @@ public sealed class ChatHub(
         var enabled = source["enabledSources"] is JsonArray list ? list.Select(n => (string?)n).OfType<string>().ToHashSet() : null;
         // サブエージェントはさらに子を作ったり、ほかのチャットを動かしたりしない
         if (depth > 0) enabled = (enabled ?? Tools.SourceNames().ToHashSet()).Where(s => s != AgentToolProvider.Source).ToHashSet();
-        if (conversation.Incognito) enabled = (enabled ?? Tools.SourceNames().ToHashSet()).Where(s => s is not (MemoryToolProvider.Source or ChatSearchToolProvider.Source)).ToHashSet();
+        // 予定は会話の中身を schedules.json に残し、後で保存されるチャットを作るので使わせない
+        if (conversation.Incognito) enabled = (enabled ?? Tools.SourceNames().ToHashSet()).Where(s => s is not (MemoryToolProvider.Source or ChatSearchToolProvider.Source or ScheduleToolProvider.Source)).ToHashSet();
         var folder = await folders.GetAsync(conversation.FolderId);
         string BuildPrompt() => SystemPrompt.Build(current, new PromptContext
         {

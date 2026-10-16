@@ -3,11 +3,15 @@ namespace ClaudeChat.Core;
 // いつもの Chrome に入れてもらう拡張機能。アプリの中に持ち、設定画面のボタンで書き出す
 public static class ChromeExtension
 {
+    // 拡張機能の ID を BrowserBridge.ExtensionId に固定するための公開鍵。秘密鍵は持たない (パッケージ化しない読み込みには要らない)
+    const string PublicKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAk9AmnF0uk+Cdz8p9WG7nrdKlFCoobJp9LHtmbdB86CRDNllAVy1+DxT6/9D1mqcmFIDijIAPeX/PFK3ZwwAMYXguF9ChyrlzNUxADUkpHRXAy0dsFTfKhOf9QlzKhKNOPegy2IZWAf9ufgkIuWFTePFNGNYRprPw6Aaoay+6u9JoTPo5S9tQiHliJsAM4gMUmWDGZtDLPbPQIwnWQD/lAJ76f5XAP97cjwLewaieRjZFQn6niAcZcr9OAvW0rCPMQ9MaKzSZin9r2DY4LaINrE3uMvPGec9iT3w05brN6X5nAqfkxgIX917GgVZ6Rpdqq/uUudwfRiGGHGFtsL/+EwIDAQAB";
+
     const string Manifest = """
         {
           "manifest_version": 3,
+          "key": "__KEY__",
           "name": "ClaudeChat 連携",
-          "version": "1.0.0",
+          "version": "1.1.0",
           "description": "ClaudeChat のブラウザ操作で、このブラウザを使えるようにします。",
           "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],
           "background": { "service_worker": "background.js" },
@@ -50,7 +54,8 @@ public static class ChromeExtension
             const message = JSON.parse(e.data);
             if (!verified) {
               // 接続コードを知らない相手には従わない。ほかのプログラムがこの番号で待ち受けていても乗っ取られないように
-              if (message.type !== "welcome" || message.proof !== await proof(token, "app:" + nonce)) {
+              const bound = `${nonce}:${message.nonce}`;
+              if (message.type !== "welcome" || typeof message.nonce !== "string" || message.proof !== await proof(token, "app:" + bound)) {
                 await setStatus("bad-token");
                 ws.close();
                 return;
@@ -58,7 +63,7 @@ public static class ChromeExtension
               verified = true;
               socket = ws;
               connecting = false;
-              ws.send(JSON.stringify({ type: "ready", proof: await proof(token, "ext:" + nonce) }));
+              ws.send(JSON.stringify({ type: "ready", proof: await proof(token, "ext:" + bound) }));
               await setStatus("connected");
               return;
             }
@@ -72,6 +77,12 @@ public static class ChromeExtension
             else if ((await chrome.storage.session.get("status")).status !== "bad-token") await setStatus("waiting");
           };
         }
+
+        // アプリのツールが使う命令だけを通す。万一つないだ相手が偽物でも、全サイトの Cookie を抜くような命令は通さない
+        const ALLOWED_METHODS = new Set([
+          "Page.enable", "Page.navigate", "Page.captureScreenshot", "Page.handleJavaScriptDialog",
+          "Runtime.evaluate", "Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText",
+        ]);
 
         async function requireOwned(tabId) {
           if (!(await ownedTabs()).includes(tabId)) throw new Error("ClaudeChat が開いたタブではないので操作できません");
@@ -107,12 +118,9 @@ public static class ChromeExtension
             await requireOwned(id);
             const tab = await chrome.tabs.update(id, { active: true });
             await chrome.windows.update(tab.windowId, { focused: true });
-            try {
-              await chrome.debugger.attach({ tabId: id }, "1.3");
-            } catch (e) {
-              // 自分が付けたままなら、そのまま使う
-              if (!String(e.message).includes("already attached")) throw e;
-            }
+            // 自分が付けたままなら、そのまま使う。ほかの拡張機能や DevTools が付けているタブは横取りしない
+            const targets = await chrome.debugger.getTargets();
+            if (!targets.some((t) => t.tabId === id && t.attached && t.extensionId === chrome.runtime.id)) await chrome.debugger.attach({ tabId: id }, "1.3");
             return {};
           },
           async detach({ tabId }) {
@@ -122,6 +130,9 @@ public static class ChromeExtension
           async send({ tabId, method, params }) {
             const id = Number(tabId);
             await requireOwned(id);
+            if (!ALLOWED_METHODS.has(method)) throw new Error(`${method} は使えない命令です`);
+            // chrome:// や file:// を開かせない
+            if (method === "Page.navigate" && !/^https?:\/\//i.test(params?.url ?? "") && params?.url !== "about:blank") throw new Error("開けるのは http と https のページだけです");
             return (await chrome.debugger.sendCommand({ tabId: id }, method, params ?? {})) ?? {};
           },
         };
@@ -139,7 +150,11 @@ public static class ChromeExtension
         chrome.debugger.onEvent.addListener((source, method, params) => {
           if (method === "Page.javascriptDialogOpening") send({ event: "dialog", tabId: String(source.tabId), params });
         });
-        chrome.debugger.onDetach.addListener((source) => send({ event: "detached", tabId: String(source.tabId) }));
+        chrome.debugger.onDetach.addListener(async (source, reason) => {
+          // デバッグの帯で「キャンセル」を押されたら、そのタブには二度と付けない
+          if (reason === "canceled_by_user") await setOwnedTabs((await ownedTabs()).filter((id) => id !== source.tabId));
+          send({ event: "detached", tabId: String(source.tabId) });
+        });
         chrome.tabs.onRemoved.addListener(async (tabId) => setOwnedTabs((await ownedTabs()).filter((id) => id !== tabId)));
         chrome.storage.onChanged.addListener((changes, area) => {
           if (area !== "local" || !changes.token) return;
@@ -207,7 +222,7 @@ public static class ChromeExtension
     public static void Write(string dir)
     {
         Directory.CreateDirectory(dir);
-        File.WriteAllText(Path.Combine(dir, "manifest.json"), Manifest);
+        File.WriteAllText(Path.Combine(dir, "manifest.json"), Manifest.Replace("__KEY__", PublicKey));
         File.WriteAllText(Path.Combine(dir, "background.js"), Background.Replace("__PORT__", BrowserBridge.Port.ToString()));
         File.WriteAllText(Path.Combine(dir, "popup.html"), Popup);
         File.WriteAllText(Path.Combine(dir, "popup.js"), PopupScript);

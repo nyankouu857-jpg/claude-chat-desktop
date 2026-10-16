@@ -10,10 +10,19 @@ namespace ClaudeChat.Core;
 
 // いつもの Chrome に入れた拡張機能と話す窓口。Chrome は普段のプロフィールで外からの操作を受け付けないので、
 // 拡張機能が chrome.debugger で DevTools プロトコルを中継する
-public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
+public sealed class BrowserBridge(SettingsStore settings, SecretStore secrets) : IAsyncDisposable
 {
     // 拡張機能が探しに来る番号。変えるなら ChromeExtension の background.js も
     public const int Port = 47823;
+    // manifest の key から決まる ID。ほかの拡張機能からの接続は受けない
+    public const string ExtensionId = "fgihkabbaljobmkhmnlfdmobjkdiilgl";
+    public const string TokenSecret = "browserToken";
+    static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(10);
+    // 名乗る前の相手には小さな文しか読ませない。名乗った後もスクリーンショットが収まる程度まで
+    const int MaxHandshakeBytes = 16 * 1024;
+    const int MaxMessageBytes = 64 * 1024 * 1024;
+    // 名乗る前の接続を溜め込ませない
+    const int MaxPendingConnections = 4;
     static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
     // 拡張機能の service worker は 30 秒何も届かないと止められる
     static readonly TimeSpan PingInterval = TimeSpan.FromSeconds(20);
@@ -32,6 +41,8 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
     CancellationTokenSource? listening;
     Connection? current;
     int nextId;
+    int pendingConnections;
+    string? token;
 
     public event Action<string, JsonObject>? DialogOpened;
     public event Action<string>? Detached;
@@ -43,12 +54,24 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
 
     bool Wanted => settings.Current?.Browser is { Enabled: true, Mode: "extension" };
 
+    // 接続コード。API キーと同じく暗号化して保存する
+    public async Task<string?> TokenAsync() => token ??= await secrets.GetAsync(TokenSecret);
+
+    public async Task ResetTokenAsync()
+    {
+        token = null;
+        await secrets.SetAsync(TokenSecret, null);
+        await DropAsync(current);
+        await SyncAsync();
+    }
+
     // 設定で拡張機能を選んだときだけ待ち受ける。使わない人の PC でポートを開けない
     public async Task SyncAsync()
     {
-        if (Wanted && settings.Current?.Browser.ExtensionToken is not { Length: > 0 })
+        if (Wanted && await TokenAsync() is null)
         {
-            await settings.UpdateAsync(s => s.Browser.ExtensionToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant());
+            token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+            await secrets.SetAsync(TokenSecret, token);
         }
         lock (sync)
         {
@@ -91,6 +114,12 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
             {
                 return;
             }
+            if (Interlocked.Increment(ref pendingConnections) > MaxPendingConnections)
+            {
+                Interlocked.Decrement(ref pendingConnections);
+                client.Dispose();
+                continue;
+            }
             _ = ServeAsync(client, cancellationToken);
         }
     }
@@ -99,11 +128,20 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
     {
         var stream = client.GetStream();
         WebSocket? socket = null;
+        var pending = true;
+        void Authenticated()
+        {
+            if (!pending) return;
+            pending = false;
+            Interlocked.Decrement(ref pendingConnections);
+        }
         try
         {
-            var headers = await ReadHeadersAsync(stream, cancellationToken);
-            // ふつうの Web ページも localhost へ WebSocket をつなげる。Origin はページから偽れないので拡張機能だけ通す
-            if (headers is null || !headers.TryGetValue("origin", out var origin) || !origin.StartsWith("chrome-extension://", StringComparison.Ordinal)
+            using var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            handshakeTimeout.CancelAfter(HandshakeTimeout);
+            var headers = await ReadHeadersAsync(stream, handshakeTimeout.Token);
+            // ふつうの Web ページも localhost へ WebSocket をつなげる。Origin はページから偽れないので、この拡張機能だけ通す
+            if (headers is null || !headers.TryGetValue("origin", out var origin) || origin != $"chrome-extension://{ExtensionId}"
                 || !headers.TryGetValue("sec-websocket-key", out var key))
             {
                 await stream.WriteAsync("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"u8.ToArray(), cancellationToken);
@@ -112,7 +150,8 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
             var accept = Convert.ToBase64String(SHA1.HashData(Encoding.ASCII.GetBytes(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
             await stream.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"), cancellationToken);
             socket = WebSocket.CreateFromStream(stream, new WebSocketCreationOptions { IsServer = true });
-            if (await HandshakeAsync(socket, cancellationToken) is not { } version) return;
+            if (await HandshakeAsync(socket, handshakeTimeout.Token) is not { } version) return;
+            Authenticated();
             var connection = new Connection(socket, version);
             Connection? previous;
             lock (sync)
@@ -126,12 +165,13 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
             await ReceiveLoopAsync(connection, cancellationToken);
             pinging.Cancel();
         }
-        catch (Exception e) when (e is IOException or WebSocketException or OperationCanceledException)
+        catch (Exception e) when (e is IOException or WebSocketException or OperationCanceledException or System.Text.Json.JsonException or InvalidDataException)
         {
-            // 拡張機能やアプリが閉じられた
+            // 拡張機能やアプリが閉じられた。または決まりに合わない文が届いた
         }
         finally
         {
+            Authenticated();
             socket?.Dispose();
             client.Dispose();
         }
@@ -157,19 +197,19 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
         return headers;
     }
 
-    // 接続コードを知っていることをお互いに示す。ほかのプログラムがこの番号で待ち受けて、いつもの Chrome を乗っ取れないように
+    // 接続コードを知っていることをお互いに示す。ほかのプログラムがこの番号で待ち受けて、いつもの Chrome を乗っ取れないように。
+    // 両方が出した使い捨ての数を混ぜるので、一度盗み見たやり取りを流し直されても通らない
     async Task<string?> HandshakeAsync(WebSocket socket, CancellationToken cancellationToken)
     {
-        var token = settings.Current?.Browser.ExtensionToken;
-        if (token is not { Length: > 0 }) return null;
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(10));
-        var hello = await ReadMessageAsync(socket, timeout.Token);
-        if ((string?)hello?["type"] != "hello" || (string?)hello["nonce"] is not { Length: > 0 } nonce) return null;
-        await WriteAsync(socket, new JsonObject { ["type"] = "welcome", ["proof"] = Proof(token, "app:" + nonce) }, cancellationToken);
-        var ready = await ReadMessageAsync(socket, timeout.Token);
-        if ((string?)ready?["type"] != "ready" || !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes((string?)ready["proof"] ?? ""), Encoding.ASCII.GetBytes(Proof(token, "ext:" + nonce)))) return null;
-        return (string?)hello["version"] ?? "";
+        if (await TokenAsync() is not { } secret) return null;
+        var hello = await ReadMessageAsync(socket, MaxHandshakeBytes, cancellationToken);
+        if ((string?)hello?["type"] != "hello" || (string?)hello["nonce"] is not { Length: > 0 and <= 100 } clientNonce) return null;
+        var serverNonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        var bound = $"{clientNonce}:{serverNonce}";
+        await WriteAsync(socket, new JsonObject { ["type"] = "welcome", ["nonce"] = serverNonce, ["proof"] = Proof(secret, "app:" + bound) }, cancellationToken);
+        var ready = await ReadMessageAsync(socket, MaxHandshakeBytes, cancellationToken);
+        if ((string?)ready?["type"] != "ready" || !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes((string?)ready["proof"] ?? ""), Encoding.ASCII.GetBytes(Proof(secret, "ext:" + bound)))) return null;
+        return ((string?)hello["version"] ?? "") is { Length: <= 20 } version ? version : "";
     }
 
     static string Proof(string token, string text) =>
@@ -197,7 +237,7 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
         {
             while (connection.Socket.State == WebSocketState.Open)
             {
-                if (await ReadMessageAsync(connection.Socket, cancellationToken) is not { } message) break;
+                if (await ReadMessageAsync(connection.Socket, MaxMessageBytes, cancellationToken) is not { } message) break;
                 if ((string?)message["event"] is { } name)
                 {
                     var tabId = (string?)message["tabId"] ?? "";
@@ -221,7 +261,7 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
         }
     }
 
-    static async Task<JsonObject?> ReadMessageAsync(WebSocket socket, CancellationToken cancellationToken)
+    static async Task<JsonObject?> ReadMessageAsync(WebSocket socket, int maxBytes, CancellationToken cancellationToken)
     {
         var buffer = new byte[64 * 1024];
         using var message = new MemoryStream();
@@ -230,6 +270,7 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
             var result = await socket.ReceiveAsync(buffer, cancellationToken);
             if (result.MessageType == WebSocketMessageType.Close) return null;
             message.Write(buffer, 0, result.Count);
+            if (message.Length > maxBytes) throw new InvalidDataException("大きすぎる文が届きました");
             if (result.EndOfMessage) return JsonNode.Parse(message.ToArray()) as JsonObject;
         }
     }
@@ -279,9 +320,6 @@ public sealed class BrowserBridge(SettingsStore settings) : IAsyncDisposable
             connection.Pending.TryRemove(id, out _);
         }
     }
-
-    // 接続コードを作り直したら、古いコードでつながっている拡張機能を切る
-    public Task DisconnectAsync() => DropAsync(current);
 
     public static ToolException NotConnected() =>
         new("いつもの Chrome とつながっていません。Chrome が開いていて、ClaudeChat 連携の拡張機能に接続コードを設定してあるか確かめてください (設定の「PC 操作」)");

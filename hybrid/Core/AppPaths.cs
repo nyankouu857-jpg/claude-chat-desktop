@@ -21,6 +21,8 @@ public sealed class AppPaths
     public string ProjectMemoryDir => Path.Combine(DataDir, "project-memory");
     public string ProjectKnowledgeDir => Path.Combine(DataDir, "project-knowledge");
     public string FilesDir => Path.Combine(DataDir, "files");
+    // シークレットチャットのコード実行で作られたファイル。代表フォルダには残さず、アプリを閉じるときに消す
+    public static string IncognitoFilesDir => Path.Combine(Path.GetTempPath(), "ClaudeChat-incognito");
     public string CheckpointsDir => Path.Combine(DataDir, "checkpoints");
     public string ExportsDir => Path.Combine(DataDir, "exports");
     public string SkillsDir => Path.Combine(ConfigDir, "skills");

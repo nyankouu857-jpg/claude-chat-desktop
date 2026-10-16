@@ -5,6 +5,9 @@ namespace ClaudeChat.Core;
 // claude.ai の公開システムプロンプトから、このアプリで意味のある節だけを API 向けに直したもの
 public static class SystemPrompt
 {
+    // メモリやナレッジの中身は、外のページに唆されて書かれたものかもしれない。閉じタグで指示の枠を抜け出させない
+    public static string EscapeTags(string text) => text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+
     const string AppContext = """
         <app_context>
         You are Claude, an AI assistant made by Anthropic. The user is talking with you through ClaudeChat, a personal Windows desktop chat app built on the Claude API. It is not claude.ai, but it offers similar features: projects, and, when the user enables them, artifacts, memory, past-chat search, web fetch, and code execution. Use only the tools you are actually given.

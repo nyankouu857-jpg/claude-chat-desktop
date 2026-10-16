@@ -80,7 +80,12 @@ public partial class MainWindow : Window
 
         var core = Browser.CoreWebView2;
         core.Settings.IsStatusBarEnabled = false;
+#if DEBUG
         core.Settings.AreDevToolsEnabled = true;
+#else
+        // 配る版では開発者ツールから画面の中身や接続コードを触らせない
+        core.Settings.AreDevToolsEnabled = false;
+#endif
         core.Settings.IsGeneralAutofillEnabled = false;
         core.Settings.IsPasswordAutosaveEnabled = false;
 
@@ -139,8 +144,10 @@ public partial class MainWindow : Window
         core.Navigate($"{AppOrigin}/index.html");
     }
 
+    // アーティファクトのページが上の窓に読み込まれると、画面と同じ扱いで中身を操作できてしまう。画面そのものだけを通す
     static bool IsAppPage(string uri) =>
-        Uri.TryCreate(uri, UriKind.Absolute, out var parsed) && parsed.Scheme == Uri.UriSchemeHttps && parsed.Host == new Uri(AppOrigin).Host;
+        Uri.TryCreate(uri, UriKind.Absolute, out var parsed) && parsed.Scheme == Uri.UriSchemeHttps && parsed.Host == new Uri(AppOrigin).Host
+        && parsed.AbsolutePath is "/" or "/index.html";
 
     CoreWebView2WebResourceResponse Serve(CoreWebView2 core, string uri)
     {
