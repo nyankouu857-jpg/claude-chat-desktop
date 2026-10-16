@@ -1,7 +1,7 @@
 import { Archive, ArchiveRestore, Bot, ChartColumn, Shapes, Keyboard, ChevronRight, CircleArrowUp, EllipsisVertical, Folder as FolderIcon, FolderInput, FolderOpen, LoaderCircle, MessagesSquare, PanelLeft, Pencil, Plug, Plus, Settings, Star, Trash, Workflow, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { archiveConversation, askConfirm, budgetView, confirmDeleteConversations, deleteConversation, installUpdate, setTags, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
-import { on } from "../bridge";
+import { archiveConversation, askConfirm, confirmDeleteConversations, type BudgetView, deleteConversation, installUpdate, setTags, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
+import { call, on } from "../bridge";
 import { setState, useStore, type AppState } from "../store";
 import type { ChatStatus, ConversationSummary } from "../types";
 import { Dialog, Dropdown, MenuItem } from "./ui";
@@ -12,10 +12,17 @@ const BUDGET_REFRESH_MS = 60_000;
 const BUDGET_WARN_RATIO = 0.8;
 
 function BudgetGauge() {
-  const [budget, setBudget] = useState<Awaited<ReturnType<typeof budgetView>>>();
+  const [budget, setBudget] = useState<BudgetView>();
   const settingsBudget = useStore((s: AppState) => s.settings?.budget);
   useEffect(() => {
-    const load = async () => setBudget(await budgetView());
+    // 読めなかったときは前の値を出し続ける。毎分エラーを出して邪魔しない
+    const load = async () => {
+      try {
+        setBudget(await call<BudgetView>("usage.budget"));
+      } catch {
+        // 次の読み直しに任せる
+      }
+    };
     void load();
     const timer = setInterval(() => void load(), BUDGET_REFRESH_MS);
     const off = on("conversations.changed", () => void load());
@@ -243,7 +250,9 @@ export function Sidebar() {
   // 目印で絞り込む。絞り込んでいる間はスター付きも含めて、その目印のものだけを出す
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const allTags = [...new Set(roots.flatMap((s) => s.tags ?? []))].sort();
-  const recents = tagFilter ? roots.filter((s) => s.tags?.includes(tagFilter)) : roots.filter((s) => !s.starred);
+  // 絞り込んでいたタグを最後の会話から外したら、絞り込みも外れたことにする
+  const activeTag = tagFilter && allTags.includes(tagFilter) ? tagFilter : null;
+  const recents = activeTag ? roots.filter((s) => s.tags?.includes(activeTag)) : roots.filter((s) => !s.starred);
   const displayName = profile?.fullName || profile?.nickname || "あなた";
 
   const updateBanner = update && (
@@ -333,7 +342,7 @@ export function Sidebar() {
         </button>
       </div>
       <div className="sidebar-scroll">
-        {!tagFilter && (starred.length > 0 || starredProjects.length > 0) && (
+        {!activeTag && (starred.length > 0 || starredProjects.length > 0) && (
           <>
             <div className="sidebar-section">スター付き</div>
             {starredProjects.map((f) => (
@@ -348,11 +357,11 @@ export function Sidebar() {
         {allTags.length > 0 && (
           <div className="tag-row sidebar-tags">
             {allTags.map((t) => (
-              <button key={t} type="button" className={`tag-chip${tagFilter === t ? " on" : ""}`} onClick={() => setTagFilter(tagFilter === t ? null : t)}>{t}</button>
+              <button key={t} type="button" className={`tag-chip${activeTag === t ? " on" : ""}`} onClick={() => setTagFilter(activeTag === t ? null : t)}>{t}</button>
             ))}
           </div>
         )}
-        {recents.length > 0 && <div className="sidebar-section">{tagFilter ? `タグ: ${tagFilter}` : "最近の項目"}</div>}
+        {recents.length > 0 && <div className="sidebar-section">{activeTag ? `タグ: ${activeTag}` : "最近の項目"}</div>}
         {recents.map((s) => <ConversationTree key={s.id} summary={s} depth={0} activeId={activeId} childrenOf={childrenOf} />)}
       </div>
       <BudgetGauge />

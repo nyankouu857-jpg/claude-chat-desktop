@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, Cloud, FileCode, Folder as FolderIcon, FolderOpen, GitBranch, Plus, Settings2, Shapes } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { compact, openArtifact, openFile, openSessionFile, openSettings, sessionList, type SessionListing } from "../actions";
 import { on } from "../bridge";
 import { contextWindowOf } from "../models";
@@ -15,21 +15,28 @@ const formatSize = (bytes: number) => (bytes < 1024 ? `${bytes} B` : bytes < 102
 function SessionCard({ conversationId }: { conversationId: string }) {
   const [listing, setListing] = useState<SessionListing | null>(null);
   const [open, setOpen] = useState(true);
+  // 知らせが自分のセッションのものかを、読み込み直さずに見分けるため
+  const rootId = useRef<string | null>(null);
   useEffect(() => {
     let alive = true;
+    // 前のチャットのファイルを、別のチャットのものとして出さない
+    setListing(null);
+    rootId.current = null;
     const load = async () => {
       const next = await sessionList(conversationId);
-      if (alive && next) setListing(next);
+      if (!alive || !next) return;
+      rootId.current = next.rootId;
+      setListing(next);
     };
     void load();
     const off = on("session.changed", (data: { conversationId: string }) => {
-      if (!listing || data.conversationId === listing.rootId) void load();
+      if (data.conversationId === rootId.current) void load();
     });
     return () => {
       alive = false;
       off();
     };
-  }, [conversationId, listing?.rootId]);
+  }, [conversationId]);
   if (!listing || listing.files.length === 0) return null;
   return (
     <Card

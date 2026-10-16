@@ -382,15 +382,36 @@ function chatOptions() {
 // 別の窓で 1 つの会話だけを出しているとき、その会話の ID
 export const SINGLE_CHAT = new URLSearchParams(location.search).get("chat");
 
+type SendPayload = { conversationId: string | null; content: WireMessage["content"] } & Record<string, unknown>;
+
 // ネットにつながっていない間に送った分。つながったら順に送る
-let offlineQueue: Record<string, unknown>[] = [];
+let offlineQueue: SendPayload[] = [];
+
+const asBlocks = (content: WireMessage["content"]) => (typeof content === "string" ? [{ type: "text", text: content }] : content);
+
+// 送って、画面に反映する。新しいチャットなら開き、続きなら発言をすぐ出す (正確な内容は応答完了時に置き換わる)
+async function deliver(payload: SendPayload) {
+  const result = await guard(() => call<{ conversationId: string }>("chat.send", payload));
+  if (!result) return false;
+  const conversationId = payload.conversationId;
+  if (!conversationId) navigate({ name: "chat", id: result.conversationId });
+  else {
+    setState((s) => {
+      const conversation = s.conversations[conversationId];
+      if (!conversation) return s;
+      return putConversation(s, { ...conversation, messages: [...conversation.messages, { role: "user", content: payload.content }] });
+    });
+  }
+  return true;
+}
 
 async function flushOffline() {
   const queued = offlineQueue;
   offlineQueue = [];
   setState((s) => ({ ...s, offlineQueued: 0 }));
-  for (const payload of queued) await guard(() => call("chat.send", payload));
-  if (queued.length) toast(`送信待ちだった ${queued.length} 件を送りました`);
+  let sent = 0;
+  for (const payload of queued) if (await deliver(payload)) sent++;
+  if (sent) toast(`送信待ちだった ${sent} 件を送りました`);
 }
 
 export function cancelOffline() {
@@ -401,7 +422,7 @@ export function cancelOffline() {
 export async function send(conversationId: string | null, content: WireMessage["content"], extra: { research?: boolean } = {}) {
   const { choice, view } = getState();
   const research = extra.research ?? choice.research;
-  const payload = {
+  const payload: SendPayload = {
     conversationId,
     content,
     research,
@@ -411,40 +432,41 @@ export async function send(conversationId: string | null, content: WireMessage["
     incognito: !conversationId && view.name === "new" && !view.folderId && view.incognito ? true : undefined,
     ...chatOptions(),
   };
+  const compareWith = choice.compareModels.filter((m) => m !== choice.model);
+  const comparing = !conversationId && compareWith.length > 0 && !research && !payload.incognito;
   if (!navigator.onLine) {
-    offlineQueue.push(payload);
+    if (comparing) {
+      toast("ネットにつながっていないので、モデルを比べられません", "error");
+      return false;
+    }
+    // 同じ会話に続けて送った分は 1 つにまとめる。応答中の会話には次の送信を受け付けないため
+    const queued = conversationId ? offlineQueue.find((q) => q.conversationId === conversationId) : undefined;
+    if (queued) queued.content = [...asBlocks(queued.content), ...asBlocks(content)];
+    else offlineQueue.push(payload);
     setState((s) => ({ ...s, offlineQueued: offlineQueue.length }));
+    if (research) setChoice({ research: false });
+    if (!conversationId && choice.permissionMode !== "default") setChoice({ permissionMode: "default" });
     toast("ネットにつながっていません。つながったら送ります");
     return true;
   }
   // 新しいチャットで比べるモデルを選んでいたら、同じ発言をモデルごとのチャットに送って並べる
-  if (!conversationId && choice.compareModels.length > 0 && !research && !payload.incognito) {
-    const models = [choice.model, ...choice.compareModels.filter((m) => m !== choice.model)];
+  if (comparing) {
+    const models = [choice.model, ...compareWith];
     const ids: string[] = [];
     for (const model of models) {
       const effort = model === choice.model ? choice.effort : defaultEffortOf(model);
       const started = await guard(() => call<{ conversationId: string }>("chat.send", { ...payload, model, effort, fast: model === choice.model && payload.fast }));
       if (started) ids.push(started.conversationId);
     }
-    setChoice({ compareModels: [] });
+    setChoice({ compareModels: [], ...(choice.permissionMode !== "default" ? { permissionMode: "default" as const } : {}) });
     if (ids.length === 0) return false;
     navigate({ name: "compare", ids });
     return true;
   }
-  const result = await guard(() => call<{ conversationId: string }>("chat.send", payload));
-  if (result && research) setChoice({ research: false });
+  if (!(await deliver(payload))) return false;
+  if (research) setChoice({ research: false });
   // 権限モードは始めた会話に移したので、次の新しいチャットは毎回確認から始める
-  if (result && !conversationId && choice.permissionMode !== "default") setChoice({ permissionMode: "default" });
-  if (!result) return false;
-  if (!conversationId) navigate({ name: "chat", id: result.conversationId });
-  else {
-    // 送った発言をすぐ画面に出す。正確な内容は応答完了時に置き換わる
-    setState((s) => {
-      const conversation = s.conversations[conversationId];
-      if (!conversation) return s;
-      return putConversation(s, { ...conversation, messages: [...conversation.messages, { role: "user", content }] });
-    });
-  }
+  if (!conversationId && choice.permissionMode !== "default") setChoice({ permissionMode: "default" });
   return true;
 }
 
@@ -492,8 +514,6 @@ export interface BudgetView {
   dailyLimitUsd: number;
   monthlyLimitUsd: number;
 }
-
-export const budgetView = () => guard(() => call<BudgetView>("usage.budget"));
 
 export async function hurry(conversationId: string) {
   const ok = await guard(async () => {

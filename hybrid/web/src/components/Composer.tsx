@@ -152,6 +152,8 @@ function ModelMenu({ isNew }: { isNew: boolean }) {
   const [othersOpen, setOthersOpen] = useState(isOther);
   const efforts = EFFORTS.filter((e) => effortsOf(choice.model)?.includes(e.id) ?? true);
   const fastAvailable = FAST_MODELS.includes(choice.model);
+  // 主のモデルに切り替えたものは比べる相手から外して数える
+  const comparing = choice.compareModels.filter((m) => m !== choice.model);
   const fast = fastAvailable && choice.fast;
   return (
     <Dropdown
@@ -162,7 +164,7 @@ function ModelMenu({ isNew }: { isNew: boolean }) {
         <button type="button" className={`model-button${open ? " open" : ""}`} onClick={toggle}>
           {fast && <Zap size={13} className="fast-mark" />}
           {modelLabel(choice.model)}
-          {isNew && choice.compareModels.length > 0 && <span className="model-effort">+{choice.compareModels.length} で比較</span>}
+          {isNew && comparing.length > 0 && <span className="model-effort">+{comparing.length} で比較</span>}
           <span className="model-effort">{EFFORTS.find((e) => e.id === choice.effort)?.label}</span>
           <ChevronDown size={14} />
         </button>
@@ -233,7 +235,7 @@ function ModelMenu({ isNew }: { isNew: boolean }) {
                       key={m.id}
                       type="button"
                       className={`effort-pill${on ? " on" : ""}`}
-                      disabled={!on && choice.compareModels.length >= MAX_COMPARE}
+                      disabled={!on && comparing.length >= MAX_COMPARE}
                       onClick={() => setChoice({ compareModels: on ? choice.compareModels.filter((id) => id !== m.id) : [...choice.compareModels, m.id] })}
                     >
                       {m.label}

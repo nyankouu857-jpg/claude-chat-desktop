@@ -47,8 +47,12 @@ export function CompareView({ ids }: { ids: string[] }) {
     for (const id of ids) {
       void (async () => {
         if (getState().conversations[id]) return;
-        const conversation = await call<Conversation | null>("conversations.get", { id });
-        if (conversation) setState((s) => ({ ...s, conversations: { ...s.conversations, [id]: conversation } }));
+        try {
+          const conversation = await call<Conversation | null>("conversations.get", { id });
+          if (conversation) setState((s) => ({ ...s, conversations: { ...s.conversations, [id]: conversation } }));
+        } catch {
+          // 消された会話は列が空のまま残る。続けるには残った方を選べばよい
+        }
       })();
     }
   }, [ids]);

@@ -43,8 +43,10 @@ export function Recents() {
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const q = query.trim().toLowerCase();
-  const [tag, setTag] = useState<string | null>(null);
+  const [chosenTag, setTag] = useState<string | null>(null);
   const allTags = [...new Set(summaries.flatMap((s) => s.tags ?? []))].sort();
+  // アーカイブに切り替えたなどで、選んだタグの会話が一覧から消えたら絞り込まない
+  const tag = chosenTag && allTags.includes(chosenTag) ? chosenTag : null;
 
   // claude.ai と同じく本文まで探す。題名と最初の発言はすぐに絞り込み、本文の分は届いたら足す
   useEffect(() => {

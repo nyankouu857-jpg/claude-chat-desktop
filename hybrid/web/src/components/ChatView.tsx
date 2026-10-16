@@ -36,6 +36,7 @@ export function ChatView({ id }: { id: string }) {
   const live = useStore((s) => s.live[id]);
   const [renaming, setRenaming] = useState(false);
   const [tagging, setTagging] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [moving, setMoving] = useState(false);
   const folder = useStore((s) => s.folders.find((f) => f.id === conversation?.folderId));
   const parent = useStore((s) => (conversation?.parentId ? s.summaries.find((p) => p.id === conversation.parentId) : undefined));
@@ -145,7 +146,11 @@ export function ChatView({ id }: { id: string }) {
         {conversation?.lastRunStatus === "interrupted" && !live && (
           <div className="resume-banner">
             <span>前回、応答の途中でアプリが終了しました。</span>
-            <button type="button" className="button small primary" onClick={() => void resume(id)}><Play size={13} /> 続きから再開</button>
+            <button type="button" className="button small primary" disabled={resuming} onClick={async () => {
+              setResuming(true);
+              await resume(id);
+              setResuming(false);
+            }}><Play size={13} /> 続きから再開</button>
             <button type="button" className="icon-button" title="再開しない" onClick={() => void dismissInterrupted(id)}><X size={14} /></button>
           </div>
         )}

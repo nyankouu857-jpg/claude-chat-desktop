@@ -1140,7 +1140,7 @@ export function MessageList({ conversationId }: { conversationId: string }) {
                 forkAt={!conversation.incognito && !conversation.parentId && !turn.live ? (turns[i + 1]?.kind === "human" ? (turns[i + 1] as { index: number }).index : conversation.messages.length) : undefined}
                 changed={changes[String(turn.human)] ? {
                   files: changes[String(turn.human)],
-                  later: Object.entries(changes).filter(([k]) => Number(k) > turn.human).reduce((n, [, v]) => n + v.length, 0),
+                  later: new Set(Object.entries(changes).filter(([k]) => Number(k) > turn.human).flatMap(([, v]) => v).filter((f) => !changes[String(turn.human)].includes(f))).size,
                   reload: reloadChanges,
                 } : undefined}
               />}
