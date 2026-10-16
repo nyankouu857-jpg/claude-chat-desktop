@@ -78,6 +78,7 @@ export interface Conversation {
   // 編集ややり直しで分かれた位置ごとの版の数と、表示中の版
   forkView?: Record<string, { count: number; active: number }>;
   incognito?: boolean;
+  topEffort?: string | null;
 }
 
 export interface ConversationSummary {
@@ -188,6 +189,7 @@ export interface Settings {
     effort: Effort;
     webSearch: boolean;
     showThinking: boolean;
+    thinkingDisplay: "summarized" | "updates";
     maxToolTurns: number;
     compactThreshold: number;
     longCacheAbove: number;
@@ -293,6 +295,8 @@ export interface LiveReply {
   // 返答を受け取り終えた問い合わせの本当の数と、受け取り中の分の見積もり
   outputTokens: number;
   streamingTokens: number;
+  // この応答でかかった料金。サブエージェントの分も含む
+  costUsd: number;
 }
 
 export type ChatEvent =
@@ -308,7 +312,7 @@ export type ChatEvent =
   | { type: "notice"; text: string }
   | { type: "compacted"; apiStart: number; compactionBlock: WireBlock | null }
   | { type: "usage"; output: number }
-  | { type: "cost"; usage: ConversationUsage }
+  | { type: "cost"; usage: ConversationUsage; added: number }
   | { type: "options"; model?: string; effort?: Effort }
   | { type: "inbound"; message: WireMessage }
   | { type: "discard" }

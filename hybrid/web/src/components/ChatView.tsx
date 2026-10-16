@@ -1,6 +1,6 @@
-import { ArrowDown, ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, Ghost, GitBranch, ListTree, LoaderCircle, PanelRight, Pencil, Square, Star, Trash, Workflow, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, Ghost, GitBranch, ListTree, LoaderCircle, PanelRight, Pencil, Play, Square, Star, Trash, Workflow, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { askConfirm, compact, deleteConversation, exportConversation, navigate, starConversation, stop, stopWorkflow, toggleInfoPanel } from "../actions";
+import { askConfirm, compact, deleteConversation, dismissInterrupted, exportConversation, navigate, resume, starConversation, stop, stopWorkflow, toggleInfoPanel } from "../actions";
 import { setState, useStore } from "../store";
 import { Composer } from "./Composer";
 import { ChatSearch } from "./ChatSearch";
@@ -138,6 +138,13 @@ export function ChatView({ id }: { id: string }) {
           }}><ArrowDown size={16} /></button>
         )}
         <RunningWorkflows conversationId={id} />
+        {conversation?.lastRunStatus === "interrupted" && !live && (
+          <div className="resume-banner">
+            <span>前回、応答の途中でアプリが終了しました。</span>
+            <button type="button" className="button small primary" onClick={() => void resume(id)}><Play size={13} /> 続きから再開</button>
+            <button type="button" className="icon-button" title="再開しない" onClick={() => void dismissInterrupted(id)}><X size={14} /></button>
+          </div>
+        )}
         <Composer conversationId={id} autoFocus={!live} />
       </div>
       {renaming && conversation && <RenameDialog summary={conversation} onClose={() => setRenaming(false)} />}

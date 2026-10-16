@@ -36,6 +36,8 @@ export interface ComposerChoice {
   permissionMode: PermissionMode;
   // 使わないコネクタ。空ならすべて使う
   disabledSources: string[];
+  // 高速モード。対応しているモデルのときだけ送る
+  fast: boolean;
 }
 
 export type DialogState =
@@ -117,7 +119,7 @@ let state: AppState = {
   dialog: null,
   view: { name: "new" },
   sidebarOpen: true,
-  choice: { model: "claude-opus-5-5", effort: "medium", webSearch: false, webFetch: true, codeExecution: false, research: false, style: "default", permissionMode: "default", disabledSources: [] },
+  choice: { model: "claude-opus-5-5", effort: "medium", webSearch: false, webFetch: true, codeExecution: false, research: false, style: "default", permissionMode: "default", disabledSources: [], fast: false },
   toasts: [],
 };
 

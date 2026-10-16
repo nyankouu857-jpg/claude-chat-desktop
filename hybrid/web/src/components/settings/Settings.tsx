@@ -291,6 +291,16 @@ function Api({ settings }: { settings: Settings }) {
         </div>
         <div className="switch-row">
           <div>
+            <div>考えている間に見せる内容</div>
+            <div className="field-hint">「進捗だけ」は考えた中身を出さず、ツールの合間に今していることだけを短く出します。Opus 5.5、Sonnet 5.5、Fable 5.1 で使えます</div>
+          </div>
+          <div className="segmented small">
+            <button type="button" className={chat.thinkingDisplay !== "updates" ? "on" : ""} onClick={() => void updateSettings({ chat: { thinkingDisplay: "summarized" } })}>思考の要約</button>
+            <button type="button" className={chat.thinkingDisplay === "updates" ? "on" : ""} onClick={() => void updateSettings({ chat: { thinkingDisplay: "updates" } })}>進捗だけ</button>
+          </div>
+        </div>
+        <div className="switch-row">
+          <div>
             <div>1 回の返答で続けて呼べるツールの上限</div>
             <div className="field-hint">コネクタのツールを使うときに、止まらなくなるのを防ぎます</div>
           </div>

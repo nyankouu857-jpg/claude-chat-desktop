@@ -55,6 +55,7 @@ export function ChatSearch({ scroller }: { scroller: RefObject<HTMLDivElement | 
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "f") {
         e.preventDefault();
+        window.dispatchEvent(new Event("chat-show-all"));
         setOpen(true);
         setTimeout(() => input.current?.select());
       }

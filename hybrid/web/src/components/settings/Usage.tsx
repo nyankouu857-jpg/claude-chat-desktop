@@ -1,6 +1,6 @@
 import { RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { localUsage, openPath, orgUsage, reloadPricing, setSecret, toast, updateSettings } from "../../actions";
+import { localUsage, navigate, openPath, orgUsage, reloadPricing, setSecret, toast, updateSettings } from "../../actions";
 import { modelLabel } from "../../models";
 import { useStore } from "../../store";
 import { NumberField, tokens, usd } from "../ui";
@@ -26,6 +26,8 @@ interface LocalSummary {
   monthly: { month: string; costUsd: number }[];
   byModelThisMonth: { model: string; costUsd: number; requests: number; input: number; output: number }[];
   byModelLifetime: { model: string; costUsd: number; requests: number; input: number; output: number }[];
+  // サブエージェントの分は起動した会話に含めてある
+  topConversationsThisMonth?: { conversationId: string; title?: string | null; costUsd: number; requests: number }[];
 }
 
 interface OrgSummary {
@@ -154,6 +156,28 @@ function LocalUsage() {
         </div>
       </div>
       <ModelTable rows={scope === "month" ? summary.byModelThisMonth : summary.byModelLifetime} />
+      {!!summary.topConversationsThisMonth?.length && (
+        <>
+          <h3>今月高くついた会話</h3>
+          <div className="top-conversations">
+            {summary.topConversationsThisMonth.map((c, i) => (
+              <button
+                key={c.conversationId}
+                type="button"
+                className="row"
+                disabled={!c.title}
+                title={c.title ? "この会話を開く" : "削除した会話です"}
+                onClick={() => c.title && navigate({ name: "chat", id: c.conversationId })}
+              >
+                <span className="rank">{i + 1}</span>
+                <span className={`title${c.title ? "" : " deleted"}`}>{c.title ?? "削除したチャット"}</span>
+                <span className="field-hint">{c.requests} 回</span>
+                <span className="cost">{usd(c.costUsd)}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
       {summary.monthly.length > 1 && (
         <>
           <h3>月別</h3>

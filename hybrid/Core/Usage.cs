@@ -67,6 +67,8 @@ public sealed class PricingTable
         var tokens = r.Input * inputRate + r.Output * outputRate + r.CacheWrite * cacheWriteRate + r.CacheWrite1h * inputRate * 2 + r.CacheRead * cacheReadRate;
         // バッチはトークンの分が半額
         if (r.Batch) tokens /= 2;
+        // 高速モードは単価が 2 倍
+        if (r.Fast) tokens *= 2;
         return tokens / 1_000_000m + r.WebSearches * WebSearchPer1000 / 1000m;
     }
 }
@@ -85,6 +87,9 @@ public sealed class UsageRecord
     public long CacheRead { get; set; }
     public long WebSearches { get; set; }
     public bool Batch { get; set; }
+    public bool Fast { get; set; }
+    // サブエージェントの分を起動した会話の料金として数えるため
+    public string? ParentId { get; set; }
     public decimal? CostUsd { get; set; }
 }
 
@@ -229,6 +234,9 @@ public sealed class UsageLedger(AppPaths paths)
         return records;
     }
 
+    // 画面のランキングに出す数
+    const int TopConversations = 10;
+
     public async Task<JsonObject> SummaryAsync(TimeZoneInfo zone)
     {
         var table = await GetPricingAsync();
@@ -292,6 +300,14 @@ public sealed class UsageLedger(AppPaths paths)
             ["monthly"] = monthly,
             ["byModelThisMonth"] = ByModel(thisMonth),
             ["byModelLifetime"] = ByModel(records),
+            ["topConversationsThisMonth"] = new JsonArray(thisMonth
+                .Where(r => (r.ParentId ?? r.ConversationId) is not null)
+                .GroupBy(r => r.ParentId ?? r.ConversationId!)
+                .Select(g => (Id: g.Key, Cost: g.Sum(r => r.CostUsd ?? 0), Requests: g.Count()))
+                .OrderByDescending(g => g.Cost)
+                .Take(TopConversations)
+                .Select(g => (JsonNode)new JsonObject { ["conversationId"] = g.Id, ["costUsd"] = g.Cost, ["requests"] = g.Requests })
+                .ToArray()),
             ["pricingError"] = PricingError,
         };
     }

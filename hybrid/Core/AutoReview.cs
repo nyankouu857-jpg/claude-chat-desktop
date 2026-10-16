@@ -107,7 +107,7 @@ public sealed partial class AutoReviewer(AnthropicClient client, UsageLedger led
     }
 
     // アプリが会話に差し込む発言は、どれもこのタグで始まる
-    [GeneratedRegex(@"^<(task|task-notification|idle-notification|message|scheduled-task|hook-feedback|compact-summary)[\s>]")]
+    [GeneratedRegex(@"^<(task|task-notification|idle-notification|message|scheduled-task|hook-feedback|compact-summary|hurry|resumed)[\s>]")]
     private static partial Regex AppMessage();
 
     static string Shorten(string text, int max) => text.Length > max ? text[..max] + "..." : text;

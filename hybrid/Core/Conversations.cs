@@ -51,11 +51,19 @@ public sealed class ArtifactRevision
     public long UpdatedAt { get; set; }
 }
 
+// 会話の途中で effort を変えた位置。Index の発言の直前に、effort だけの system メッセージとして API に送る
+public sealed class EffortMark
+{
+    public int Index { get; set; }
+    public string Effort { get; set; } = "";
+}
+
 // 編集ややり直しで分かれた先の 1 本。その時点より後の履歴と、その中でさらに分かれた先を持つ
 public sealed class BranchVersion
 {
     public List<JsonObject> Messages { get; set; } = [];
     public Dictionary<int, Fork> Forks { get; set; } = [];
+    public List<EffortMark> EffortMarks { get; set; } = [];
 }
 
 // 同じ位置から分かれた版の束。表示中の版は会話の本体にあるので、その枠は null にしておく
@@ -108,6 +116,11 @@ public sealed class Conversation
     public Dictionary<int, Fork> Forks { get; set; } = [];
     // claude.ai のシークレットチャット。ディスクにも一覧にも残さず、メモリにも書かせない
     public bool Incognito { get; set; }
+    // 最初に送った effort。上の effort を変えるとキャッシュが切れるので、後の変更は EffortMarks で伝える
+    public string? TopEffort { get; set; }
+    public List<EffortMark> EffortMarks { get; set; } = [];
+    // キャッシュが外れた理由を API に聞くための前の応答の ID。保存しない
+    public string? LastResponseId { get; set; }
 
     // 応答中のスレッドと画面からの読み出しが同時に触るので、触るときは必ずこのロックを通す
     readonly Lock sync = new();
@@ -122,6 +135,8 @@ public sealed class Conversation
         lock (sync)
         {
             if (index < Messages.Count) Messages.RemoveRange(index, Messages.Count - index);
+            EffortMarks.RemoveAll(m => m.Index >= index);
+            LastResponseId = null;
             if (ApiStart > Messages.Count) (ApiStart, CompactionBlock) = (0, null);
             // 消した範囲で分かれていた版も一緒に捨てる
             foreach (var key in Forks.Keys.Where(k => k >= index).ToList()) Forks.Remove(key);
@@ -139,6 +154,7 @@ public sealed class Conversation
                 return;
             }
             var current = TakeTail(index);
+            LastResponseId = null;
             if (!Forks.TryGetValue(index, out var fork)) Forks[index] = fork = new Fork { Versions = [null] };
             fork.Versions[fork.Active] = current;
             fork.Versions.Add(null);
@@ -155,6 +171,8 @@ public sealed class Conversation
             var target = fork.Versions[version] ?? throw new InvalidOperationException("その版はありません");
             fork.Versions[fork.Active] = TakeTail(index);
             Messages.AddRange(target.Messages);
+            EffortMarks.AddRange(target.EffortMarks);
+            LastResponseId = null;
             foreach (var (key, nested) in target.Forks) Forks[key] = nested;
             fork.Versions[version] = null;
             fork.Active = version;
@@ -166,8 +184,13 @@ public sealed class Conversation
     {
         // 境目の人の発言を差し替えるときだけ塊を使い続けられる。境目の返答をやり直すと、塊のあとに人の発言が無くなって送れない
         var keepBlock = CompactionBlock is not null && ApiStart == index && index < Messages.Count && IsHumanTurn(Messages[index]);
-        var tail = new BranchVersion { Messages = Messages.GetRange(index, Messages.Count - index) };
+        var tail = new BranchVersion
+        {
+            Messages = Messages.GetRange(index, Messages.Count - index),
+            EffortMarks = EffortMarks.Where(m => m.Index >= index).ToList(),
+        };
         Messages.RemoveRange(index, Messages.Count - index);
+        EffortMarks.RemoveAll(m => m.Index >= index);
         foreach (var key in Forks.Keys.Where(k => k > index).ToList())
         {
             tail.Forks[key] = Forks[key];
@@ -212,14 +235,43 @@ public sealed class Conversation
         lock (sync) return Messages.Select(m => (JsonObject)m.DeepClone()).ToList();
     }
 
-    // API に送る分。手動の要約より前は送らない
-    public List<JsonObject> CopyApiMessages()
+    // API に送る分。手動の要約より前は送らない。withEffort なら effort を変えた印も挟む
+    public List<JsonObject> CopyApiMessages(bool withEffort = false)
     {
         lock (sync)
         {
-            var messages = Messages.Skip(Math.Min(ApiStart, Messages.Count)).Select(m => (JsonObject)m.DeepClone()).ToList();
-            if (CompactionBlock is { } block) messages.Insert(0, new JsonObject { ["role"] = "assistant", ["content"] = new JsonArray(block.DeepClone()) });
+            var messages = new List<JsonObject>();
+            if (CompactionBlock is { } block) messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = new JsonArray(block.DeepClone()) });
+            for (var i = Math.Min(ApiStart, Messages.Count); i < Messages.Count; i++)
+            {
+                if (withEffort)
+                {
+                    foreach (var mark in EffortMarks.Where(m => m.Index == i))
+                    {
+                        messages.Add(new JsonObject { ["role"] = "system", ["content"] = new JsonArray(), ["output_config"] = new JsonObject { ["effort"] = mark.Effort } });
+                    }
+                }
+                messages.Add((JsonObject)Messages[i].DeepClone());
+            }
             return messages;
+        }
+    }
+
+    // effort を変えたら、まだ送っていない末尾の発言の前に印を置く。初めて送るときは上の effort にする
+    public void SetEffort(string effort)
+    {
+        lock (sync)
+        {
+            if (TopEffort is null)
+            {
+                TopEffort = effort;
+                return;
+            }
+            var current = EffortMarks.Where(m => m.Index >= ApiStart && m.Index < Messages.Count).LastOrDefault()?.Effort ?? TopEffort;
+            if (current == effort) return;
+            var index = Messages.Count > 0 && (string?)Messages[^1]["role"] == "user" ? Messages.Count - 1 : Messages.Count;
+            EffortMarks.RemoveAll(m => m.Index >= index);
+            EffortMarks.Add(new EffortMark { Index = index, Effort = effort });
         }
     }
 
@@ -229,6 +281,8 @@ public sealed class Conversation
         {
             CompactionBlock = block;
             ApiStart = apiStart;
+            // 履歴を作り替えたのは分かっているので、外れた理由を聞かない
+            LastResponseId = null;
         }
     }
 
@@ -283,6 +337,8 @@ public sealed class Conversation
                 ["lastRunStatus"] = LastRunStatus,
                 ["files"] = new JsonObject(Files.Select(f => KeyValuePair.Create(f.Key, (JsonNode?)f.Value))),
                 ["incognito"] = Incognito,
+                ["topEffort"] = TopEffort,
+                ["effortMarks"] = Json.ToNode(EffortMarks),
                 ["forkView"] = new JsonObject(Forks.Select(f => KeyValuePair.Create(f.Key.ToString(), (JsonNode?)new JsonObject { ["count"] = f.Value.Versions.Count, ["active"] = f.Value.Active }))),
             };
             if (includeBranches) wire["forks"] = Json.ToNode(Forks);

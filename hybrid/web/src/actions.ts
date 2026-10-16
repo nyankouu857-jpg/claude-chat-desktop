@@ -1,4 +1,5 @@
 import { call, on } from "./bridge";
+import { FAST_MODELS } from "./models";
 import { getState, setState, type AppState } from "./store";
 import type {
   Approval,
@@ -47,7 +48,7 @@ async function guard<T>(work: () => Promise<T>): Promise<T | undefined> {
 }
 
 function emptyLive(): LiveReply {
-  return { blocks: [], toolResults: {}, runningTools: [], approvals: [], notices: [], startedAt: Date.now(), outputTokens: 0, streamingTokens: 0 };
+  return { blocks: [], toolResults: {}, runningTools: [], approvals: [], notices: [], startedAt: Date.now(), outputTokens: 0, streamingTokens: 0, costUsd: 0 };
 }
 
 // 本当の数は問い合わせが終わるまで届かないので、それまでは文字数から見積もる。英数字は 4 文字、日本語は 1 文字でおよそ 1 トークン
@@ -119,6 +120,7 @@ export async function init() {
       style: data.settings.chat.outputStyle,
       permissionMode: "default",
       disabledSources: [],
+      fast: false,
     },
   }));
   if (!data.secrets.hasApiKey) navigate({ name: "settings", tab: "api" });
@@ -211,10 +213,13 @@ function applyChatEvent(id: string, event: ChatEvent) {
       updateLive(id, (live) => ({ ...live, outputTokens: live.outputTokens + event.output, streamingTokens: 0 }));
       break;
     case "cost":
-      // サブエージェントが使った分が親に足された
+      // 自分の問い合わせの分と、サブエージェントが使って親に足された分
       setState((s) => {
         const conversation = s.conversations[id];
-        return conversation ? putConversation(s, { ...conversation, usage: event.usage }) : s;
+        let next = conversation ? putConversation(s, { ...conversation, usage: event.usage }) : s;
+        const live = next.live[id];
+        if (live) next = { ...next, live: { ...next.live, [id]: { ...live, costUsd: live.costUsd + event.added } } };
+        return next;
       });
       break;
     case "block-start":
@@ -363,6 +368,7 @@ function chatOptions() {
     webSearch: choice.webSearch,
     webFetch: choice.webFetch,
     codeExecution: choice.codeExecution,
+    fast: choice.fast && FAST_MODELS.includes(choice.model),
     style: choice.style,
     enabledSources: [...BUILTIN_SOURCE_IDS, ...mcp.map((m) => m.name)].filter((name) => !choice.disabledSources.includes(name)),
   };
@@ -398,6 +404,21 @@ export async function send(conversationId: string | null, content: WireMessage["
 }
 
 export const stop = (conversationId: string) => guard(() => call("chat.stop", { conversationId }));
+
+export async function hurry(conversationId: string) {
+  const ok = await guard(async () => {
+    await call("chat.hurry", { conversationId });
+    return true;
+  });
+  if (ok) toast("急ぐよう伝えました。今の問い合わせを止めて、effort を下げて続けます");
+}
+
+export const resume = (conversationId: string) => guard(() => call("chat.resume", { conversationId }));
+
+export async function dismissInterrupted(conversationId: string) {
+  const conversation = await guard(() => call<Conversation | null>("chat.dismissInterrupted", { conversationId }));
+  if (conversation) setState((s) => putConversation(s, conversation));
+}
 
 // messageIndex はやり直す返事の元になった発言。省けば最後の発言
 export async function retry(conversationId: string, opts: { messageIndex?: number; model?: string } = {}) {

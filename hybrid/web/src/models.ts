@@ -39,6 +39,9 @@ export const defaultEffortOf = (model: string): Effort => ALL_MODELS.find((m) =>
 // Haiku 4.5 だけ 20 万トークン、ほかは 100 万トークン
 export const contextWindowOf = (model: string | undefined) => (model === "claude-haiku-4-5" ? 200_000 : 1_000_000);
 
+// 高速モードの単価が通常の 2 倍と分かっているもの
+export const FAST_MODELS = ["claude-opus-5-5", "claude-opus-5"];
+
 export const effortsOf = (model: string) => ALL_MODELS.find((m) => m.id === model)?.efforts;
 
 export const EFFORTS: { id: Effort; label: string; description: string }[] = [

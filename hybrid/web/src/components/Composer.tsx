@@ -1,9 +1,9 @@
-import { ArrowUp, Check, ChevronDown, ChevronRight, Circle, CircleDot, Code, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Quote, Settings2, Square, Telescope, Type, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronRight, Circle, CircleDot, Code, FastForward, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Quote, Settings2, Square, Telescope, Type, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { clearPrefill, extractDocumentText, interject, openSettings, send, setChoice, setMode, setQuote, stop, toast } from "../actions";
+import { clearPrefill, extractDocumentText, hurry, interject, openSettings, send, setChoice, setMode, setQuote, stop, toast } from "../actions";
 import { BUILTIN_SOURCES } from "../builtins";
 import { allCommands, runCommand } from "../commands";
-import { EFFORTS, MODELS, OTHER_MODELS, defaultEffortOf, effortsOf, modelLabel } from "../models";
+import { EFFORTS, FAST_MODELS, MODELS, OTHER_MODELS, defaultEffortOf, effortsOf, modelLabel } from "../models";
 import { getState, setState, useStore } from "../store";
 import type { PermissionMode, Todo, WireBlock } from "../types";
 import { Dropdown, MenuItem, Toggle } from "./ui";
@@ -148,6 +148,8 @@ function ModelMenu() {
   const isOther = OTHER_MODELS.some((m) => m.id === choice.model);
   const [othersOpen, setOthersOpen] = useState(isOther);
   const efforts = EFFORTS.filter((e) => effortsOf(choice.model)?.includes(e.id) ?? true);
+  const fastAvailable = FAST_MODELS.includes(choice.model);
+  const fast = fastAvailable && choice.fast;
   return (
     <Dropdown
       align="right"
@@ -155,6 +157,7 @@ function ModelMenu() {
       className="model-menu"
       trigger={(open, toggle) => (
         <button type="button" className={`model-button${open ? " open" : ""}`} onClick={toggle}>
+          {fast && <Zap size={13} className="fast-mark" />}
           {modelLabel(choice.model)}
           <span className="model-effort">{EFFORTS.find((e) => e.id === choice.effort)?.label}</span>
           <ChevronDown size={14} />
@@ -198,6 +201,19 @@ function ModelMenu() {
             ))}
           </div>
           <div className="menu-footnote">{EFFORTS.find((e) => e.id === choice.effort)?.description}</div>
+          {fastAvailable && (
+            <>
+              <div className="menu-separator" />
+              <div className="menu-row">
+                <Zap size={16} />
+                <span className="menu-label">
+                  高速モード
+                  <span className="menu-hint">約 2.5 倍の速さで返す代わりに、料金が 2 倍</span>
+                </span>
+                <Toggle checked={choice.fast} onChange={(v) => setChoice({ fast: v })} label="高速モード" />
+              </div>
+            </>
+          )}
         </>
       )}
     </Dropdown>
@@ -616,9 +632,19 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
         <span className="spacer" />
         <ModelMenu />
         {running ? (
-          <button type="button" className="send-button stop" aria-label="停止" onClick={() => conversationId && void stop(conversationId)}>
-            <Square size={14} fill="currentColor" />
-          </button>
+          <>
+            <button
+              type="button"
+              className="icon-button hurry-button"
+              title="急いで: 考えている途中の問い合わせを止め、effort を一段下げて続けます"
+              onClick={() => conversationId && void hurry(conversationId)}
+            >
+              <FastForward size={16} />
+            </button>
+            <button type="button" className="send-button stop" aria-label="停止" onClick={() => conversationId && void stop(conversationId)}>
+              <Square size={14} fill="currentColor" />
+            </button>
+          </>
         ) : (
           <button type="button" className="send-button" aria-label="送信" disabled={!canSend} onClick={() => void submit()}>
             <ArrowUp size={18} strokeWidth={2.4} />

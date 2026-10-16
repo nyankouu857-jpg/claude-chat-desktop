@@ -43,6 +43,7 @@ public sealed class ChatHub(
     // 待たずに走らせた子。終わったら親に知らせる
     readonly ConcurrentDictionary<string, byte> backgroundChildren = new();
     readonly ConcurrentDictionary<string, int> runHops = new();
+    readonly ConcurrentDictionary<string, HurrySignal> hurries = new();
     // 枠が空くのを待っている子。メッセージが溜まっている
     readonly ConcurrentDictionary<string, byte> waitingForSlot = new();
     // 実行中のエージェントの数。上限の確認と登録を同時にするためロックで守る
@@ -58,6 +59,8 @@ public sealed class ChatHub(
     public const string Idle = "idle";
     public const string Failed = "failed";
     public const string Stopped = "stopped";
+    // アプリが落ちて、応答が途中で終わった会話
+    public const string Interrupted = "interrupted";
 
     // 0 はユーザーのチャット、1 はサブエージェントやワークフローの子
     public static int DepthOf(Conversation conversation) => conversation.Kind == "chat" ? 0 : 1;
@@ -73,7 +76,7 @@ public sealed class ChatHub(
         return lastRunStatus switch
         {
             "failed" => Failed,
-            "aborted" => Stopped,
+            "aborted" or Interrupted => Stopped,
             _ => Idle,
         };
     }
@@ -148,6 +151,8 @@ public sealed class ChatHub(
             WebFetch = (bool?)source["webFetch"] ?? defaults.WebFetch,
             WebFetchMaxUses = Math.Clamp(defaults.WebFetchMaxUses, 1, 50),
             CodeExecution = (bool?)source["codeExecution"] ?? defaults.CodeExecution,
+            Fast = (bool?)source["fast"] == true,
+            ThinkingDisplay = defaults.ThinkingDisplay,
             OfficeSkills = defaults.OfficeSkills,
             EnabledSources = enabled,
             SystemPrompt = BuildPrompt(),
@@ -177,19 +182,24 @@ public sealed class ChatHub(
     public async Task<ChatEngine> EngineAsync()
     {
         var apiKey = await secrets.GetAsync(SecretStore.ApiKey) ?? throw new InvalidOperationException("APIキーが未設定です。設定の API 画面から登録してください");
-        return new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargeParentsAsync };
+        return new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargedAsync };
     }
 
-    // サブエージェントの料金は起動した会話の料金として見せる。子は終わると消えるので、その都度親に足す
-    async Task ChargeParentsAsync(Conversation child, decimal cost)
+    // ワークフローの子の料金をワークフローごとに数える。WorkflowRunner が渡す
+    public Action<string, decimal>? WorkflowCharged { get; set; }
+
+    // 応答中の料金を画面に出す。サブエージェントの分は起動した会話の料金として見せる。子は終わると消えるので、その都度親に足す
+    async Task ChargedAsync(Conversation conversation, decimal cost)
     {
-        var parentId = child.ParentId;
+        EmitChatEvent(conversation.Id, new JsonObject { ["type"] = "cost", ["usage"] = Json.ToNode(conversation.Usage), ["added"] = cost });
+        if (conversation.WorkflowId is { } workflowId) WorkflowCharged?.Invoke(workflowId, cost);
+        var parentId = conversation.ParentId;
         // 親子が輪になった壊れたデータでも回り続けない
         for (var depth = 0; parentId is not null && depth < 8; depth++)
         {
             if (await conversations.GetAsync(parentId) is not { } parent) return;
             parent.Usage.Charge(cost, byAgent: true);
-            EmitChatEvent(parent.Id, new JsonObject { ["type"] = "cost", ["usage"] = Json.ToNode(parent.Usage) });
+            EmitChatEvent(parent.Id, new JsonObject { ["type"] = "cost", ["usage"] = Json.ToNode(parent.Usage), ["added"] = cost });
             // 動いている親は自分の保存に乗る。止まっている親を保存しても、会話を書き換えている者はいない
             if (!running.ContainsKey(parent.Id)) await conversations.SaveAsync(parent, touch: false);
             parentId = parent.ParentId;
@@ -225,6 +235,8 @@ public sealed class ChatHub(
             await prepare();
             // アーカイブした会話でも、予定やほかのチャットから届いて動き出したら一覧に戻す
             conversation.Archived = false;
+            // アプリが落ちたら running のまま残り、次の起動で途中で終わったと分かる
+            conversation.LastRunStatus = Running;
             await conversations.SaveAsync(conversation);
             events.Emit("conversations.changed", null);
         }
@@ -267,7 +279,10 @@ public sealed class ChatHub(
     async Task RunAsync(Conversation conversation, ChatOptions options, CancellationTokenSource cancellation, TaskCompletionSource<ChatRunResult> completion, int hops)
     {
         var id = conversation.Id;
-        options = options with { TakeInterjections = () => TakeInterjections(id) };
+        var hurry = new HurrySignal();
+        hurries[id] = hurry;
+        options = options with { TakeInterjections = () => TakeInterjections(id), Hurry = hurry };
+        var costBefore = conversation.Usage.CostUsd;
         ToolContext.Current = new ToolContext { Conversation = conversation, Options = options, Depth = DepthOf(conversation), Hops = hops };
         // 途中経過を順番どおりに保存する。落ちてもそこまでの会話は残る
         var saveChain = Task.CompletedTask;
@@ -289,7 +304,7 @@ public sealed class ChatHub(
             else
             {
                 conversation.Model = options.Model;
-                engine = new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargeParentsAsync };
+                engine = new ChatEngine(GetClient(apiKey), Tools, ledger, settings, hooks, paths) { Charged = ChargedAsync };
                 var gate = new ApprovalGate(this, conversation);
                 result = await engine.RunAsync(conversation, options, EmitChat, gate, cancellation.Token);
                 // Stop フックが続けるよう求めたら、同じ枠のまま理由を渡して続けさせる。
@@ -353,21 +368,75 @@ public sealed class ChatHub(
         }
         finally
         {
+            hurries.TryRemove(new KeyValuePair<string, HurrySignal>(id, hurry));
             Release(id, cancellation);
             ReleaseSlot(id);
             completion.TrySetResult(result);
             EmitStatus(conversation);
         }
-        await AfterRunAsync(conversation, result);
+        await AfterRunAsync(conversation, result, conversation.Usage.CostUsd - costBefore);
+    }
+
+    // 起動したとき、前回応答中のまま終わった会話に印を付け直す。答えまで書き終えていたものは終わったことにする
+    public async Task MarkInterruptedAsync()
+    {
+        foreach (var summary in (await conversations.ListAsync()).Where(c => c.LastRunStatus == Running))
+        {
+            if (await conversations.GetAsync(summary.Id) is not { } conversation) continue;
+            var last = conversation.LastMessage();
+            var answered = last is not null && (string?)last["role"] == "assistant" && !(last["content"] as JsonArray ?? []).OfType<JsonObject>().Any(b => (string?)b["type"] == "tool_use");
+            // 子は親がもう待っていないので、続きからは動かさない
+            conversation.LastRunStatus = answered ? "done" : conversation.ParentId is null ? Interrupted : "failed";
+            await conversations.SaveAsync(conversation, touch: false);
+        }
+    }
+
+    const string ResumeNote = "<resumed>アプリが途中で終了したため、応答が中断されていました。ここまでの続きから再開してください。</resumed>";
+
+    public async Task ResumeAsync(Conversation conversation)
+    {
+        if (conversation.LastRunStatus != Interrupted) throw new InvalidOperationException("再開できるのは、途中で終わった応答だけです");
+        var options = await OptionsForAsync(conversation);
+        await StartAsync(conversation, () =>
+        {
+            ChatEngine.RepairDanglingToolUse(conversation, "アプリが終了したため、結果を受け取れませんでした", []);
+            // 人の発言で終わっているならそのまま送り直せば済む。作業の途中なら、間が空いたことを伝える
+            if (conversation.LastMessage() is { } last && !Conversation.IsHumanTurn(last))
+            {
+                conversation.Append(new JsonObject { ["role"] = "user", ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = ResumeNote }) });
+            }
+            return Task.CompletedTask;
+        }, options);
+    }
+
+    // 応答を止めずに、考えすぎている問い合わせだけをやり直させる
+    public bool Hurry(string conversationId)
+    {
+        if (!hurries.TryGetValue(conversationId, out var hurry)) return false;
+        hurry.Request();
+        return true;
+    }
+
+    // 通知の 1 行。答えの最初の行と、この応答でかかった料金
+    public static string Digest(string text, decimal costUsd)
+    {
+        var line = text.Split('\n').Select(l => l.Trim().TrimStart('#', '-', '*', ' ')).FirstOrDefault(l => l.Length > 0) ?? "";
+        if (line.Length > 80) line = line[..80] + "…";
+        var cost = costUsd >= 0.01m ? $"${costUsd:0.00}" : costUsd > 0 ? "$0.01 未満" : "";
+        return string.Join(" · ", new[] { line, cost }.Where(p => p.Length > 0));
     }
 
     // 終わった会話に溜まったメッセージを流し、待っていた相手や親に知らせる
-    async Task AfterRunAsync(Conversation conversation, ChatRunResult result)
+    async Task AfterRunAsync(Conversation conversation, ChatRunResult result, decimal runCost)
     {
         try
         {
-            // サブエージェントの終わりは親が受け取るので、知らせるのは人が始めた会話だけ
-            if (conversation.ParentId is null && result.Status != ChatStatus.Aborted) Alert?.Invoke(conversation, result.Status == ChatStatus.Done ? "返答が終わりました" : "返答が失敗しました", false);
+            // 待たれているサブエージェントの終わりは親の返答で分かるので、知らせるのは人が始めた会話と裏で動いた子だけ
+            if (conversation.ParentId is null && result.Status != ChatStatus.Aborted)
+            {
+                var digest = Digest(result.Status == ChatStatus.Done ? FinalText(conversation) : result.Error ?? "", runCost);
+                Alert?.Invoke(conversation, (result.Status == ChatStatus.Done ? "返答が終わりました" : "返答が失敗しました") + (digest.Length > 0 ? $": {digest}" : ""), false);
+            }
             // 最後のツールの後に届いた指示は、ユーザーの発言として続けて送る。止めたときは送らない
             var leftovers = TakeInterjections(conversation.Id);
             if (result.Status != ChatStatus.Aborted)
@@ -380,6 +449,11 @@ public sealed class ChatHub(
             {
                 var status = result.Status == ChatStatus.Done ? "completed" : result.Status == ChatStatus.Aborted ? "stopped" : "failed";
                 var body = result.Status == ChatStatus.Done ? FinalText(conversation) : result.Error ?? "";
+                if (result.Status != ChatStatus.Aborted)
+                {
+                    var verb = result.Status == ChatStatus.Done ? "終わりました" : "失敗しました";
+                    Alert?.Invoke(parent, $"サブエージェント「{conversation.Title}」が{verb}: {Digest(body, conversation.Usage.CostUsd)}", false);
+                }
                 await DeliverAsync(parent, $"<task-notification agent=\"{Escape(conversation.Title)}\" chat_id=\"{conversation.Id}\" status=\"{status}\">\n{body}\n</task-notification>", hops);
             }
             if (idleWatchers.TryRemove(conversation.Id, out var watchers))

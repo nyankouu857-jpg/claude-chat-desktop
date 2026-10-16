@@ -1,5 +1,5 @@
-import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, Mail, MessageSquare, PanelsTopLeft, Pencil, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
-import { Fragment, memo, useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FastForward, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, Mail, MessageSquare, PanelsTopLeft, Pencil, Play, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { answer, approve, edit, navigate, openArtifact, openFile, openMail, retry, setQuote, stopWorkflow, switchBranch, textOf } from "../actions";
 import { MODELS } from "../models";
 import { findBuiltin } from "../builtins";
@@ -149,7 +149,7 @@ export const Markdown = memo(function Markdown({ text, cites }: { text: string; 
 });
 
 // ほかのチャットやアプリから届いた発言の印。中身はタグで包まれている
-const PEER_TAGS = ["message", "task", "task-notification", "idle-notification", "scheduled-task", "hook-feedback", "compact-summary", "command"];
+const PEER_TAGS = ["message", "task", "task-notification", "idle-notification", "scheduled-task", "hook-feedback", "compact-summary", "command", "hurry", "resumed"];
 const PEER_PATTERN = new RegExp(`^<(${PEER_TAGS.join("|")})((?:\\s+[\\w-]+="[^"]*")*)\\s*>\\n?([\\s\\S]*?)\\n?</\\1>\\s*$`);
 
 export interface PeerMessage {
@@ -180,6 +180,8 @@ function peerHeader(peer: PeerMessage): { icon: ReactNode; title: string } {
     case "hook-feedback": return { icon: <Webhook size={15} />, title: `${a.event ?? ""} フックからの補足` };
     case "compact-summary": return { icon: <ListTree size={15} />, title: "ここより前の会話は要約して続けています" };
     case "command": return { icon: <TerminalSquare size={15} />, title: a.name ?? "コマンド" };
+    case "hurry": return { icon: <FastForward size={15} />, title: "急ぐよう伝えました" };
+    case "resumed": return { icon: <Play size={15} />, title: "アプリの再起動後に続きから再開しました" };
     default: return { icon: <Inbox size={15} />, title: peer.tag };
   }
 }
@@ -242,6 +244,8 @@ function formatDuration(seconds: number) {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
+const formatUsd = (usd: number) => (usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`);
+
 const formatTokens = (tokens: number) => (tokens < 1000 ? String(Math.round(tokens)) : `${(tokens / 1000).toFixed(1)}k`);
 
 function LiveTurnStatus({ live }: { live: LiveReply }) {
@@ -256,7 +260,7 @@ function LiveTurnStatus({ live }: { live: LiveReply }) {
   return (
     <span className="turn-status live">
       <span className="turn-status-glyph">{SPINNER_FRAMES[frame]}</span> <span className="turn-status-verb">{verb}…</span>{" "}
-      ({formatDuration(elapsed)} · ↓ {formatTokens(live.outputTokens + live.streamingTokens)} tokens · esc to interrupt)
+      ({formatDuration(elapsed)} · ↓ {formatTokens(live.outputTokens + live.streamingTokens)} tokens{live.costUsd > 0 ? ` · ${formatUsd(live.costUsd)}` : ""} · esc to interrupt)
     </span>
   );
 }
@@ -268,11 +272,14 @@ function ThinkingBlock({ block, active }: { block: WireBlock; active: boolean })
   const label = active
     ? `考えています... ${elapsed}秒`
     : finishedSeconds !== null ? `${finishedSeconds}秒間 考えました` : "思考プロセス";
+  // 閉じたままでも何をしているか分かるよう、要約や進捗の最後の行を添える
+  const latest = active && !open ? (block.thinking ?? "").trim().split("\n").filter((l: string) => l.trim()).at(-1)?.replace(/^[#*\-\s]+|\*+$/g, "") : undefined;
   return (
     <div className={`thinking${open ? " open" : ""}`}>
       <button type="button" className="thinking-toggle" onClick={() => setOpen((o) => !o)}>
         {active && <LoaderCircle size={14} className="spin" />}
         <span>{label}</span>
+        {latest && <span className="thinking-latest">{latest}</span>}
         <ChevronRight size={14} className="chevron" />
       </button>
       {open && <div className="thinking-body">{block.thinking || (active ? "..." : "思考の要約はありません")}</div>}
@@ -1024,20 +1031,49 @@ function compactionPosition(turns: Turn[], apiStart: number, messageCount: numbe
   return insideReply ? at - 1 : at;
 }
 
+// 長い会話は最後のほうだけ描き、上へ戻ったら少しずつ足す。全部を一度に描くと開くのも打つのも重くなる
+const TURN_WINDOW = 40;
+
+// 見えたら前の分を足す。押しても足せる
+function ShowEarlier({ hidden, onShow }: { hidden: number; onShow: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const target = ref.current;
+    if (!target) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) onShow();
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [onShow]);
+  return <button ref={ref} type="button" className="show-earlier" onClick={onShow}>前のメッセージを表示 (残り {hidden} 件)</button>;
+}
+
 export function MessageList({ conversationId }: { conversationId: string }) {
   const conversation = useStore((s) => s.conversations[conversationId]);
   const live = useStore((s) => s.live[conversationId]);
   const error = useStore((s) => s.errors[conversationId]);
   const turns = useMemo(() => buildTurns(conversation?.messages ?? [], live), [conversation?.messages, live]);
+  const [shown, setShown] = useState(TURN_WINDOW);
+  useEffect(() => setShown(TURN_WINDOW), [conversationId]);
+  // 会話の中を検索するときは、描いていない分も探せるよう全部出す
+  useEffect(() => {
+    const showAll = () => setShown(Infinity);
+    window.addEventListener("chat-show-all", showAll);
+    return () => window.removeEventListener("chat-show-all", showAll);
+  }, []);
+  const showEarlier = useMemo(() => () => setShown((n) => n + TURN_WINDOW), []);
   if (!conversation) return <div className="loading"><LoaderCircle className="spin" /></div>;
   const lastAssistant = turns.map((t) => t.kind).lastIndexOf("assistant");
   // /compact の要約は履歴の外にあるので、要約した境目に出す。応答の途中で要約したときは、その応答の前に出す
   const compaction = conversation.compactionBlock;
   const compactedAt = compaction ? compactionPosition(turns, conversation.apiStart, conversation.messages.length) : -1;
+  const first = Math.max(0, turns.length - shown);
   return (
     <div className="message-list">
       <QuoteReply conversationId={conversationId} />
-      {turns.map((turn, i) => (
+      {first > 0 && <ShowEarlier hidden={first} onShow={showEarlier} />}
+      {turns.map((turn, i) => i < first ? null : (
         <Fragment key={turn.kind === "human" ? `h${turn.index}` : `a${i}`}>
           {compaction && i === compactedAt && <CompactionBlock block={compaction} active={false} />}
           {turn.kind === "human"

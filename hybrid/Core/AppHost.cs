@@ -85,6 +85,7 @@ public sealed class AppHost : IAsyncDisposable
         housekeeping = new Housekeeping(paths, settings, conversations, hub, () => Emit("conversations.changed", null),
             problem => platform.Notify("バックアップに失敗しました", problem));
         workflows = new WorkflowRunner(hub, settings, conversations, events);
+        hub.WorkflowCharged = workflows.Charge;
         scheduler = new Scheduler(paths, hub, conversations, events);
         mcp = new McpHub(paths);
         terminal = new TerminalToolProvider(settings);
@@ -127,6 +128,7 @@ public sealed class AppHost : IAsyncDisposable
         DeleteIncognitoFiles();
         var current = await settings.GetAsync();
         await ledger.GetPricingAsync();
+        await hub.MarkInterruptedAsync();
         await mcp.ApplyAsync(current.McpServers);
         scheduler.Start();
         housekeeping.Start();
@@ -240,6 +242,9 @@ public sealed class AppHost : IAsyncDisposable
         "app.open" => OpenTargetAsync(Str(p, "target")),
         "app.checkUpdate" => CheckUpdateAsync(),
         "chat.interject" => InterjectAsync(Str(p, "conversationId"), Str(p, "text")),
+        "chat.hurry" => HurryAsync(Str(p, "conversationId")),
+        "chat.resume" => ResumeAsync(Str(p, "conversationId")),
+        "chat.dismissInterrupted" => DismissInterruptedAsync(Str(p, "conversationId")),
         "app.installUpdate" => InstallUpdateAsync(),
         "app.openMail" => OpenMailAsync((string?)p["to"] ?? "", (string?)p["subject"] ?? "", (string?)p["body"] ?? ""),
         "app.pickFolder" => Task.FromResult<JsonNode?>(platform.PickFolder()),
@@ -270,6 +275,29 @@ public sealed class AppHost : IAsyncDisposable
         await conversations.GetAsync(id) ?? throw new InvalidOperationException("会話が見つかりません");
 
     // 応答中に送られた文。走っていなければ false を返し、画面はふつうに送り直す
+    Task<JsonNode?> HurryAsync(string conversationId)
+    {
+        if (!hub.Hurry(conversationId)) throw new InvalidOperationException("応答中ではありません");
+        return Task.FromResult<JsonNode?>(null);
+    }
+
+    async Task<JsonNode?> ResumeAsync(string conversationId)
+    {
+        var conversation = await conversations.GetAsync(conversationId) ?? throw new InvalidOperationException("会話が見つかりません");
+        await hub.ResumeAsync(conversation);
+        return null;
+    }
+
+    async Task<JsonNode?> DismissInterruptedAsync(string conversationId)
+    {
+        var conversation = await conversations.GetAsync(conversationId) ?? throw new InvalidOperationException("会話が見つかりません");
+        if (conversation.LastRunStatus != ChatHub.Interrupted) return null;
+        conversation.LastRunStatus = "aborted";
+        await conversations.SaveAsync(conversation, touch: false);
+        Emit("conversations.changed", null);
+        return conversation.ToWire();
+    }
+
     async Task<JsonNode?> InterjectAsync(string conversationId, string text)
     {
         var conversation = await RequireConversationAsync(conversationId);
@@ -435,7 +463,11 @@ public sealed class AppHost : IAsyncDisposable
         {
             if (patch["profile"] is JsonObject profile) s.Profile = Merge(s.Profile, profile);
             if (patch["appearance"] is JsonObject appearance) s.Appearance = Merge(s.Appearance, appearance);
-            if (patch["chat"] is JsonObject chat) s.Chat = Merge(s.Chat, chat);
+            if (patch["chat"] is JsonObject chat)
+            {
+                s.Chat = Merge(s.Chat, chat);
+                if (s.Chat.ThinkingDisplay is not ("summarized" or "updates")) s.Chat.ThinkingDisplay = "summarized";
+            }
             if (patch["files"] is JsonObject files) s.Files = Merge(s.Files, files);
             if (patch["terminal"] is JsonObject terminalPatch) s.Terminal = Merge(s.Terminal, terminalPatch);
             if (patch["programs"] is JsonObject programs) s.Programs = Merge(s.Programs, programs);
@@ -649,7 +681,7 @@ public sealed class AppHost : IAsyncDisposable
     static JsonObject RequestOptions(JsonObject p)
     {
         var options = new JsonObject();
-        foreach (var key in new[] { "model", "effort", "webSearch", "webFetch", "codeExecution", "enabledSources", "style" })
+        foreach (var key in new[] { "model", "effort", "webSearch", "webFetch", "codeExecution", "enabledSources", "style", "fast" })
         {
             if (p[key] is { } value) options[key] = value.DeepClone();
         }
@@ -1197,7 +1229,17 @@ public sealed class AppHost : IAsyncDisposable
         return SettingsView(updated);
     }
 
-    async Task<JsonNode?> LocalUsageAsync() => await ledger.SummaryAsync(TimeZoneInfo.Local);
+    async Task<JsonNode?> LocalUsageAsync()
+    {
+        var summary = await ledger.SummaryAsync(TimeZoneInfo.Local);
+        var titles = (await conversations.ListAsync()).ToDictionary(c => c.Id, c => c.Title);
+        foreach (var entry in (summary["topConversationsThisMonth"] as JsonArray ?? []).OfType<JsonObject>())
+        {
+            var id = (string?)entry["conversationId"] ?? "";
+            entry["title"] = titles.GetValueOrDefault(id);
+        }
+        return summary;
+    }
 
     async Task<JsonNode?> OrgUsageAsync(string range)
     {

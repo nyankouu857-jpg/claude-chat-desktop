@@ -27,7 +27,7 @@ public interface IApprovalGate
 
 public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, UsageLedger ledger, SettingsStore settings, Hooks hooks, AppPaths paths)
 {
-    // サブエージェントの料金を起動した会話にも足す。ChatHub が渡す
+    // 応答中の料金を画面に出し、サブエージェントの分は起動した会話にも足す。ChatHub が渡す
     public Func<Conversation, decimal, Task>? Charged { get; init; }
 
     readonly AutoReviewer reviewer = new(client, ledger);
@@ -115,6 +115,15 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         }
     }
 
+    static bool UsesMessageEffort(Conversation conversation, ChatOptions options) =>
+        ModelCatalog.SupportsMessageEffort(options.Model) && conversation.TopEffort is not null;
+
+    static bool UsesProgressUpdates(ChatOptions options) =>
+        options.ThinkingDisplay == "updates" && ModelCatalog.SupportsProgressUpdates(options.Model);
+
+    // バッチは高速モードに対応していない
+    static bool UsesFast(ChatOptions options) => options.Fast && !options.Batch && ModelCatalog.SupportsFast(options.Model);
+
     static MessageCreateParams BuildRequest(Conversation conversation, ChatOptions options, IReadOnlyList<ToolSpec> toolSpecs, List<JsonObject>? messages = null, bool compacting = false)
     {
         // その場で要約した塊を持つ会話には、サーバー側の自動要約を一緒に付けられない
@@ -124,7 +133,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             Model = options.Model,
             // 上限は付けたくないが必須の値なので、そのモデルが受け付ける最大にする。料金は実際に出た分だけ
             MaxTokens = ModelCatalog.MaxOutputTokens(options.Model),
-            Messages = (messages ?? conversation.CopyApiMessages()).Select(ToParam).ToList(),
+            Messages = (messages ?? conversation.CopyApiMessages(UsesMessageEffort(conversation, options))).Select(ToParam).ToList(),
             // 日付入りのシステムプロンプトやツールの増減で前の思考ブロックが無効になっても 400 にしない
             Thinking = ModelCatalog.UsesThinkingBudget(options.Model)
                 ? new BetaThinkingConfigEnabled
@@ -134,7 +143,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 }
                 : new BetaThinkingConfigAdaptive
                 {
-                    Display = Display.Summarized,
+                    Display = UsesProgressUpdates(options) ? Display.Updates : Display.Summarized,
                     BlockBinding = new BetaThinkingBlockBinding { PrefixMismatchBehavior = BetaThinkingPrefixMismatchBehavior.DropBlock },
                 },
             CacheControl = UsesLongCache(conversation, options) ? new BetaCacheControlEphemeral { Ttl = Ttl.Ttl1h } : new BetaCacheControlEphemeral(),
@@ -143,7 +152,9 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         // 思考の量をトークン数で決める世代は effort を受け付けないので、項目ごと送らない
         if (!ModelCatalog.UsesThinkingBudget(options.Model))
         {
-            parameters = parameters with { OutputConfig = new BetaOutputConfig { Effort = ParseEffort(ModelCatalog.EffortFor(options.Model, options.Effort)), Format = format } };
+            // 途中で変えた effort は履歴の中の印で伝え、上は最初の値のままにしてキャッシュを保つ
+            var effort = UsesMessageEffort(conversation, options) ? conversation.TopEffort! : options.Effort;
+            parameters = parameters with { OutputConfig = new BetaOutputConfig { Effort = ParseEffort(ModelCatalog.EffortFor(options.Model, effort)), Format = format } };
         }
         else if (format is not null)
         {
@@ -179,6 +190,14 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         if (onDemand) betas.Add(CompactOnDemandBeta);
         // トークン数で思考する世代は、ツールの合間に考えるのにこの印が要る
         if (ModelCatalog.UsesThinkingBudget(options.Model)) betas.Add("interleaved-thinking-2025-05-14");
+        // 印を使わない回も付けておく。ベータの組み合わせが変わると比べられなくなる
+        if (ModelCatalog.SupportsMessageEffort(options.Model)) betas.Add("mid-conversation-output-config-2026-07-01");
+        if (UsesProgressUpdates(options)) betas.Add("thinking-display-updates-2026-08-18");
+        if (UsesFast(options))
+        {
+            betas.Add("fast-mode-2026-02-01");
+            parameters = parameters with { Speed = Speed.Fast };
+        }
         if (options.CodeExecution && options.OfficeSkills)
         {
             // コンテナでスキルを使うにはコード実行のベータも要る。スキル側の印は古い API のために残す
@@ -236,12 +255,12 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         var containerRetried = false;
         var transientRetries = 0;
 
-        async Task<BetaMessage> StreamAsync(MessageCreateParams request)
+        async Task<BetaMessage> StreamAsync(MessageCreateParams request, CancellationToken requestToken)
         {
             var aggregator = new BetaMessageContentAggregator();
             var toolInputJson = new Dictionary<int, string>();
-            var stream = client.Beta.Messages.CreateStreaming(request, cancellationToken);
-            await using var events = stream.CollectAsync(aggregator).GetAsyncEnumerator(cancellationToken);
+            var stream = client.Beta.Messages.CreateStreaming(request, requestToken);
+            await using var events = stream.CollectAsync(aggregator).GetAsyncEnumerator(requestToken);
             if (!await events.MoveNextAsync()) throw new InvalidOperationException("API から空の応答が返りました");
             do
             {
@@ -294,6 +313,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
         try
         {
+            if (ModelCatalog.SupportsMessageEffort(options.Model)) conversation.SetEffort(options.Effort);
             var mode = conversation.PermissionMode;
             for (var turn = 0; turn < options.MaxToolTurns; turn++)
             {
@@ -315,15 +335,41 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     }
                     costConfirmed = true;
                 }
+                if (options.Hurry?.Take() == true) options = Hurried(conversation, options, emit);
                 var toolSpecs = tools.GetTools(options.EnabledSources);
                 partialText.Clear();
                 emit(new JsonObject { ["type"] = "message-start" });
                 var request = BuildRequest(conversation, options, toolSpecs);
+                // 前の応答と比べて、キャッシュが外れた理由を返してもらう
+                if (!options.Batch) request = request with { Diagnostics = new BetaDiagnosticsParam { PreviousMessageID = conversation.LastResponseId } };
                 BetaMessage message;
+                var requestToken = options.Hurry?.Begin(cancellationToken) ?? cancellationToken;
                 try
                 {
-                    message = options.Batch ? await SendBatchAsync(conversation, request, emit, cancellationToken) : await StreamAsync(request);
+                    message = options.Batch ? await SendBatchAsync(conversation, request, emit, cancellationToken) : await StreamAsync(request, requestToken);
                     transientRetries = 0;
+                }
+                catch (Exception) when (options.Hurry?.Pending == true && !cancellationToken.IsCancellationRequested)
+                {
+                    // 考えている途中の分は捨てて、次の周で effort を下げて送り直す
+                    await RecordInterruptedUsageAsync(conversation, options.Model, streamUsage);
+                    streamUsage = null;
+                    partialText.Clear();
+                    emit(new JsonObject { ["type"] = "discard" });
+                    turn--;
+                    continue;
+                }
+                catch (AnthropicRateLimitException) when (UsesFast(options) && !cancellationToken.IsCancellationRequested)
+                {
+                    // 高速モードには別枠の上限がある。待つより通常の速さで続けたほうが早い
+                    await RecordInterruptedUsageAsync(conversation, options.Model, streamUsage);
+                    streamUsage = null;
+                    partialText.Clear();
+                    emit(new JsonObject { ["type"] = "discard" });
+                    options = options with { Fast = false };
+                    Notice(emit, "高速モードの利用上限に達したので、この応答は通常の速さで続けます");
+                    turn--;
+                    continue;
                 }
                 catch (AnthropicBadRequestException e) when (!containerRetried && conversation.ContainerId is not null && e.Message.Contains("container", StringComparison.OrdinalIgnoreCase))
                 {
@@ -346,6 +392,12 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                     turn--;
                     continue;
                 }
+                finally
+                {
+                    options.Hurry?.End();
+                }
+                conversation.LastResponseId = message.ID;
+                NoticeCacheMiss(message.Diagnostics, emit);
                 var content = new JsonArray(message.Content.Select(b => (JsonNode)ToWire(b)).ToArray());
                 // 画面の「↓ 1.2k tokens」を、流れてきた文字からの見積もりから本当の数に置き換える
                 emit(new JsonObject { ["type"] = "usage", ["output"] = message.Usage.OutputTokens });
@@ -448,7 +500,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
     }
 
     // tool_use の直後に tool_result が無い履歴は次の送信で 400 になるので、結果を補っておく。実行済みの結果はそのまま残す
-    static bool RepairDanglingToolUse(Conversation conversation, string reason, JsonArray finished)
+    public static bool RepairDanglingToolUse(Conversation conversation, string reason, JsonArray finished)
     {
         var last = conversation.LastMessage();
         if (last is null || (string?)last["role"] != "assistant") return false;
@@ -486,6 +538,40 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
     static void Notice(Action<JsonObject> emit, string text) =>
         emit(new JsonObject { ["type"] = "notice", ["text"] = text });
+
+    const string HurryNote = "<hurry>ユーザーが「急いで」を押しました。考えすぎずに、今わかっている範囲で手短に進めてください。</hurry>";
+
+    // effort を一段下げ、急ぐよう一言添えて続ける。印は添えた一言の前に入る
+    static ChatOptions Hurried(Conversation conversation, ChatOptions options, Action<JsonObject> emit)
+    {
+        var lower = ModelCatalog.Efforts[Math.Max(0, Array.IndexOf(ModelCatalog.Efforts, options.Effort) - 1)];
+        var note = new JsonObject { ["role"] = "user", ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = HurryNote }) };
+        conversation.Append(note);
+        emit(new JsonObject { ["type"] = "message", ["message"] = note.DeepClone() });
+        if (ModelCatalog.SupportsMessageEffort(options.Model)) conversation.SetEffort(lower);
+        Notice(emit, lower == options.Effort ? "急ぐよう伝えました" : $"急ぐよう伝えて、effort を {options.Effort} から {lower} に下げました");
+        return options with { Effort = lower };
+    }
+
+    // 少しの読み直しなら知らせない
+    const long CacheMissNoticeAbove = 10_000;
+
+    // 自分で変えた覚えのない料金の跳ね上がりを、理由つきで知らせる。モデルを替えたときは分かっているので黙る
+    static void NoticeCacheMiss(BetaDiagnostics? diagnostics, Action<JsonObject> emit)
+    {
+        if (diagnostics?.CacheMissReason is null) return;
+        var reason = ToWire(diagnostics)["cache_miss_reason"];
+        var missed = (long?)reason?["cache_missed_input_tokens"] ?? 0;
+        if (missed < CacheMissNoticeAbove) return;
+        var why = (string?)reason?["type"] switch
+        {
+            "system_changed" => "指示 (システムプロンプト) が前回から変わった",
+            "tools_changed" => "使えるツールの組み合わせが前回から変わった",
+            "messages_changed" => "前の履歴が書き換わった",
+            _ => null,
+        };
+        if (why is not null) Notice(emit, $"{why}ため、キャッシュが効かず約 {missed / 1000.0:0.#}k トークンを読み直しました。この回の料金はいつもより高くなります");
+    }
 
     async Task<JsonArray> RunToolsAsync(
         Conversation conversation,
@@ -768,6 +854,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
                 CacheWrite = written - written1h,
                 CacheWrite1h = written1h,
                 Batch = batch,
+                Fast = (string?)usage["speed"] == "fast",
+                ParentId = conversation.Incognito ? null : conversation.ParentId,
                 CacheRead = (long?)iteration["cache_read_input_tokens"] ?? 0,
                 WebSearches = webSearches,
             });
@@ -781,7 +869,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             // 右の「コンテキスト」用に、最後に送った会話の大きさを覚えておく
             if (kind == "chat") conversation.Usage.Context = record.Input + record.CacheRead + written;
         }
-        if (conversation.ParentId is not null && charged > 0 && Charged is not null) await Charged(conversation, charged);
+        if (charged > 0 && Charged is not null) await Charged(conversation, charged);
     }
 
     // 要約や脇道の質問は長くならない。トークン数で思考する世代は、思考の分より多くないと受け付けられない
@@ -974,6 +1062,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             CacheWrite = longCache ? 0 : written,
             CacheWrite1h = longCache ? written : 0,
             Batch = options.Batch,
+            Fast = UsesFast(options),
         });
         if (cost is not { } usd || usd < limit) return null;
         var decision = await gate.RequestAsync(new JsonObject
@@ -1015,7 +1104,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
     // /btw と /compact 用。履歴には何も足さず、答えだけ返す
     public async Task<string> AskAsideAsync(Conversation conversation, ChatOptions options, string prompt, string kind, CancellationToken cancellationToken)
     {
-        var messages = conversation.CopyApiMessages();
+        var messages = conversation.CopyApiMessages(UsesMessageEffort(conversation, options));
         // 応答中だと結果の届いていない tool_use が末尾にあり、そのままでは 400 になる
         while (messages.Count > 0 && (string?)messages[^1]["role"] == "assistant" && (messages[^1]["content"] as JsonArray ?? []).OfType<JsonObject>().Any(b => (string?)b["type"] == "tool_use"))
         {

@@ -26,6 +26,19 @@ public sealed class WorkflowRun
     public string? Error { get; set; }
     public CancellationTokenSource Cancellation { get; } = new();
     public long StartedAt { get; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    // 子は終わると消えるので、使った料金はその都度ここに足しておく
+    decimal costUsd;
+    readonly Lock costLock = new();
+
+    public decimal CostUsd
+    {
+        get { lock (costLock) return costUsd; }
+    }
+
+    public void Charge(decimal cost)
+    {
+        lock (costLock) costUsd += cost;
+    }
 
     JsonArray LogsView()
     {
@@ -111,6 +124,8 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
     private static partial Regex ExportMeta();
 
     public WorkflowRun? Get(string id) => runs.GetValueOrDefault(id);
+
+    public void Charge(string id, decimal cost) => runs.GetValueOrDefault(id)?.Charge(cost);
 
     public IEnumerable<WorkflowRun> ForParent(string parentId) => runs.Values.Where(r => r.ParentId == parentId).OrderBy(r => r.StartedAt);
 
@@ -325,6 +340,12 @@ public sealed partial class WorkflowRunner(ChatHub hub, SettingsStore settings, 
         };
         // 長すぎると親の会話を圧迫する
         if (body.Length > 60_000) body = body[..60_000] + "\n... (長いので省略)";
+        // リサーチはすぐ親がまとめて答えるので、その知らせだけで足りる
+        if (run.Status != "stopped" && run.Name != "research")
+        {
+            var verb = run.Status == "completed" ? "終わりました" : "失敗しました";
+            hub.Alert?.Invoke(parent, $"ワークフロー「{run.Title}」が{verb}: {ChatHub.Digest(body, run.CostUsd)}", false);
+        }
         await hub.DeliverAsync(parent, $"<task-notification workflow=\"{run.Title.Replace("\"", "'")}\" id=\"{run.Id}\" status=\"{run.Status}\" agents=\"{run.AgentCount}\">\n{body}\n</task-notification>", run.Hops);
     }
 }

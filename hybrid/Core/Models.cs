@@ -34,6 +34,15 @@ public static class ModelCatalog
     // 断られたときに別のモデルで答え直す fallbacks: "default" を受け付けるもの
     public static bool SupportsDefaultFallback(string model) => model is "claude-fable-5-1" or "claude-opus-5-5" or "claude-opus-5" or "claude-sonnet-5-5";
 
+    // 会話の途中で effort だけを変える system メッセージを受け付けるもの。上の effort を変えるとキャッシュが切れる
+    public static bool SupportsMessageEffort(string model) => model is "claude-fable-5-1" or "claude-opus-5-5" or "claude-opus-5" or "claude-sonnet-5-5" or "claude-haiku-5-5";
+
+    // 高速モード。単価が通常の 2 倍と分かっているものだけ
+    public static bool SupportsFast(string model) => model is "claude-opus-5-5" or "claude-opus-5";
+
+    // 思考を隠してツールの合間の進捗だけを返す display: "updates" を受け付けるもの
+    public static bool SupportsProgressUpdates(string model) => model is "claude-fable-5-1" or "claude-fable-5" or "claude-opus-5-5" or "claude-sonnet-5-5";
+
     // xhigh は Opus 4.7 から。それより前は 400 になるので一段下げる
     public static string EffortFor(string model, string effort) =>
         effort == "xhigh" && model is "claude-opus-4-6" or "claude-sonnet-4-6" ? "high" : effort;
