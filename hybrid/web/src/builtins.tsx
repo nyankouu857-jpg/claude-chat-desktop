@@ -1,4 +1,4 @@
-import { AppWindow, Bot, Brain, CalendarClock, CircleQuestionMark, Globe, FolderOpen, ListChecks, MessagesSquare, MousePointerClick, NotebookPen, PanelsTopLeft, SquareTerminal, type LucideIcon } from "lucide-react";
+import { AppWindow, Bell, Bot, Brain, CalendarClock, CircleQuestionMark, FolderOpen, Globe, ListChecks, Mail, MessagesSquare, MousePointerClick, NotebookPen, PanelsTopLeft, Plug, SquareTerminal, type LucideIcon } from "lucide-react";
 import { modelLabel } from "./models";
 import type { Settings } from "./types";
 
@@ -136,8 +136,8 @@ export const BUILTIN_SOURCES: BuiltinSource[] = [
     icon: MessagesSquare,
     isAvailable: (s) => s.features.chatSearch,
     hint: () => "以前の会話を探して読む",
-    titles: { search: "過去のチャットを探す", read: "過去のチャットを読む" },
-    subject: (_, input) => input.query ?? input.id ?? "",
+    titles: { search: "過去のチャットを探す", recent: "最近のチャット", read: "過去のチャットを読む" },
+    subject: (_, input) => input.query ?? input.id ?? input.before ?? "",
   },
   {
     id: "memory",
@@ -199,6 +199,26 @@ export const BUILTIN_SOURCES: BuiltinSource[] = [
     titles: { user: "質問しました" },
     subject: (_, input) => (Array.isArray(input.questions) ? input.questions.map((q: any) => q?.header).filter(Boolean).join(" / ") : ""),
   },
+  {
+    id: "notify",
+    group: "claude",
+    label: "通知",
+    icon: Bell,
+    isAvailable: () => true,
+    hint: () => "長い作業が終わったらデスクトップに知らせる",
+    titles: { send: "デスクトップに通知" },
+    subject: (_, input) => input.title ?? input.message ?? "",
+  },
+  {
+    id: "compose",
+    group: "claude",
+    label: "下書き",
+    icon: Mail,
+    isAvailable: () => true,
+    hint: () => "メールやメッセージの下書きをカードで出す",
+    titles: { draft: "下書きを作りました" },
+    subject: (_, input) => input.subject ?? input.to ?? "",
+  },
 ];
 
 // 計画モードのときだけ出る。メニューには並べない
@@ -209,8 +229,20 @@ export const PLAN_SOURCE: BuiltinSource = {
   icon: ListChecks,
   isAvailable: () => false,
   hint: () => "",
-  titles: { exit_plan_mode: "計画の承認" },
+  titles: { exit_plan_mode: "計画の承認", enter_plan_mode: "計画モードに入る" },
   subject: () => "",
 };
 
-export const findBuiltin = (id: string) => (id === PLAN_SOURCE.id ? PLAN_SOURCE : BUILTIN_SOURCES.find((b) => b.id === id));
+// コネクタがリソースを公開しているときだけ出る。メニューには並べない
+const RESOURCES_SOURCE: BuiltinSource = {
+  id: "resources",
+  group: "claude",
+  label: "コネクタのリソース",
+  icon: Plug,
+  isAvailable: () => false,
+  hint: () => "",
+  titles: { list: "コネクタのリソース一覧", read: "コネクタのリソースを読む" },
+  subject: (_, input) => input.uri ?? input.server ?? "",
+};
+
+export const findBuiltin = (id: string) => [PLAN_SOURCE, RESOURCES_SOURCE].find((b) => b.id === id) ?? BUILTIN_SOURCES.find((b) => b.id === id);

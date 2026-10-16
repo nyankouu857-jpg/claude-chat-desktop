@@ -6,7 +6,8 @@ namespace ClaudeChat.Core;
 // AllowAlways が false のツールは「常に許可」を出さない。中身次第で何でもできるもの用。
 // ReadOnly は計画モードでも使えるもの。Native は API 定義のツール (memory など) を独自の形で送るときの定義
 // ReadOnlyCall は入力によって読むだけになるツール (memory の view など) で、その呼び出しを確認なし・計画モード可にする
-public sealed record ToolSpec(string ApiName, string Source, string Name, string? Title, string Description, JsonObject InputSchema, bool AutoApprove = false, bool AllowAlways = true, bool ReadOnly = false, JsonObject? Native = null, Func<JsonObject, bool>? ReadOnlyCall = null);
+// External はコネクタ (MCP) のツール。数が多いときは定義を最初から見せず、ツール検索で探させる
+public sealed record ToolSpec(string ApiName, string Source, string Name, string? Title, string Description, JsonObject InputSchema, bool AutoApprove = false, bool AllowAlways = true, bool ReadOnly = false, JsonObject? Native = null, Func<JsonObject, bool>? ReadOnlyCall = null, bool External = false);
 
 public sealed class ToolException(string message) : Exception(message);
 

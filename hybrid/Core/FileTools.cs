@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using static ClaudeChat.Core.ToolJson;
 
 namespace ClaudeChat.Core;
@@ -63,7 +64,7 @@ public sealed class FileToolProvider : IToolProvider
             new("read_file", "ファイルを読む", "テキストファイルを行番号付きで読む。画像なら画像として返す。長いファイルは offset と limit で分けて読む。",
                 true, Schema(("path", "string", "ファイルのパス", true), ("offset", "integer", "読み始める行番号。1 始まり", false), ("limit", "integer", "読む行数。既定 2000", false)), ReadFile),
             new("search_files", "ファイルを探す", "フォルダ以下を再帰的に探す。pattern でファイル名 (例: *.cs)、contains で中身の文字列を絞り込む。",
-                true, Schema(("path", "string", "探し始めるフォルダ", true), ("pattern", "string", "ファイル名のワイルドカード。既定は *", false), ("contains", "string", "中身に含む文字列。大文字小文字は区別しない", false)), SearchFiles),
+                true, Schema(("path", "string", "探し始めるフォルダ", true), ("pattern", "string", "ファイル名のワイルドカード。既定は *", false), ("contains", "string", "中身に含む文字列。大文字小文字は区別しない", false), ("regex", "boolean", "contains を正規表現として扱う", false)), SearchFiles),
             new("get_file_info", "ファイルの情報", "ファイルやフォルダの大きさ、作成日時、更新日時を返す。",
                 true, Schema(("path", "string", "対象のパス", true)), GetFileInfo),
             new("write_file", "ファイルに書き込む", "ファイルを新しく作るか、中身を丸ごと置き換える。親フォルダが無ければ作る。既存ファイルは元の文字コードを保つ。",
@@ -327,6 +328,19 @@ public sealed class FileToolProvider : IToolProvider
         // パターンに .. やフォルダが入ると、列挙の起点が許可フォルダの外へずれる
         if (pattern != Path.GetFileName(pattern) || pattern.Contains("..")) throw new ToolException("pattern にはファイル名のワイルドカード (例: *.cs) だけを指定してください");
         var contains = (string?)input["contains"];
+        Regex? regex = null;
+        if ((bool?)input["regex"] == true && !string.IsNullOrEmpty(contains))
+        {
+            try
+            {
+                // 書き方しだいで延々と戻り続ける式があるので、1 行あたりの時間を区切る
+                regex = new Regex(contains, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(200));
+            }
+            catch (ArgumentException e)
+            {
+                throw new ToolException($"正規表現が正しくありません: {e.Message}");
+            }
+        }
         var options = new EnumerationOptions
         {
             RecurseSubdirectories = true,
@@ -359,7 +373,16 @@ public sealed class FileToolProvider : IToolProvider
             var lines = text.Split('\n');
             for (var i = 0; i < lines.Length && hits.Count < MaxSearchHits; i++)
             {
-                if (lines[i].Contains(contains, StringComparison.OrdinalIgnoreCase)) hits.Add($"{Display(file, access)}:{i + 1}: {lines[i].Trim()}");
+                bool matched;
+                try
+                {
+                    matched = regex?.IsMatch(lines[i]) ?? lines[i].Contains(contains, StringComparison.OrdinalIgnoreCase);
+                }
+                catch (RegexMatchTimeoutException)
+                {
+                    throw new ToolException("正規表現の照合に時間がかかりすぎました。もっと単純な式にしてください");
+                }
+                if (matched) hits.Add($"{Display(file, access)}:{i + 1}: {lines[i].Trim()}");
             }
         }
         if (hits.Count == 0) return Text("見つかりませんでした");

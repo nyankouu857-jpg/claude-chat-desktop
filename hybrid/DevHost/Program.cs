@@ -128,6 +128,11 @@ sealed class ConsolePlatform(string trashDir) : IPlatform
     public bool CanRealClick => false;
     public string? RealClick(string titleMarker, double fx, double fy) => "この環境では本物のマウスでのクリックは使えません";
     public string? CreateShortcuts() => "この環境ではショートカットを作れません";
+    public string? Notify(string title, string message)
+    {
+        Console.WriteLine($"通知: {title} / {message}");
+        return null;
+    }
 
     // ごみ箱の代わり
     public void MoveToTrash(string path)

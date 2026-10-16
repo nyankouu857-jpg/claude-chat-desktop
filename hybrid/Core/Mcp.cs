@@ -251,8 +251,55 @@ public sealed partial class McpHub(AppPaths paths) : IToolProvider, IAsyncDispos
             t.Name,
             t.Title,
             t.Description ?? "",
-            InputSchemaOf(t))))
+            InputSchemaOf(t),
+            External: true)))
         .ToList();
+
+    // Claude Code の ListMcpResources / ReadMcpResource にあたる。リソースを公開しているサーバーだけ
+    public IReadOnlyList<string> ResourceServers(ISet<string>? enabledSources) => Snapshot()
+        .Where(s => s.Status == "running" && s.Client?.ServerCapabilities?.Resources is not null && (enabledSources is null || enabledSources.Contains(s.Name)))
+        .Select(s => s.Name)
+        .ToList();
+
+    McpClient ResourceClient(string server, ISet<string>? enabledSources)
+    {
+        if (!ResourceServers(enabledSources).Contains(server)) throw new ToolException($"{server} というリソースを持つコネクタはありません");
+        return Snapshot().First(s => s.Name == server).Client!;
+    }
+
+    public async Task<string> ListResourcesAsync(string? server, ISet<string>? enabledSources, CancellationToken cancellationToken)
+    {
+        var names = server is { Length: > 0 } ? [server] : ResourceServers(enabledSources);
+        var lines = new List<string>();
+        foreach (var name in names)
+        {
+            var resources = await ResourceClient(name, enabledSources).ListResourcesAsync(cancellationToken: cancellationToken);
+            lines.AddRange(resources.Select(r => $"[{name}] {r.Uri}  {r.Name}{(r.MimeType is { } mime ? $" ({mime})" : "")}{(r.Description is { Length: > 0 } d ? $" - {d}" : "")}"));
+        }
+        return lines.Count == 0 ? "リソースはありません" : string.Join("\n", lines);
+    }
+
+    public async Task<JsonArray> ReadResourceAsync(string server, string uri, ISet<string>? enabledSources, CancellationToken cancellationToken)
+    {
+        var result = await ResourceClient(server, enabledSources).ReadResourceAsync(uri, cancellationToken: cancellationToken);
+        var content = new JsonArray();
+        foreach (var item in result.Contents)
+        {
+            content.Add(item switch
+            {
+                TextResourceContents text => new JsonObject { ["type"] = "text", ["text"] = text.Text },
+                BlobResourceContents blob when blob.MimeType is "image/png" or "image/jpeg" or "image/gif" or "image/webp" => new JsonObject
+                {
+                    ["type"] = "image",
+                    ["source"] = new JsonObject { ["type"] = "base64", ["media_type"] = blob.MimeType, ["data"] = Convert.ToBase64String(blob.DecodedData.ToArray()) },
+                },
+                // 中身の分からないデータを丸ごと載せると会話が埋まる
+                _ => new JsonObject { ["type"] = "text", ["text"] = $"({item.Uri} は {item.MimeType ?? "不明な形式"} のデータなので読めません)" },
+            });
+        }
+        if (content.Count == 0) content.Add(new JsonObject { ["type"] = "text", ["text"] = "(中身なし)" });
+        return content;
+    }
 
     static JsonObject InputSchemaOf(McpClientTool tool)
     {

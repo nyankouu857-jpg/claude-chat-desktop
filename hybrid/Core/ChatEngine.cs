@@ -52,7 +52,11 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
 
     static JsonObject ToWire<T>(T block) => JsonSerializer.SerializeToNode(block)!.AsObject();
 
-    static BetaToolUnion ToTool(ToolSpec spec)
+    // claude.ai や Claude Code と同じく、コネクタのツールがこれ以上あると、定義を最初から見せずにツール検索で探させる。
+    // 公式の目安では、30 から 50 個を超えると選び間違いが増え、定義だけで会話が埋まる
+    const int DeferToolsAbove = 20;
+
+    static BetaToolUnion ToTool(ToolSpec spec, bool deferred)
     {
         if (spec.Native is { } native) return FromJson<BetaToolUnion>(native);
         var json = new JsonObject
@@ -64,6 +68,7 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             // 大きな入力も生成と同時に流れてくるようにする
             ["eager_input_streaming"] = true,
         };
+        if (deferred) json["defer_loading"] = true;
         return FromJson<BetaToolUnion>(json);
     }
 
@@ -155,7 +160,9 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         if (!string.IsNullOrWhiteSpace(options.SystemPrompt)) parameters = parameters with { System = options.SystemPrompt };
 
         var toolList = ServerTools(options).ToList();
-        toolList.AddRange(toolSpecs.Select(ToTool));
+        var deferExternal = toolSpecs.Count(t => t.External) > DeferToolsAbove;
+        if (deferExternal) toolList.Add(FromJson<BetaToolUnion>(new JsonObject { ["type"] = "tool_search_tool_bm25_20251119", ["name"] = "tool_search_tool_bm25" }));
+        toolList.AddRange(toolSpecs.Select(t => ToTool(t, deferExternal && t.External)));
         if (toolList.Count > 0) parameters = parameters with { Tools = toolList };
 
         List<ApiEnum<string, AnthropicBeta>> betas = ["thinking-binding-controls-2026-08-01"];

@@ -1,6 +1,6 @@
-import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, MessageSquare, PanelsTopLeft, Pencil, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
+import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, Mail, MessageSquare, PanelsTopLeft, Pencil, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
-import { answer, approve, edit, navigate, openArtifact, openFile, retry, setQuote, stopWorkflow, switchBranch, textOf } from "../actions";
+import { answer, approve, edit, navigate, openArtifact, openFile, openMail, retry, setQuote, stopWorkflow, switchBranch, textOf } from "../actions";
 import { MODELS } from "../models";
 import { findBuiltin } from "../builtins";
 import { renderMarkdown } from "../markdown";
@@ -474,6 +474,35 @@ function ArtifactCard({ block, result, conversationId }: { block: WireBlock; res
   );
 }
 
+const DRAFT_LABELS: Record<string, string> = { email: "メールの下書き", message: "メッセージの下書き", post: "投稿の下書き", other: "下書き" };
+
+// claude.ai の下書きのカード。送るのはユーザー自身
+function DraftCard({ block }: { block: WireBlock }) {
+  const input = block.input ?? {};
+  const kind = DRAFT_LABELS[input.kind] ? input.kind : "other";
+  const body = typeof input.body === "string" ? input.body : "";
+  const to = typeof input.to === "string" ? input.to : "";
+  const subject = typeof input.subject === "string" ? input.subject : "";
+  return (
+    <div className="draft-card">
+      <div className="draft-card-header">
+        <Mail size={15} />
+        <span className="draft-card-title">{DRAFT_LABELS[kind]}</span>
+        <span className="spacer" />
+        <CopyButton text={subject ? `件名: ${subject}\n\n${body}` : body} size={14} />
+        {kind === "email" && <button type="button" className="button small" onClick={() => void openMail(to, subject, body)}><ExternalLink size={13} /> メールアプリで開く</button>}
+      </div>
+      {(to || subject) && (
+        <div className="draft-meta">
+          {to && <div><span className="draft-meta-label">宛先</span>{to}</div>}
+          {subject && <div><span className="draft-meta-label">件名</span>{subject}</div>}
+        </div>
+      )}
+      <div className="draft-body">{body}</div>
+    </div>
+  );
+}
+
 // コード実行で作られたファイル。手元に保存できたものは開ける
 function FileOutputs({ result, conversationId }: { result?: WireBlock; conversationId: string }) {
   const files = useStore((s) => s.conversations[conversationId]?.files);
@@ -518,6 +547,7 @@ const SERVER_TOOL_TITLES: Record<string, string> = {
   code_execution: "コードを実行しました",
   bash_code_execution: "コマンドを実行しました",
   text_editor_code_execution: "ファイルを編集しました",
+  tool_search_tool_bm25: "ツールを探しました",
 };
 
 function serverToolText(result: WireBlock | undefined) {
@@ -525,6 +555,7 @@ function serverToolText(result: WireBlock | undefined) {
   if (!content) return "";
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map((c: WireBlock) => c.text ?? "").join("\n");
+  if (Array.isArray(content.tool_references)) return content.tool_references.length > 0 ? `見つかったツール: ${content.tool_references.map((r: WireBlock) => r.tool_name).join(", ")}` : "見つかりませんでした";
   const parts = [content.stdout, content.stderr, content.content?.source?.data?.slice?.(0, 4000), content.error_code && `エラー: ${content.error_code}`];
   return parts.filter(Boolean).join("\n");
 }
@@ -533,7 +564,7 @@ function ServerToolBlock({ block, result, conversationId, active }: { block: Wir
   const [open, setOpen] = useState(false);
   const input = block.input ?? {};
   const isFetch = block.name === "web_fetch";
-  const subject = input.url ?? input.command ?? input.path ?? (typeof input.code === "string" ? input.code.split("\n")[0] : "");
+  const subject = input.url ?? input.command ?? input.path ?? input.query ?? (typeof input.code === "string" ? input.code.split("\n")[0] : "");
   const failed = result?.content?.type?.endsWith?.("_error") || result?.content?.error_code;
   const title = result ? SERVER_TOOL_TITLES[block.name] ?? block.name : isFetch ? "Web ページを読んでいます" : "コードを実行しています";
   return (
@@ -561,6 +592,7 @@ function ToolUseBlock({ block, result, conversationId, live }: { block: WireBloc
   if (block.name === "agents__spawn_agent" && !approval) return <AgentCard block={block} result={result} conversationId={conversationId} />;
   if (block.name === "agents__run_workflow" && result && !result.is_error) return <WorkflowCard block={block} result={result} />;
   if ((block.name === "artifacts__create" || block.name === "artifacts__update") && !result?.is_error) return <ArtifactCard block={block} result={result} conversationId={conversationId} />;
+  if (block.name === "compose__draft" && !result?.is_error) return <DraftCard block={block} />;
   return <GenericToolBlock block={block} result={result} conversationId={conversationId} live={live} />;
 }
 

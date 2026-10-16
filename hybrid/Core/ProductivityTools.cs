@@ -387,9 +387,20 @@ public sealed class PlanToolProvider : IToolProvider
 {
     public const string Source = "plan";
     public const string ExitPlanMode = "plan__exit_plan_mode";
+    public const string EnterPlanMode = "plan__enter_plan_mode";
 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
+        // Claude Code の EnterPlanMode にあたる。サブエージェントは親の指示どおりに動くので入らない
+        if (ToolContext.Current is { Depth: 0, Conversation.PermissionMode: not "plan" })
+        {
+            return
+            [
+                new(EnterPlanMode, Source, "enter_plan_mode", "計画モードに入る",
+                    "Ask the user to switch this chat into plan mode, where you only research and then present a plan for approval before changing anything. Use it before a large or risky change to files or the PC when the right approach is unclear. Don't use it for questions, simple tasks, or when the user already told you what to do.",
+                    Schema(("reason", "string", "Why planning first helps here, in the user's language", true)), AllowAlways: false, ReadOnly: true),
+            ];
+        }
         if (ToolContext.Current?.Conversation.PermissionMode != "plan") return [];
         return
         [
@@ -402,7 +413,12 @@ public sealed class PlanToolProvider : IToolProvider
     public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
         var conversation = ToolContext.Current?.Conversation ?? throw new ToolException("チャットの外からは使えません");
-        // 承認されたときだけここに来る
+        // どちらも承認されたときだけここに来る
+        if (apiName == EnterPlanMode)
+        {
+            conversation.PermissionMode = "plan";
+            return Task.FromResult(Text("計画モードに入りました。変更はせずに調べ、計画ができたら plan__exit_plan_mode でユーザーに見せてください"));
+        }
         conversation.PermissionMode = "default";
         return Task.FromResult(Text("ユーザーが計画を承認しました。計画モードは終わりました。計画どおりに進めてください"));
     }
@@ -566,5 +582,83 @@ public sealed class AskToolProvider : IToolProvider
             text.Append($"\n{questions[i]?["question"]}\n→ {(picked.Count > 0 ? string.Join(" / ", picked) : "(回答なし)")}\n");
         }
         return text.ToString();
+    }
+}
+
+// コネクタ (MCP サーバー) が公開しているリソースを読む
+public sealed class McpResourceToolProvider(McpHub mcp) : IToolProvider
+{
+    public const string Source = "resources";
+    const string Prefix = "resources__";
+
+    public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
+    {
+        var servers = mcp.ResourceServers(enabledSources);
+        if (servers.Count == 0) return [];
+        return
+        [
+            new(Prefix + "list", Source, "list", "コネクタのリソース一覧",
+                $"List the resources (documents, files, records) that connectors expose: {string.Join(", ", servers)}. Omit server to list all.",
+                Schema(("server", "string", "Connector name", false)), AutoApprove: true, ReadOnly: true),
+            new(Prefix + "read", Source, "read", "コネクタのリソースを読む",
+                "Read one connector resource by its URI from list.",
+                Schema(("server", "string", "Connector name", true), ("uri", "string", "Resource URI", true)), AutoApprove: true, ReadOnly: true),
+        ];
+    }
+
+    public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
+    {
+        var enabled = ToolContext.Current?.Options.EnabledSources;
+        if (apiName == Prefix + "list") return Text(await mcp.ListResourcesAsync((string?)input["server"], enabled, cancellationToken));
+        return new ToolCallResult(await mcp.ReadResourceAsync(Required(input, "server"), Required(input, "uri"), enabled, cancellationToken), false);
+    }
+}
+
+// Claude Code の PushNotification にあたる。長い作業が終わったときなどに、ほかの窓を見ているユーザーに知らせる
+public sealed class NotifyToolProvider(IPlatform platform) : IToolProvider
+{
+    public const string Source = "notify";
+
+    public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
+    {
+        if (ToolContext.Current is { Depth: > 0 } || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
+        return
+        [
+            new("notify__send", Source, "send", "デスクトップに通知",
+                "Show a desktop notification on the user's PC. Use it only when the user may have switched to another window and needs to know something now: a long task you were running has finished, or you are blocked waiting for their input. Don't use it for ordinary replies.",
+                Schema(("title", "string", "Short title", false), ("message", "string", "One or two sentences", true)), AutoApprove: true, ReadOnly: true),
+        ];
+    }
+
+    public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
+    {
+        var failed = platform.Notify((string?)input["title"] is { Length: > 0 } title ? title : "ClaudeChat", Required(input, "message"));
+        return Task.FromResult(failed is null ? Text("通知を出しました") : throw new ToolException(failed));
+    }
+}
+
+// claude.ai の message_compose にあたる。送るのはユーザー自身で、Claude は下書きをカードで見せるだけ
+public sealed class ComposeToolProvider : IToolProvider
+{
+    public const string Source = "compose";
+    static readonly string[] Kinds = ["email", "message", "post", "other"];
+
+    public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
+    {
+        if (enabledSources is not null && !enabledSources.Contains(Source)) return [];
+        return
+        [
+            new("compose__draft", Source, "draft", "下書きを作る",
+                "Show the user a draft of an email, chat message, or social post as a card they can copy or open in their mail app. Use it when the user asks you to write something they will send themselves. You cannot send it.",
+                Schema(("kind", "string", "email, message, post, or other", true), ("body", "string", "The text of the draft", true), ("to", "string", "Recipient, if known", false), ("subject", "string", "Subject, for an email", false)),
+                AutoApprove: true, ReadOnly: true),
+        ];
+    }
+
+    public Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
+    {
+        if (!Kinds.Contains(Required(input, "kind"))) throw new ToolException($"kind は {string.Join(", ", Kinds)} のどれかにしてください");
+        Required(input, "body");
+        return Task.FromResult(Text("下書きをカードでユーザーに見せました。送るのはユーザー自身です"));
     }
 }

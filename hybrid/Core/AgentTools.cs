@@ -209,10 +209,34 @@ public sealed class ChatSearchToolProvider(ConversationStore conversations, Sett
             new(Prefix + "search", Source, "search", "過去のチャットを探す",
                 "Search the user's past chats by keywords. Only chats in the same folder as this chat are searched (chats outside any folder see only other chats outside folders). Use it when the user refers to something discussed before. Returns matching chats with snippets.",
                 Schema(("query", "string", "Keywords. Several words must all appear", true)), AutoApprove: true, ReadOnly: true),
+            new(Prefix + "recent", Source, "recent", "最近のチャット",
+                "List the user's most recent past chats, newest first, with a short excerpt of how each began. Use it when the user refers to a recent conversation without keywords (\"what did we talk about yesterday?\"). before limits it to chats last updated before a date. Same visibility rule as search.",
+                Schema(("limit", "integer", "How many, 1-20 (default 10)", false), ("before", "string", "Only chats updated before this date, yyyy-mm-dd", false)), AutoApprove: true, ReadOnly: true),
             new(Prefix + "read", Source, "read", "過去のチャットを読む",
-                "Read the text of a past chat by id, from search results.",
+                "Read the text of a past chat by id, from search or recent results.",
                 Schema(("id", "string", "Chat id", true), ("offset", "integer", "Character offset to start from", false)), AutoApprove: true, ReadOnly: true),
         ];
+    }
+
+    // claude.ai の recent_chats にあたる
+    async Task<string> RecentAsync(Conversation? me, JsonObject input, CancellationToken cancellationToken)
+    {
+        var limit = Math.Clamp((int?)input["limit"] ?? 10, 1, MaxHits);
+        long? before = (string?)input["before"] is { Length: > 0 } date && DateTime.TryParse(date, out var parsed)
+            ? new DateTimeOffset(parsed.Date).ToUnixTimeMilliseconds()
+            : null;
+        var lines = new List<string>();
+        foreach (var summary in await conversations.ListAsync())
+        {
+            if (lines.Count >= limit) break;
+            if (summary.FolderId != me?.FolderId || (before is { } b && summary.UpdatedAt >= b)) continue;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (await conversations.GetAsync(summary.Id) is not { } c || !Visible(c, me)) continue;
+            var first = c.CopyMessages().Where(Conversation.IsHumanTurn).Select(m => WireText.Of(m["content"]).Trim()).FirstOrDefault(t => t.Length > 0) ?? "";
+            var excerpt = first.Replace('\n', ' ');
+            lines.Add($"{c.Id}  {c.Title}  ({DateTimeOffset.FromUnixTimeMilliseconds(c.UpdatedAt).LocalDateTime:yyyy-MM-dd HH:mm})\n  {(excerpt.Length > 160 ? excerpt[..160] + "..." : excerpt)}");
+        }
+        return lines.Count == 0 ? "見つかりませんでした" : string.Join("\n", lines);
     }
 
     static string TextOf(Conversation c) => string.Join("\n\n", c.CopyMessages()
@@ -237,6 +261,7 @@ public sealed class ChatSearchToolProvider(ConversationStore conversations, Sett
             var more = offset + chunk.Length < text.Length ? $"\n... 続きは offset={offset + chunk.Length}" : "";
             return Text($"# {c.Title} ({DateTimeOffset.FromUnixTimeMilliseconds(c.UpdatedAt).LocalDateTime:yyyy-MM-dd})\n{chunk}{more}");
         }
+        if (apiName == Prefix + "recent") return Text(await RecentAsync(me, input, cancellationToken));
         var words = Required(input, "query").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         var hits = new List<string>();
         foreach (var summary in await conversations.ListAsync())

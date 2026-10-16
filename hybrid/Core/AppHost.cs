@@ -17,6 +17,8 @@ public interface IPlatform
     string? RealClick(string titleMarker, double fx, double fy);
     // デスクトップとスタートメニューにショートカットを作る。できなかったら理由を返す
     string? CreateShortcuts();
+    // デスクトップの通知を出す。できなかったら理由を返す
+    string? Notify(string title, string message);
 }
 
 // 画面 (WebView2 やブラウザ) とのやり取りを一手に引き受ける。通信路には依存しない
@@ -92,6 +94,9 @@ public sealed class AppHost : IAsyncDisposable
             new AskToolProvider(),
             new ScheduleToolProvider(scheduler),
             new SkillToolProvider(extensions),
+            new McpResourceToolProvider(mcp),
+            new NotifyToolProvider(platform),
+            new ComposeToolProvider(),
             mcp,
         ]);
         orgCost = new OrgCostClient(paths, http);
@@ -209,6 +214,7 @@ public sealed class AppHost : IAsyncDisposable
         "usage.org" => OrgUsageAsync(Str(p, "range")),
         "pricing.reload" => ReloadPricingAsync(),
         "app.open" => OpenTargetAsync(Str(p, "target")),
+        "app.openMail" => OpenMailAsync((string?)p["to"] ?? "", (string?)p["subject"] ?? "", (string?)p["body"] ?? ""),
         "app.pickFolder" => Task.FromResult<JsonNode?>(platform.PickFolder()),
         "app.createShortcuts" => Task.FromResult<JsonNode?>(platform.CreateShortcuts() is { } failed ? throw new InvalidOperationException(failed) : null),
         "browser.extensionStatus" => BrowserStatusAsync(),
@@ -224,7 +230,7 @@ public sealed class AppHost : IAsyncDisposable
         FileToolProvider.Source, TerminalToolProvider.Source, ProgramToolProvider.Source, BrowserToolProvider.Source, BrowserToolProvider.HiddenSource,
         AgentToolProvider.Source, ChatSearchToolProvider.Source, TodoToolProvider.Source, ArtifactToolProvider.Source,
         MemoryToolProvider.Source, PlanToolProvider.Source, ScheduleToolProvider.Source, SkillToolProvider.Source,
-        AskToolProvider.Source,
+        AskToolProvider.Source, McpResourceToolProvider.Source, NotifyToolProvider.Source, ComposeToolProvider.Source,
     ];
 
     static readonly string[] PermissionModes = ["default", "acceptEdits", "auto", "plan", "bypass"];
@@ -1060,6 +1066,15 @@ public sealed class AppHost : IAsyncDisposable
     {
         ledger.ReloadPricing();
         return LocalUsageAsync();
+    }
+
+    // 下書きのカードから、いつものメールアプリの新規作成を開く
+    Task<JsonNode?> OpenMailAsync(string to, string subject, string body)
+    {
+        // 宛先に ? や & が入ると、件名や本文を差し替えられてしまう
+        var url = $"mailto:{Uri.EscapeDataString(to.Trim())}?subject={Uri.EscapeDataString(subject)}&body={Uri.EscapeDataString(body)}";
+        platform.OpenPath(url);
+        return Task.FromResult<JsonNode?>(null);
     }
 
     Task<JsonNode?> OpenAsync(string path)

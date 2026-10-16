@@ -25,7 +25,7 @@ import type {
 // C# 側の FileToolProvider.Source と同じ
 export const FILES_SOURCE = "files";
 // 組み込みツールの持ち主。サーバー側の Source と同じ名前
-export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser", "browse", "agents", "chats", "todo", "artifacts", "memory", "schedule", "skills", "ask"];
+export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser", "browse", "agents", "chats", "todo", "artifacts", "memory", "schedule", "skills", "ask", "notify", "compose"];
 
 let toastId = 0;
 
@@ -576,6 +576,8 @@ export async function exportArtifact(conversationId: string, id: string) {
   const result = await guard(() => call<{ path: string }>("artifacts.export", { conversationId, id }));
   if (result) toast(`保存しました: ${result.path}`);
 }
+
+export const openMail = (to: string, subject: string, body: string) => guard(() => call("app.openMail", { to, subject, body }));
 
 export const openFile = (conversationId: string, fileId: string, reveal = false) => guard(() => call("files.open", { conversationId, fileId, reveal }));
 export const stopWorkflow = (id: string) => guard(() => call("workflows.stop", { id }));
