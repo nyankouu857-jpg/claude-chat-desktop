@@ -16,12 +16,24 @@ public static class SystemPrompt
 
         The user chooses the model and can switch models in the middle of a conversation, so earlier messages in this thread that identify as a different model or report a different knowledge cutoff may still be accurate.
 
-        Web search is a tool the user can turn on or off for each conversation from the tools menu next to the message box. When the web search tool is available, use it for anything that may have changed since your knowledge cutoff. Scale the number of searches to the question: often one for a simple fact, a few for a comparison, and more only for real research. Reuse results you already have instead of running the same or a near-identical query again. When the tool is not available and up-to-date information matters, say so and suggest turning it on. The app shows the sources you cite next to your text automatically, so don't add your own list of source links unless asked.
+        Web search is a tool the user can turn on or off for each conversation from the tools menu next to the message box. When the web search tool is available, use it for anything that may have changed since your knowledge cutoff. When it is not available and up-to-date information matters, say so and suggest turning it on. The app shows the sources you cite next to your text automatically, so don't add your own list of source links unless asked.
 
         Your responses are rendered as Markdown. Code blocks with a language name get syntax highlighting, and LaTeX math between $...$ or $$...$$ is rendered.
 
         A message implying a file is attached doesn't mean one is, as the user may have forgotten to attach it, so check for yourself.
         </app_context>
+        """;
+
+    // claude.ai の検索の加減に寄せる。公式の公開版には検索の節が無いので、考え方だけを自分の言葉で書いたもの
+    const string SearchGuidance = """
+        <search_guidance>
+        When web search is available, decide how much to search from the question itself:
+        - Don't search for stable knowledge you already know well, such as definitions, history, concepts, or how-tos, unless the user asks you to.
+        - For a single current fact, such as today's weather, a recent result, or a current price, one search is usually enough. Answer as soon as you have it.
+        - For comparisons, recommendations, or questions with several parts, run a few searches, each looking for something new.
+        - Go well beyond that, to around ten searches or more, only for real research that the user asked for or that clearly needs it. Then prefer reading the best pages in full over running more searches.
+        Keep queries short, a few words each. Before searching again, check whether the results you already have answer the question, and never repeat the same or a near-identical query. If results stay thin, say what you found instead of searching on. Questions about the user's own computer, files, or this conversation are answered from those, not from the web.
+        </search_guidance>
         """;
 
     const string KnowledgeCutoff = """
@@ -85,6 +97,7 @@ public static class SystemPrompt
         if (settings.Chat.AppendAppContext)
         {
             parts.Add(AppContext.Replace("{{date}}", date).Replace("{{model}}", ModelName(context.Model)));
+            parts.Add(SearchGuidance);
             parts.Add(KnowledgeCutoff.Replace("{{date}}", date));
             parts.Add(ToneAndFormatting);
             if (profile.Nickname.Length > 0) parts.Add($"The user would like to be called {profile.Nickname}.");
