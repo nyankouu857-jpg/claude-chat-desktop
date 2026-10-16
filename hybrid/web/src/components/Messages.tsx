@@ -1,4 +1,4 @@
-import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FastForward, FileOutput, FilePen, GitFork, Undo2, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, Mail, MessageSquare, PanelsTopLeft, Pencil, Play, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
+import { Volume2, VolumeX, Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FastForward, FileOutput, FilePen, GitFork, Undo2, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, Mail, MessageSquare, PanelsTopLeft, Pencil, Play, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { answer, approve, askConfirm, changedFiles, saveCode, edit, forkConversation, navigate, openArtifact, openFile, openMail, retry, setQuote, stopWorkflow, switchBranch, textOf, undoFiles } from "../actions";
 import { MODELS } from "../models";
@@ -804,6 +804,55 @@ function CopyButton({ text, size = 15 }: { text: string; size?: number }) {
   );
 }
 
+// 読み上げに向かない Markdown の記号やコードを外す
+function speakableText(markdown: string) {
+  return markdown
+    .replace(/```[\s\S]*?```/g, "\nコードは省略します。\n")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^\s*[#>|-]+\s*/gm, "")
+    .replace(/[*_~|]/g, "")
+    .replace(/\uE000\d+\uE001/g, "");
+}
+
+// 読み上げ中の回答。別の回答を読み始めたら前のボタンを戻す
+let speakingOwner: ((on: boolean) => void) | null = null;
+
+function SpeakButton({ text }: { text: string }) {
+  const [speaking, setSpeaking] = useState(false);
+  useEffect(() => () => {
+    if (speakingOwner === setSpeaking) {
+      speechSynthesis.cancel();
+      speakingOwner = null;
+    }
+  }, []);
+  if (!("speechSynthesis" in window)) return null;
+  return (
+    <button type="button" className={`icon-button small${speaking ? " on" : ""}`} title={speaking ? "読み上げを止める" : "読み上げる"} onClick={() => {
+      speechSynthesis.cancel();
+      speakingOwner?.(false);
+      speakingOwner = null;
+      if (speaking) return;
+      // 長い文を 1 つで渡すと途中で止まる声があるので、文ごとに分けて順に読む
+      const sentences = speakableText(text).split(/(?<=[。！？!?\n])/).map((s) => s.trim()).filter(Boolean);
+      if (sentences.length === 0) return;
+      const voice = speechSynthesis.getVoices().find((v) => v.lang.startsWith("ja"));
+      sentences.forEach((sentence, i) => {
+        const utterance = new SpeechSynthesisUtterance(sentence);
+        if (voice) utterance.voice = voice;
+        utterance.lang = voice?.lang ?? "ja-JP";
+        if (i === sentences.length - 1) utterance.onend = () => {
+          if (speakingOwner === setSpeaking) speakingOwner = null;
+          setSpeaking(false);
+        };
+        speechSynthesis.speak(utterance);
+      });
+      speakingOwner = setSpeaking;
+      setSpeaking(true);
+    }}>{speaking ? <VolumeX size={15} /> : <Volume2 size={15} />}</button>
+  );
+}
+
 function RetryMenu({ conversationId, human }: { conversationId: string; human: number }) {
   const current = useStore((s) => s.choice.model);
   return (
@@ -944,6 +993,7 @@ function AssistantTurn({ turn, conversationId, isLast, forkAt, changed }: {
           <div className={`message-actions${isLast || forkView ? " visible" : ""}`}>
             {forkView && <BranchNav conversationId={conversationId} index={turn.start} fork={forkView} />}
             <CopyButton text={fullText} />
+            <SpeakButton text={body} />
             {turn.human >= 0 && <RetryMenu conversationId={conversationId} human={turn.human} />}
             {forkAt !== undefined && (
               <button type="button" className="icon-button small" title="ここまでを新しいチャットに分ける" onClick={() => void forkConversation(conversationId, forkAt)}>

@@ -210,6 +210,21 @@ function ConfirmDialog({ dialog }: { dialog: Extract<DialogState, { kind: "confi
   );
 }
 
+function WhatsNewDialog({ dialog }: { dialog: Extract<DialogState, { kind: "whatsNew" }> }) {
+  return (
+    <Dialog title="新しくなったこと" onClose={closeDialog} footer={<button type="button" className="button primary" autoFocus onClick={closeDialog}>閉じる</button>}>
+      <div className="whats-new">
+        {dialog.changes.map((change, i) => (
+          <div key={i} className="whats-new-item">
+            <div className="whats-new-title">{change.title}</div>
+            {change.details.length > 0 && <ul>{change.details.map((d, j) => <li key={j}>{d}</li>)}</ul>}
+          </div>
+        ))}
+      </div>
+    </Dialog>
+  );
+}
+
 function BlanksDialog({ dialog }: { dialog: Extract<DialogState, { kind: "blanks" }> }) {
   const [values, setValues] = useState<Record<string, string>>({});
   const ready = dialog.blanks.every((b) => values[b]?.trim());
@@ -349,6 +364,7 @@ export function GlobalDialog() {
     case "folder": return <FolderDialog key={dialog.folderId ?? "new"} dialog={dialog} />;
     case "confirm": return <ConfirmDialog dialog={dialog} />;
     case "blanks": return <BlanksDialog dialog={dialog} />;
+    case "whatsNew": return <WhatsNewDialog dialog={dialog} />;
     case "shortcuts": return <ShortcutsDialog />;
     case "style": return <StyleDialog key={dialog.styleId ?? "new"} dialog={dialog} />;
   }

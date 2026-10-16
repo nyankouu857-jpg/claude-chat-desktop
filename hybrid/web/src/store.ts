@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type {
+  WhatsNewItem,
   ChatStatus,
   Conversation,
   ConversationSummary,
@@ -51,7 +52,8 @@ export type DialogState =
   | { kind: "shortcuts" }
   | { kind: "style"; styleId?: string }
   | { kind: "confirm"; title: string; message: string; confirmLabel: string }
-  | { kind: "blanks"; command: string; blanks: string[] };
+  | { kind: "blanks"; command: string; blanks: string[] }
+  | { kind: "whatsNew"; changes: WhatsNewItem[] };
 
 export interface AppState {
   ready: boolean;

@@ -1,6 +1,7 @@
 import { RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { exportUsageCsv, localUsage, navigate, openPath, orgUsage, reloadPricing, setSecret, toast, updateSettings } from "../../actions";
+import { type BudgetView, exportUsageCsv, localUsage, navigate, openPath, orgUsage, reloadPricing, setSecret, toast, updateSettings } from "../../actions";
+import { call } from "../../bridge";
 import { modelLabel } from "../../models";
 import { useStore } from "../../store";
 import { NumberField, tokens, usd } from "../ui";
@@ -275,9 +276,33 @@ function OrgUsage() {
 
 function Budget() {
   const budget = useStore((s) => s.settings?.budget);
+  const [view, setView] = useState<BudgetView>();
+  useEffect(() => {
+    void (async () => {
+      try {
+        setView(await call<BudgetView>("usage.budget"));
+      } catch {
+        // 見込みが出せなくても上限の設定はできる
+      }
+    })();
+  }, [budget?.monthlyLimitUsd]);
   if (!budget) return null;
+  const over = !!view && view.forecastReliable && budget.monthlyLimitUsd > 0 && view.forecastUsd > budget.monthlyLimitUsd;
   return (
     <Section title="料金の歯止め" description="金額は米ドルで、このアプリで記録した料金から数えます。0 にするとその歯止めは使いません。">
+      {view && (
+        <div className={`forecast-card${over ? " over" : ""}`}>
+          <div className="forecast-main">
+            <span>今月の見込み</span>
+            <strong>${view.forecastUsd.toFixed(2)}</strong>
+          </div>
+          <div className="field-hint">
+            今月ここまで ${view.monthUsd.toFixed(2)}。このペースで月末まで使った場合の金額です。
+            {over && ` 1 か月の上限 $${budget.monthlyLimitUsd} を超えそうです。`}
+            {!view.forecastReliable && " 月の初めは使った日が少ないので、目安としてご覧ください。"}
+          </div>
+        </div>
+      )}
       <div className="switch-row">
         <div>
           <div>この金額を超えそうな送信は確認する</div>

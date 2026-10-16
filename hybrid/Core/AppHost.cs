@@ -282,6 +282,7 @@ public sealed class AppHost : IAsyncDisposable
         "pricing.reload" => ReloadPricingAsync(),
         "app.open" => OpenTargetAsync(Str(p, "target")),
         "app.checkUpdate" => CheckUpdateAsync(),
+        "app.whatsNew" => WhatsNewAsync(),
         "chat.interject" => InterjectAsync(Str(p, "conversationId"), Str(p, "text")),
         "chat.hurry" => HurryAsync(Str(p, "conversationId")),
         "chat.resume" => ResumeAsync(Str(p, "conversationId")),
@@ -369,6 +370,32 @@ public sealed class AppHost : IAsyncDisposable
         var title = conversation.Incognito ? "シークレットチャット" : conversation.Title;
         if (conversation.Incognito) message = waiting ? "確認や質問で止まっています" : "返答が届きました";
         platform.Notify(message, title, () => Emit("app.navigate", new JsonObject { ["conversationId"] = conversation.Id }));
+    }
+
+    // アプリ内の更新でも、zip から入れ替えても、前に起動した版と違えば変わった所を見せる
+    async Task<JsonNode?> WhatsNewAsync()
+    {
+        if (platform.Commit is not { } current) return null;
+        var seenFile = Path.Combine(paths.DataDir, "seen-commit.txt");
+        var seen = File.Exists(seenFile) ? (await File.ReadAllTextAsync(seenFile)).Trim() : "";
+        if (seen == current) return null;
+        JsonArray? changes = null;
+        if (seen.Length > 0)
+        {
+            try
+            {
+                using var timeout = new CancellationTokenSource(UpdateCheckTimeout);
+                changes = await updater.ChangesSinceAsync(seen, current, timeout.Token);
+            }
+            catch (Exception e) when (e is HttpRequestException or InvalidOperationException or OperationCanceledException)
+            {
+                // 取れなかったら覚え直さず、次の起動でもう一度見る
+                return null;
+            }
+        }
+        await File.WriteAllTextAsync(seenFile, current);
+        // 初めての起動は、変わった所ではなくすべてが新しい
+        return changes is { Count: > 0 } ? changes : null;
     }
 
     async Task<JsonNode?> CheckUpdateAsync()
@@ -788,10 +815,18 @@ public sealed class AppHost : IAsyncDisposable
     {
         var budget = (await settings.GetAsync()).Budget;
         var (today, month) = await ledger.SpentAsync();
+        // ここまでの 1 日あたりの平均で月末まで使った場合。月の初めは 1 日分として割り、見込みが跳ね上がりすぎないようにする
+        var now = DateTime.Now;
+        var monthStart = new DateTime(now.Year, now.Month, 1);
+        var elapsedDays = Math.Max(1, (now - monthStart).TotalDays);
+        var forecast = month / (decimal)elapsedDays * DateTime.DaysInMonth(now.Year, now.Month);
         return new JsonObject
         {
             ["todayUsd"] = today,
             ["monthUsd"] = month,
+            ["forecastUsd"] = Math.Round(forecast, 2),
+            // 数日分の使い方を見るまでは、見込みで警告しない
+            ["forecastReliable"] = elapsedDays >= 3,
             ["dailyLimitUsd"] = budget.DailyLimitUsd,
             ["monthlyLimitUsd"] = budget.MonthlyLimitUsd,
         };

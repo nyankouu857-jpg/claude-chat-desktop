@@ -66,6 +66,21 @@ public sealed class Updater(IPlatform platform, HttpClient http)
         return new UpdateInfo(available, current, latest, (string?)release["published_at"], changes);
     }
 
+    // 前に使っていた版から今の版までの変更。コミットの 1 行目を見出しに、本文の「- 」の行を中身にする
+    public async Task<JsonArray> ChangesSinceAsync(string previous, string current, CancellationToken cancellationToken)
+    {
+        var compare = await GetJsonAsync($"https://api.github.com/repos/{Repo}/compare/{previous}...{current}", cancellationToken);
+        var changes = new JsonArray();
+        foreach (var commit in (compare["commits"] as JsonArray ?? []).Reverse().Take(MaxChanges))
+        {
+            var lines = ((string?)commit?["commit"]?["message"] ?? "").ReplaceLineEndings("\n").Split('\n');
+            if (lines[0].Trim().Length == 0) continue;
+            var details = lines.Skip(1).Select(l => l.Trim()).Where(l => l.StartsWith("- ")).Select(l => (JsonNode)l[2..]).ToArray();
+            changes.Add(new JsonObject { ["title"] = lines[0].Trim(), ["details"] = new JsonArray(details) });
+        }
+        return changes;
+    }
+
     // 新しい exe を今の exe の隣に取り出してから入れ替える。途中で失敗しても今の exe は壊さない
     // canSwap は入れ替える直前に呼ぶ。ダウンロードの間に始まった応答を止めないよう、理由を返したら入れ替えない
     public async Task<string?> InstallAsync(Func<string?> canSwap, CancellationToken cancellationToken)

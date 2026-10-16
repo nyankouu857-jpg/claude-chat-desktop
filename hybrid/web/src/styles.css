@@ -1261,6 +1261,8 @@ kbd { font-family: var(--font-mono); font-size: 12px; padding: 1px 6px; border: 
 .budget-gauge { margin: 4px 10px 6px; font-size: 12px; color: var(--text-300); display: grid; gap: 4px; }
 .budget-gauge .row { display: flex; align-items: center; gap: 6px; }
 .budget-gauge .label { flex: 1; }
+.budget-gauge .row.forecast { color: var(--text-400); }
+.budget-gauge .row.forecast.over { color: var(--danger); }
 .budget-gauge .bar { height: 4px; border-radius: 2px; background: var(--bg-300); overflow: hidden; }
 .budget-gauge .bar > span { display: block; height: 100%; background: var(--accent); }
 .budget-gauge .bar.near > span { background: var(--danger); }
@@ -1286,3 +1288,13 @@ kbd { font-family: var(--font-mono); font-size: 12px; padding: 1px 6px; border: 
 :root { --chat-width: 768px; }
 :root[data-chat-width="wide"] { --chat-width: 1040px; }
 :root[data-chat-width="full"] { --chat-width: 100%; }
+
+/* 更新後の「新しくなったこと」 */
+.whats-new { display: grid; gap: 14px; max-height: 60vh; overflow-y: auto; }
+.whats-new-title { font-weight: 600; color: var(--text-100); }
+.whats-new ul { margin: 6px 0 0; padding-left: 20px; color: var(--text-200); font-size: 13.5px; line-height: 1.6; }
+.forecast-card { padding: 12px 14px; border: 0.5px solid var(--border); border-radius: 12px; background: var(--bg-000); margin-bottom: 12px; display: grid; gap: 4px; }
+.forecast-main { display: flex; align-items: baseline; justify-content: space-between; color: var(--text-200); }
+.forecast-main strong { font-size: 20px; color: var(--text-100); font-weight: 600; }
+.forecast-card.over { border-color: var(--danger); }
+.forecast-card.over strong { color: var(--danger); }

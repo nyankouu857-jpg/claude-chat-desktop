@@ -2,6 +2,7 @@ import { call, on } from "./bridge";
 import { FAST_MODELS, defaultEffortOf } from "./models";
 import { getState, setState, type AppState } from "./store";
 import type {
+  WhatsNewItem,
   McpServerStatus,
   SessionFile,
   Effort,
@@ -145,6 +146,11 @@ export async function init() {
         fast: saved.fast === true,
       });
     }
+  }
+  // 別の窓や入力の小窓で先に見てしまうと、メインの窓で出せなくなる
+  if (!SINGLE_CHAT && !QUICK_ENTRY) {
+    const changes = await guard(() => call<WhatsNewItem[] | null>("app.whatsNew"));
+    if (changes?.length) setState((s) => ({ ...s, dialog: s.dialog ?? { kind: "whatsNew", changes } }));
   }
 }
 
@@ -400,6 +406,7 @@ function chatOptions() {
 
 // 別の窓で 1 つの会話だけを出しているとき、その会話の ID
 export const SINGLE_CHAT = new URLSearchParams(location.search).get("chat");
+export const QUICK_ENTRY = new URLSearchParams(location.search).has("quick");
 
 type SendPayload = { conversationId: string | null; content: WireMessage["content"] } & Record<string, unknown>;
 
@@ -550,6 +557,8 @@ export async function captureScreen(): Promise<File | null> {
 }
 
 export interface BudgetView {
+  forecastUsd: number;
+  forecastReliable: boolean;
   todayUsd: number;
   monthUsd: number;
   dailyLimitUsd: number;

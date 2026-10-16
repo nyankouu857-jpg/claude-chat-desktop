@@ -1,5 +1,10 @@
 export type Role = "user" | "assistant";
 
+export interface WhatsNewItem {
+  title: string;
+  details: string[];
+}
+
 export interface WireBlock {
   type: string;
   [key: string]: any;
