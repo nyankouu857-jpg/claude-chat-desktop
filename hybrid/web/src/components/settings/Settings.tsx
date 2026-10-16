@@ -1,6 +1,6 @@
-import { ExternalLink, FolderOpen, Link2, RefreshCw, TriangleAlert } from "lucide-react";
+import { ArrowLeft, ExternalLink, FolderOpen, Link2, Maximize2, Minimize2, RefreshCw, TriangleAlert, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { createShortcuts, navigate, openPath, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
+import { closeSettings, createShortcuts, openPath, openSettings, setSettingsFull, previewSystemPrompt, reloadSettings, revokePermission, setSecret, testApiKey, toast, updateSettings } from "../../actions";
 import { findBuiltin } from "../../builtins";
 import { LANGUAGES } from "../../languages";
 import { ALL_MODELS, EFFORTS } from "../../models";
@@ -346,35 +346,70 @@ function Data() {
   );
 }
 
-export function SettingsPage({ tab }: { tab: SettingsTab }) {
-  const settings = useStore((s) => s.settings);
-  if (!settings) return null;
+function SettingsBody({ tab, settings }: { tab: SettingsTab; settings: Settings }) {
   return (
-    <div className="page">
-      <div className="page-inner settings-page">
-        <h1 className="page-title">設定</h1>
-        <div className="settings-layout">
-          <nav className="settings-nav">
-            {TABS.map((t) => (
-              <button key={t.id} type="button" className={t.id === tab ? "active" : ""} onClick={() => navigate({ name: "settings", tab: t.id })}>{t.label}</button>
-            ))}
-          </nav>
-          <div className="settings-content">
-            {tab === "general" && <General settings={settings} />}
-            {tab === "appearance" && <Appearance settings={settings} />}
-            {tab === "api" && <Api settings={settings} />}
-            {tab === "features" && <Features settings={settings} />}
-            {tab === "files" && <Files settings={settings} />}
-            {tab === "computer" && <Computer settings={settings} />}
-            {tab === "agents" && <Agents settings={settings} />}
-            {tab === "extensions" && <Extensions settings={settings} />}
-            {tab === "schedules" && <Schedules />}
-            {tab === "connectors" && <Connectors settings={settings} />}
-            {tab === "permissions" && <Permissions settings={settings} />}
-            {tab === "usage" && <Usage />}
-            {tab === "data" && <Data />}
-          </div>
+    <div className="settings-layout">
+      <nav className="settings-nav">
+        <div className="settings-nav-heading">設定</div>
+        {TABS.map((t) => (
+          <button key={t.id} type="button" className={t.id === tab ? "active" : ""} onClick={() => openSettings(t.id)}>{t.label}</button>
+        ))}
+      </nav>
+      <div className="settings-content">
+        {tab === "general" && <General settings={settings} />}
+        {tab === "appearance" && <Appearance settings={settings} />}
+        {tab === "api" && <Api settings={settings} />}
+        {tab === "features" && <Features settings={settings} />}
+        {tab === "files" && <Files settings={settings} />}
+        {tab === "computer" && <Computer settings={settings} />}
+        {tab === "agents" && <Agents settings={settings} />}
+        {tab === "extensions" && <Extensions settings={settings} />}
+        {tab === "schedules" && <Schedules />}
+        {tab === "connectors" && <Connectors settings={settings} />}
+        {tab === "permissions" && <Permissions settings={settings} />}
+        {tab === "usage" && <Usage />}
+        {tab === "data" && <Data />}
+      </div>
+    </div>
+  );
+}
+
+// Claude Code と同じく、今の画面の上にモーダルで開く。広げると窓いっぱいになり、戻るで元の画面に戻る
+export function SettingsOverlay() {
+  const overlay = useStore((s) => s.settingsOverlay);
+  const settings = useStore((s) => s.settings);
+  const open = !!overlay;
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      // 確認のダイアログやメニューが開いていれば、そちらを先に閉じる
+      if (e.key !== "Escape" || document.querySelector(".dialog-backdrop, .menu")) return;
+      closeSettings();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
+  if (!overlay || !settings) return null;
+  if (overlay.full) {
+    return (
+      <div className="settings-full" role="dialog" aria-label="設定">
+        <header className="settings-full-header">
+          <button type="button" className="button ghost" onClick={closeSettings}><ArrowLeft size={15} /> 戻る</button>
+          <span className="spacer" />
+          <button type="button" className="icon-button" title="小さくする" onClick={() => setSettingsFull(false)}><Minimize2 size={16} /></button>
+        </header>
+        <div className="settings-full-body"><SettingsBody tab={overlay.tab} settings={settings} /></div>
+      </div>
+    );
+  }
+  return (
+    <div className="settings-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) closeSettings(); }}>
+      <div className="settings-modal" role="dialog" aria-label="設定">
+        <div className="settings-modal-tools">
+          <button type="button" className="icon-button" title="全画面にする" onClick={() => setSettingsFull(true)}><Maximize2 size={16} /></button>
+          <button type="button" className="icon-button" title="閉じる (Esc)" onClick={closeSettings}><X size={18} /></button>
         </div>
+        <SettingsBody tab={overlay.tab} settings={settings} />
       </div>
     </div>
   );

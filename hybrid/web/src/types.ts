@@ -16,6 +16,8 @@ export interface ConversationUsage {
   cacheRead: number;
   cacheWrite: number;
   costUsd: number;
+  // 最後の問い合わせで送った会話の大きさ (トークン)
+  context?: number;
 }
 
 export type ChatKind = "chat" | "agent" | "workflow";

@@ -9,7 +9,8 @@ import { GlobalDialog } from "./Dialogs";
 import { NewChat } from "./NewChat";
 import { ProjectPage, ProjectsPage } from "./Projects";
 import { Recents } from "./Recents";
-import { SettingsPage } from "./settings/Settings";
+import { InfoPanel } from "./InfoPanel";
+import { SettingsOverlay } from "./settings/Settings";
 import { Sidebar } from "./Sidebar";
 
 function useTheme() {
@@ -61,6 +62,8 @@ export function App() {
   const toasts = useStore((s) => s.toasts);
   // 開いているチャットのアーティファクトだけ横に出す
   const showArtifact = useStore((s) => !!s.artifact && s.view.name === "chat" && s.view.id === s.artifact.conversationId);
+  // 横の欄は 1 つだけ。アーティファクトを開いている間は情報の欄を隠す
+  const showInfo = useStore((s) => s.infoPanelOpen && s.view.name === "chat") && !showArtifact;
   useTheme();
   useShortcuts();
 
@@ -78,9 +81,10 @@ export function App() {
         {view.name === "projects" && <ProjectsPage />}
         {view.name === "artifacts" && <ArtifactsPage />}
         {view.name === "project" && <ProjectPage key={view.id} id={view.id} />}
-        {view.name === "settings" && <SettingsPage tab={view.tab} />}
       </main>
       {showArtifact && <ArtifactPanel />}
+      {showInfo && view.name === "chat" && <InfoPanel conversationId={view.id} />}
+      <SettingsOverlay />
       <GlobalDialog />
       <div className="toasts">
         {toasts.map((t) => <div key={t.id} className={`toast ${t.kind}`}>{t.text}</div>)}

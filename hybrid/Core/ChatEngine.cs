@@ -647,6 +647,8 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
             conversation.Usage.CacheRead += record.CacheRead;
             conversation.Usage.CacheWrite += record.CacheWrite;
             conversation.Usage.CostUsd += record.CostUsd ?? 0;
+            // 右の「コンテキスト」用に、最後に送った会話の大きさを覚えておく
+            if (kind == "chat") conversation.Usage.Context = record.Input + record.CacheRead + record.CacheWrite;
         }
     }
 

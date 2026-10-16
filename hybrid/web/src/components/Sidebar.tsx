@@ -145,6 +145,7 @@ export function Sidebar() {
   const open = useStore((s) => s.sidebarOpen);
   const summaries = useStore((s) => s.summaries);
   const view = useStore((s) => s.view);
+  const settingsTab = useStore((s) => s.settingsOverlay?.tab);
   const folders = useStore((s) => s.folders);
   const profile = useStore((s) => s.settings?.profile);
   const secrets = useStore((s) => s.secrets);
@@ -223,10 +224,10 @@ export function Sidebar() {
         <button type="button" className={`nav-link${view.name === "artifacts" ? " active" : ""}`} onClick={() => navigate({ name: "artifacts" })}>
           <Shapes size={17} /> アーティファクト
         </button>
-        <button type="button" className={`nav-link${view.name === "settings" && view.tab === "connectors" ? " active" : ""}`} onClick={() => openSettings("connectors")}>
+        <button type="button" className={`nav-link${settingsTab === "connectors" ? " active" : ""}`} onClick={() => openSettings("connectors")}>
           <Plug size={17} /> コネクタ
         </button>
-        <button type="button" className={`nav-link${view.name === "settings" && view.tab === "usage" ? " active" : ""}`} onClick={() => openSettings("usage")}>
+        <button type="button" className={`nav-link${settingsTab === "usage" ? " active" : ""}`} onClick={() => openSettings("usage")}>
           <ChartColumn size={17} /> 使用量
         </button>
       </div>

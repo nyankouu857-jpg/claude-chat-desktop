@@ -11,6 +11,7 @@ import type {
   PermissionMode,
   SecretsView,
   Settings,
+  SettingsTab,
   View,
   WorkflowRun,
 } from "./types";
@@ -66,11 +67,24 @@ export interface AppState {
   // 回答の一部を選んで「返信」したときの引用
   quotes: Record<string, string>;
   artifact: { conversationId: string; id: string } | null;
+  artifactFull: boolean;
+  // 設定はモーダルで開き、広げると窓いっぱいになる
+  settingsOverlay: { tab: SettingsTab; full: boolean } | null;
+  // Claude Code の右側の「環境・コンテキスト・コネクタ・成果物」
+  infoPanelOpen: boolean;
   dialog: DialogState | null;
   view: View;
   sidebarOpen: boolean;
   choice: ComposerChoice;
   toasts: Toast[];
+}
+
+function readInfoPanel() {
+  try {
+    return localStorage.getItem("infoPanelOpen") !== "false";
+  } catch {
+    return true;
+  }
 }
 
 let state: AppState = {
@@ -91,6 +105,9 @@ let state: AppState = {
   prefill: {},
   quotes: {},
   artifact: null,
+  artifactFull: false,
+  settingsOverlay: null,
+  infoPanelOpen: readInfoPanel(),
   dialog: null,
   view: { name: "new" },
   sidebarOpen: true,

@@ -1,6 +1,6 @@
-import { ChevronLeft, ChevronRight, Copy, Download, Wrench, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, Download, Maximize2, Minimize2, Wrench, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { closeArtifact, exportArtifact, send, toast } from "../actions";
+import { closeArtifact, exportArtifact, send, setArtifactFull, toast } from "../actions";
 import { useStore } from "../store";
 import { Markdown } from "./Messages";
 
@@ -20,6 +20,7 @@ export function ArtifactPanel() {
   const target = useStore((s) => s.artifact);
   const artifact = useStore((s) => (target ? s.conversations[target.conversationId]?.artifacts?.find((a) => a.id === target.id) : undefined));
   const running = useStore((s) => (target ? !!s.live[target.conversationId] : false));
+  const full = useStore((s) => s.artifactFull);
   const [version, setVersion] = useState(artifact?.version ?? 1);
   const [tab, setTab] = useState<"preview" | "code">("preview");
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +31,13 @@ export function ArtifactPanel() {
     if (artifact) setVersion(artifact.version);
   }, [artifact?.id, artifact?.version]);
   useEffect(() => setError(null), [artifact?.id, version]);
+  useEffect(() => {
+    if (!full) return;
+    // 全画面は Esc で元の大きさに戻す。中の iframe にいるときは、そのページが Esc を受け取る
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setArtifactFull(false);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [full]);
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
@@ -49,7 +57,7 @@ export function ArtifactPanel() {
   const showCode = !framed || tab === "code";
 
   return (
-    <aside className="artifact-panel">
+    <aside className={`artifact-panel${full ? " full" : ""}`}>
       <header className="artifact-header">
         <span className="artifact-title">{title}</span>
         {artifact.version > 1 && (
@@ -68,6 +76,7 @@ export function ArtifactPanel() {
         )}
         <button type="button" className="icon-button small" title="コピー" onClick={async () => { await navigator.clipboard.writeText(content); toast("コピーしました"); }}><Copy size={15} /></button>
         <button type="button" className="icon-button small" title="ファイルに保存" onClick={() => void exportArtifact(target.conversationId, artifact.id)}><Download size={15} /></button>
+        <button type="button" className="icon-button small" title={full ? "元の大きさに戻す (Esc)" : "全画面にする"} onClick={() => setArtifactFull(!full)}>{full ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
         <button type="button" className="icon-button small" title="閉じる" onClick={closeArtifact}><X size={16} /></button>
       </header>
       {error && tab === "preview" && (

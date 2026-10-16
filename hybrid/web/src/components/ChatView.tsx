@@ -1,6 +1,6 @@
-import { ArrowDown, ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, Ghost, GitBranch, ListTree, LoaderCircle, Pencil, Square, Star, Trash, Workflow, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, Ghost, GitBranch, ListTree, LoaderCircle, PanelRight, Pencil, Square, Star, Trash, Workflow, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { askConfirm, compact, deleteConversation, exportConversation, navigate, starConversation, stop, stopWorkflow } from "../actions";
+import { askConfirm, compact, deleteConversation, exportConversation, navigate, starConversation, stop, stopWorkflow, toggleInfoPanel } from "../actions";
 import { setState, useStore } from "../store";
 import { Composer } from "./Composer";
 import { MessageList } from "./Messages";
@@ -30,6 +30,7 @@ function RunningWorkflows({ conversationId }: { conversationId: string }) {
 }
 
 export function ChatView({ id }: { id: string }) {
+  const infoOpen = useStore((s) => s.infoPanelOpen);
   const conversation = useStore((s) => s.conversations[id]);
   const live = useStore((s) => s.live[id]);
   const [renaming, setRenaming] = useState(false);
@@ -112,6 +113,7 @@ export function ChatView({ id }: { id: string }) {
             navigate({ name: "new", incognito: true });
           }}><X size={16} /></button>
         )}
+        <button type="button" className={`icon-button${infoOpen ? " on" : ""}`} title={infoOpen ? "右の欄を閉じる" : "右の欄を開く"} onClick={toggleInfoPanel}><PanelRight size={17} /></button>
       </header>
       <div
         className="chat-scroll"

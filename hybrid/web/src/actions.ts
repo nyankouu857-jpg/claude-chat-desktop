@@ -294,11 +294,31 @@ function applyChatEvent(id: string, event: ChatEvent) {
 }
 
 export function navigate(view: View) {
-  setState((s) => ({ ...s, view }));
+  // 設定は画面を切り替えず、今の画面の上に開く
+  if (view.name === "settings") return openSettings(view.tab);
+  setState((s) => ({ ...s, view, settingsOverlay: null }));
   if (view.name === "chat") void guard(() => ensureConversation(view.id));
 }
 
-export const openSettings = (tab: SettingsTab = "general") => navigate({ name: "settings", tab });
+export function openSettings(tab: SettingsTab = "general") {
+  setState((s) => ({ ...s, settingsOverlay: { tab, full: s.settingsOverlay?.full ?? false } }));
+}
+
+export const closeSettings = () => setState((s) => ({ ...s, settingsOverlay: null }));
+export const setSettingsFull = (full: boolean) => setState((s) => (s.settingsOverlay ? { ...s, settingsOverlay: { ...s.settingsOverlay, full } } : s));
+
+export function toggleInfoPanel() {
+  setState((s) => {
+    try {
+      localStorage.setItem("infoPanelOpen", String(!s.infoPanelOpen));
+    } catch {
+      // 保存できなくても、開いている間は効く
+    }
+    return { ...s, infoPanelOpen: !s.infoPanelOpen };
+  });
+}
+
+export const setArtifactFull = (artifactFull: boolean) => setState((s) => ({ ...s, artifactFull }));
 
 export function toggleSidebar() {
   setState((s) => ({ ...s, sidebarOpen: !s.sidebarOpen }));
@@ -550,7 +570,7 @@ export const extractDocumentText = (name: string, data: string) => call<string>(
 export const listArtifacts = () => guard(() => call<ArtifactListItem[]>("artifacts.list"));
 
 export const openArtifact = (conversationId: string, id: string) => setState((s) => ({ ...s, artifact: { conversationId, id } }));
-export const closeArtifact = () => setState((s) => ({ ...s, artifact: null }));
+export const closeArtifact = () => setState((s) => ({ ...s, artifact: null, artifactFull: false }));
 
 export async function exportArtifact(conversationId: string, id: string) {
   const result = await guard(() => call<{ path: string }>("artifacts.export", { conversationId, id }));

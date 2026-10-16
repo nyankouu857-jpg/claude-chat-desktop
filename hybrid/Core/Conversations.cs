@@ -10,6 +10,7 @@ public sealed class ConversationUsage
     public long CacheRead { get; set; }
     public long CacheWrite { get; set; }
     public decimal CostUsd { get; set; }
+    public long Context { get; set; }
 }
 
 public sealed class Artifact
