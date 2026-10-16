@@ -291,7 +291,7 @@ ClaudeChat/
 | `chat.model` | 既定のモデル ID。下の「モデルと料金の目安」を参照 |
 | `chat.effort` | `low` / `medium` / `high` / `xhigh` / `max` |
 | `chat.maxToolTurns` | 1 回の返答で続けてツールを呼べる上限 |
-| `chat.compactThreshold` | 会話の古い部分を要約し始める入力トークン数。50000 以上 |
+| `chat.compactThreshold` | 会話の古い部分を要約し始める入力トークン数。50000 以上で、画面からは 100 万まで選べます |
 | `chat.systemPrompt` | アプリの基本の指示に続けて渡す自分の指示。`{{currentDateTime}}` は今日の日付に置き換わります |
 | `chat.appendAppContext` | アプリの基本の指示を付けるかどうか |
 | `files.enabled` | フォルダ操作を使うかどうか |

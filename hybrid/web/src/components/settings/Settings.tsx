@@ -151,6 +151,8 @@ const COMPACT_THRESHOLDS = [
   { value: 150_000, label: "15 万トークン (既定)" },
   { value: 300_000, label: "30 万トークン" },
   { value: 500_000, label: "50 万トークン" },
+  { value: 700_000, label: "70 万トークン" },
+  { value: 1_000_000, label: "100 万トークン" },
 ];
 
 function Api({ settings }: { settings: Settings }) {
@@ -227,7 +229,7 @@ function Api({ settings }: { settings: Settings }) {
         <div className="switch-row">
           <div>
             <div>会話を要約し始める長さ</div>
-            <div className="field-hint">会話がこの長さを超えると、古い部分を Claude が要約して続けます。短いほど 1 回あたりの料金が下がります</div>
+            <div className="field-hint">会話がこの長さを超えると、古い部分を Claude が要約して続けます。短いほど 1 回あたりの料金が下がります。100 万トークン近くにすると、要約される前に会話がモデルの上限に届いて送れなくなることがあります</div>
           </div>
           <select className="input compact-select" value={chat.compactThreshold} onChange={(e) => void updateSettings({ chat: { compactThreshold: Number(e.target.value) } })}>
             {COMPACT_THRESHOLDS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
