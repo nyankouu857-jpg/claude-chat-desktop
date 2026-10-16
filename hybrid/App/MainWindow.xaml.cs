@@ -19,6 +19,7 @@ public partial class MainWindow : Window
     readonly AppPaths paths;
     readonly Dictionary<string, string> resources;
     AppHost? host;
+    bool closed;
 
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
@@ -43,9 +44,21 @@ public partial class MainWindow : Window
             e.Cancel = true;
             var closing = host;
             host = null;
-            await closing.DisposeAsync();
-            Close();
+            // 片付けの間に窓が見えていると、もう一度閉じられて、閉じ終わった窓をまた閉じることになる。
+            // Closing の中では隠せないので、抜けた後に隠す
+            _ = Dispatcher.InvokeAsync(Hide);
+            try
+            {
+                // 片付けが止まっても、隠れたままのアプリを残さない
+                await closing.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch (Exception)
+            {
+                // 片付けに失敗しても、閉じるのは止めない
+            }
+            if (!closed) Close();
         };
+        Closed += (_, _) => closed = true;
     }
 
     static bool PrefersDarkTheme()
