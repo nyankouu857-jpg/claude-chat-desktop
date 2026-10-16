@@ -716,12 +716,13 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
     // ブラウザはユーザーがそのまま使えるように閉じない。内蔵ブラウザは見えないまま残るので閉じる
     public async ValueTask DisposeAsync()
     {
-        await ResetSessionAsync();
+        // 応答の遅い接続の後始末より先に止める。終了は片付けを長く待たない
         if (hidden && browserProcess is { HasExited: false })
         {
             try { browserProcess.Kill(entireProcessTree: true); }
             catch (InvalidOperationException) { }
         }
+        await ResetSessionAsync();
         browserProcess?.Dispose();
         http.Dispose();
     }

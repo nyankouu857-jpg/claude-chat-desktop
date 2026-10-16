@@ -96,6 +96,8 @@ public sealed class AppHost : IAsyncDisposable
 
     public async Task StartAsync()
     {
+        // 前回の終了が片付けの途中で打ち切られていたときの取りこぼし
+        DeleteIncognitoFiles();
         var current = await settings.GetAsync();
         await ledger.GetPricingAsync();
         await mcp.ApplyAsync(current.McpServers);
@@ -1107,19 +1109,27 @@ public sealed class AppHost : IAsyncDisposable
         scheduler.Dispose();
         foreach (var run in workflows.ListView().OfType<JsonObject>()) workflows.Stop((string?)run["id"] ?? "");
         hub.StopAll();
-        await mcp.DisposeAsync();
+        // 画面は片付けを数秒しか待たずに終わるので、残ると困るもの (シークレットのファイル、見えないブラウザ、裏のコマンド) を先に片付ける
         terminal.Dispose();
-        await browser.DisposeAsync();
         await internalBrowser.DisposeAsync();
+        DeleteIncognitoFiles();
+        await mcp.DisposeAsync();
+        await browser.DisposeAsync();
         await bridge.DisposeAsync();
+        // MCP サーバーが掴んでいたファイルがあれば、ここで消える
+        DeleteIncognitoFiles();
+        http.Dispose();
+    }
+
+    static void DeleteIncognitoFiles()
+    {
         try
         {
             if (Directory.Exists(AppPaths.IncognitoFilesDir)) Directory.Delete(AppPaths.IncognitoFilesDir, recursive: true);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            // 開いたままのファイルがある。次に閉じるときに消える
+            // 開いたままのファイルがある。次に起動したときに消える
         }
-        http.Dispose();
     }
 }
