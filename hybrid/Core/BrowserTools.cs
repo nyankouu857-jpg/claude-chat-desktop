@@ -6,11 +6,14 @@ using static ClaudeChat.Core.ToolJson;
 
 namespace ClaudeChat.Core;
 
-// Chrome を DevTools プロトコルで動かす組み込みツール。専用プロファイルの Chrome (無ければ Edge) か、拡張機能を通していつもの Chrome を使う
-public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, BrowserBridge bridge, IPlatform platform) : IToolProvider, IAsyncDisposable
+// Chrome を DevTools プロトコルで動かす組み込みツール。専用プロファイルの Chrome (無ければ Edge) か、拡張機能を通していつもの Chrome を使う。
+// hidden は Claude が自分で調べるための内蔵ブラウザ。窓を出さず、ユーザーのログインも持たない
+public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, BrowserBridge bridge, IPlatform platform, bool hidden = false) : IToolProvider, IAsyncDisposable
 {
     public const string Source = "browser";
-    const string Prefix = "browser__";
+    public const string HiddenSource = "browse";
+    string ToolSource => hidden ? HiddenSource : Source;
+    string Prefix => ToolSource + "__";
     // ページ本文を API に載せる量の上限
     const int MaxPageTextChars = 20_000;
     const int MaxElements = 300;
@@ -18,7 +21,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
     static readonly TimeSpan LoadTimeout = TimeSpan.FromSeconds(20);
 
     // ログイン状態を残すため代表フォルダの中に置く
-    string ProfileDir => Path.Combine(paths.DataDir, "browser-profile");
+    string ProfileDir => Path.Combine(paths.DataDir, hidden ? "claude-browser-profile" : "browser-profile");
 
     readonly SemaphoreSlim gate = new(1, 1);
     readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(5) };
@@ -115,21 +118,32 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
             false, false, EvaluateAsync),
     ];
 
-    bool Enabled => settings.Current?.Browser.Enabled == true;
-    string Mode => settings.Current?.Browser.Mode == "extension" ? "extension" : "dedicated";
+    // 内蔵ブラウザはユーザーの PC 操作の設定と関係なく、ツールのメニューだけでオンオフする
+    bool Enabled => hidden || settings.Current?.Browser.Enabled == true;
+    string Mode => !hidden && settings.Current?.Browser.Mode == "extension" ? "extension" : "dedicated";
+    bool CanRealClick => !hidden && platform.CanRealClick;
 
-    // どちらのブラウザかで、ログインの扱いが違う
-    string OpenNote => Mode == "extension"
-        ? " This is the user's own everyday Chrome, signed in to the user's accounts, so treat actions on sites as acting in the user's name. You only see and control tabs that this app opened, grouped as \"ClaudeChat\"."
-        : " It is a dedicated Chrome or Edge profile, separate from the user's everyday browser, so the user may need to sign in once.";
+    // どちらのブラウザかで、ログインの扱いと、ユーザーに見えるかが違う
+    string OpenNote => hidden
+        ? " This is your own private browser built into the app, running in the background. The user cannot see it: not its window, tabs, or pages. It has none of the user's accounts or sign-ins. Use it when you want to look at something yourself, such as reading a page in full or checking how a site behaves, and tell the user what you found. To work in the browser the user sees, use the browser__ tools instead."
+        : Mode == "extension"
+        ? " This is the user's own everyday Chrome, signed in to the user's accounts, so treat actions on sites as acting in the user's name. The user can see it. You only see and control tabs that this app opened, grouped as \"ClaudeChat\"."
+        : " It is a dedicated Chrome or Edge profile on the user's screen, separate from the user's everyday browser, so the user may need to sign in once.";
 
     public IReadOnlyList<ToolSpec> GetTools(ISet<string>? enabledSources)
     {
-        if (!Enabled || (enabledSources is not null && !enabledSources.Contains(Source))) return [];
+        if (!Enabled || (enabledSources is not null && !enabledSources.Contains(ToolSource))) return [];
         // いつもの Chrome ではあなたの名前で操作するので、「常に許可」は出さない。専用の窓で許可した分も持ち越さない
         var allowAlways = Mode != "extension";
-        return Tools().Select(t => new ToolSpec(Prefix + t.Name, Source, t.Name, t.Title, t.Name == "open" ? t.Description + OpenNote : t.Description, t.Schema, t.AutoApprove, t.AllowAlways && allowAlways)).ToList();
+        return Tools()
+            // 内蔵ブラウザは画面に出ないので、本物のマウスでは押せない
+            .Select(t => hidden && t.Name == "click" ? t with { Description = HiddenClickDescription, Schema = Schema(("ref", "integer", "Element number from the snapshot", true)) } : t)
+            // ログインの無い窓で公開ページを読むだけなら Web ページの取得と変わらない
+            .Select(t => new ToolSpec(Prefix + t.Name, ToolSource, t.Name, t.Title, t.Name == "open" ? t.Description + OpenNote : t.Description, t.Schema, t.AutoApprove || (hidden && t.Name == "open"), t.AllowAlways && allowAlways))
+            .ToList();
     }
+
+    const string HiddenClickDescription = "Click an element by its number from the latest snapshot. If the click does not reach the element, the tool retries with a direct DOM click. If the click opens a new tab, the tool switches to it. The result only tells you the current URL, so take a snapshot to see what changed.";
 
     public async Task<ToolCallResult> CallAsync(string apiName, JsonObject input, CancellationToken cancellationToken)
     {
@@ -232,6 +246,11 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         foreach (var arg in new[] { "--remote-debugging-port=0", $"--user-data-dir={ProfileDir}", "--no-first-run", "--no-default-browser-check", "about:blank" })
         {
             info.ArgumentList.Add(arg);
+        }
+        if (hidden)
+        {
+            // 横幅はふつうのノート PC の画面に合わせ、スマホ版のページにならないようにする
+            foreach (var arg in new[] { "--headless=new", "--window-size=1280,900", "--mute-audio" }) info.ArgumentList.Add(arg);
         }
         browserProcess = Process.Start(info) ?? throw new ToolException("ブラウザを起動できませんでした");
         browserProcess.OutputDataReceived += (_, _) => { };
@@ -545,7 +564,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         var lines = new List<string> { $"要素 {reference} をクリックしました" };
         if ((bool?)input["real"] == true)
         {
-            if (!platform.CanRealClick) throw new ToolException("この環境では本物のマウスでのクリックは使えません");
+            if (!CanRealClick) throw new ToolException("この環境では本物のマウスでのクリックは使えません");
             if (await RealClickAsync(page, reference, cancellationToken) is { } failed) throw new ToolException($"本物のマウスでクリックできませんでした: {failed}");
             lines.Add("画面上で本物のマウスを使って押しました");
         }
@@ -559,7 +578,7 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
             if (await MissedClickAsync(page, reference, cancellationToken) is { } cover)
             {
                 lines.Add(cover.Length > 0 ? $"画面上では別の要素 ({cover}) が重なっていて、クリックが要素に届きませんでした" : "座標でのクリックが要素に届きませんでした");
-                var realFailed = platform.CanRealClick ? await RealClickAsync(page, reference, cancellationToken) : "";
+                var realFailed = CanRealClick ? await RealClickAsync(page, reference, cancellationToken) : "";
                 if (realFailed is null && await MissedClickAsync(page, reference, cancellationToken) is null)
                 {
                     lines.Add("画面上で本物のマウスを使って押し直しました");
@@ -694,10 +713,15 @@ public sealed class BrowserToolProvider(SettingsStore settings, AppPaths paths, 
         return Text(json.Length > MaxPageTextChars ? json[..MaxPageTextChars] + "\n... 長いので切りました" : json);
     }
 
-    // ブラウザはユーザーがそのまま使えるように閉じない
+    // ブラウザはユーザーがそのまま使えるように閉じない。内蔵ブラウザは見えないまま残るので閉じる
     public async ValueTask DisposeAsync()
     {
         await ResetSessionAsync();
+        if (hidden && browserProcess is { HasExited: false })
+        {
+            try { browserProcess.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+        }
         browserProcess?.Dispose();
         http.Dispose();
     }

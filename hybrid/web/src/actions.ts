@@ -25,7 +25,7 @@ import type {
 // C# 側の FileToolProvider.Source と同じ
 export const FILES_SOURCE = "files";
 // 組み込みツールの持ち主。サーバー側の Source と同じ名前
-export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser", "agents", "chats", "todo", "artifacts", "memory", "schedule", "skills", "ask"];
+export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser", "browse", "agents", "chats", "todo", "artifacts", "memory", "schedule", "skills", "ask"];
 
 let toastId = 0;
 

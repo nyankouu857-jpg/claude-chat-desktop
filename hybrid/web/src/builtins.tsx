@@ -1,4 +1,4 @@
-import { AppWindow, Bot, Brain, CalendarClock, CircleQuestionMark, FolderOpen, ListChecks, MessagesSquare, MousePointerClick, NotebookPen, PanelsTopLeft, SquareTerminal, type LucideIcon } from "lucide-react";
+import { AppWindow, Bot, Brain, CalendarClock, CircleQuestionMark, Globe, FolderOpen, ListChecks, MessagesSquare, MousePointerClick, NotebookPen, PanelsTopLeft, SquareTerminal, type LucideIcon } from "lucide-react";
 import type { Settings } from "./types";
 
 // 組み込みツールの表示情報。ツール名の接頭辞が id
@@ -18,6 +18,23 @@ const shorten = (s: unknown, max = 80) => {
   const text = String(s ?? "").replace(/\s+/g, " ");
   return text.length > max ? `${text.slice(0, max)}...` : text;
 };
+
+// 画面に出るブラウザと内蔵ブラウザは同じ道具をそろえている
+const BROWSER_TITLES: Record<string, string> = {
+  open: "ページを開く",
+  snapshot: "ページを読む",
+  screenshot: "スクリーンショット",
+  click: "クリック",
+  type: "文字を入力",
+  press_key: "キーを押す",
+  scroll: "スクロール",
+  back: "戻る",
+  tabs: "タブ",
+  evaluate: "JavaScript を実行",
+};
+
+const browserSubject = (tool: string, input: Record<string, any>) =>
+  input.url ?? (input.ref !== undefined ? `要素 ${input.ref}${tool === "type" ? ` に「${shorten(input.text, 30)}」` : ""}` : input.key ?? input.direction ?? (input.expression ? shorten(input.expression) : ""));
 
 export const BUILTIN_SOURCES: BuiltinSource[] = [
   {
@@ -79,20 +96,18 @@ export const BUILTIN_SOURCES: BuiltinSource[] = [
     icon: MousePointerClick,
     isAvailable: (s) => s.browser.enabled,
     hint: () => "Chrome や Edge を動かす",
-    titles: {
-      open: "ページを開く",
-      snapshot: "ページを読む",
-      screenshot: "スクリーンショット",
-      click: "クリック",
-      type: "文字を入力",
-      press_key: "キーを押す",
-      scroll: "スクロール",
-      back: "戻る",
-      tabs: "タブ",
-      evaluate: "JavaScript を実行",
-    },
-    subject: (tool, input) =>
-      input.url ?? (input.ref !== undefined ? `要素 ${input.ref}${tool === "type" ? ` に「${shorten(input.text, 30)}」` : ""}` : input.key ?? input.direction ?? (input.expression ? shorten(input.expression) : "")),
+    titles: BROWSER_TITLES,
+    subject: browserSubject,
+  },
+  {
+    id: "browse",
+    group: "claude",
+    label: "内蔵ブラウザ",
+    icon: Globe,
+    isAvailable: () => true,
+    hint: () => "Claude が自分で見るためのブラウザ (画面には出ない)",
+    titles: BROWSER_TITLES,
+    subject: browserSubject,
   },
   {
     id: "agents",

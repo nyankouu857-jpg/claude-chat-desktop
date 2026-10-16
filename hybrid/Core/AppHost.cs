@@ -44,6 +44,7 @@ public sealed class AppHost : IAsyncDisposable
     readonly McpHub mcp;
     readonly TerminalToolProvider terminal;
     readonly BrowserToolProvider browser;
+    readonly BrowserToolProvider internalBrowser;
     readonly BrowserBridge bridge;
     readonly OrgCostClient orgCost;
     readonly HttpClient http = new();
@@ -69,6 +70,7 @@ public sealed class AppHost : IAsyncDisposable
         terminal = new TerminalToolProvider(settings);
         bridge = new BrowserBridge(settings, secrets);
         browser = new BrowserToolProvider(settings, paths, bridge, platform);
+        internalBrowser = new BrowserToolProvider(settings, paths, bridge, platform, hidden: true);
         // 同じ名前があれば先に並べたものが勝つので、MCP は最後
         hub.Tools = new ToolRegistry(
         [
@@ -76,6 +78,7 @@ public sealed class AppHost : IAsyncDisposable
             terminal,
             new ProgramToolProvider(settings),
             browser,
+            internalBrowser,
             new AgentToolProvider(hub, conversations, folders, settings, workflows),
             new ChatSearchToolProvider(conversations, settings),
             new TodoToolProvider(),
@@ -212,7 +215,7 @@ public sealed class AppHost : IAsyncDisposable
     // MCP サーバー名がこれと同じだとツール名の接頭辞が重なる
     static readonly string[] BuiltinSources =
     [
-        FileToolProvider.Source, TerminalToolProvider.Source, ProgramToolProvider.Source, BrowserToolProvider.Source,
+        FileToolProvider.Source, TerminalToolProvider.Source, ProgramToolProvider.Source, BrowserToolProvider.Source, BrowserToolProvider.HiddenSource,
         AgentToolProvider.Source, ChatSearchToolProvider.Source, TodoToolProvider.Source, ArtifactToolProvider.Source,
         MemoryToolProvider.Source, PlanToolProvider.Source, ScheduleToolProvider.Source, SkillToolProvider.Source,
         AskToolProvider.Source,
@@ -1107,6 +1110,7 @@ public sealed class AppHost : IAsyncDisposable
         await mcp.DisposeAsync();
         terminal.Dispose();
         await browser.DisposeAsync();
+        await internalBrowser.DisposeAsync();
         await bridge.DisposeAsync();
         try
         {
