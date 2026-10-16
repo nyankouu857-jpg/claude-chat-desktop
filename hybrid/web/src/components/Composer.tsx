@@ -1,9 +1,9 @@
-import { ArrowUp, Check, ChevronDown, ChevronRight, Circle, CircleDot, Code, FastForward, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Quote, Settings2, Square, Telescope, Type, X, Zap } from "lucide-react";
+import { ArrowUp, Camera, Check, ChevronDown, ChevronRight, Circle, CircleDot, Code, FastForward, WifiOff, FileText, Globe, Link, MonitorCog, Paperclip, Plug, Plus, Quote, Settings2, Square, Telescope, Type, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { clearPrefill, extractDocumentText, hurry, interject, openSettings, send, setChoice, setMode, setQuote, stop, toast } from "../actions";
+import { cancelOffline, captureScreen, clearPrefill, extractDocumentText, hurry, interject, openSettings, send, setChoice, setMode, setQuote, stop, toast } from "../actions";
 import { BUILTIN_SOURCES } from "../builtins";
 import { allCommands, runCommand } from "../commands";
-import { EFFORTS, FAST_MODELS, MODELS, OTHER_MODELS, defaultEffortOf, effortsOf, modelLabel } from "../models";
+import { AUTO_MODEL, EFFORTS, FAST_MODELS, MODELS, OTHER_MODELS, defaultEffortOf, effortsOf, modelLabel } from "../models";
 import { getState, setState, useStore } from "../store";
 import type { PermissionMode, Todo, WireBlock } from "../types";
 import { Dropdown, MenuItem, Toggle } from "./ui";
@@ -143,7 +143,10 @@ export function FileChip({ name, kind }: { name: string; kind: "pdf" | "text" })
   );
 }
 
-function ModelMenu() {
+// 比べられるのは、選んでいるモデルのほかに 2 つまで。画面の幅に 3 列が収まる数
+const MAX_COMPARE = 2;
+
+function ModelMenu({ isNew }: { isNew: boolean }) {
   const choice = useStore((s) => s.choice);
   const isOther = OTHER_MODELS.some((m) => m.id === choice.model);
   const [othersOpen, setOthersOpen] = useState(isOther);
@@ -159,6 +162,7 @@ function ModelMenu() {
         <button type="button" className={`model-button${open ? " open" : ""}`} onClick={toggle}>
           {fast && <Zap size={13} className="fast-mark" />}
           {modelLabel(choice.model)}
+          {isNew && choice.compareModels.length > 0 && <span className="model-effort">+{choice.compareModels.length} で比較</span>}
           <span className="model-effort">{EFFORTS.find((e) => e.id === choice.effort)?.label}</span>
           <ChevronDown size={14} />
         </button>
@@ -171,6 +175,9 @@ function ModelMenu() {
               {m.label}
             </MenuItem>
           ))}
+          <MenuItem checked={choice.model === AUTO_MODEL.id} hint={`${AUTO_MODEL.description}。モデルが変わるとキャッシュは効きません`} onClick={() => { setChoice({ model: AUTO_MODEL.id, effort: AUTO_MODEL.defaultEffort, compareModels: [] }); close(); }}>
+            {AUTO_MODEL.label}
+          </MenuItem>
           <div className="menu-separator" />
           <MenuItem checked={isOther && !othersOpen} onClick={() => setOthersOpen((o) => !o)}>
             <span className="menu-expand">他のモデル <ChevronRight size={13} className={othersOpen ? "rotated" : ""} /></span>
@@ -214,6 +221,29 @@ function ModelMenu() {
               </div>
             </>
           )}
+          {isNew && choice.model !== AUTO_MODEL.id && (
+            <>
+              <div className="menu-separator" />
+              <div className="menu-heading">ほかのモデルとも比べる</div>
+              <div className="compare-pick">
+                {MODELS.filter((m) => m.id !== choice.model).map((m) => {
+                  const on = choice.compareModels.includes(m.id);
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      className={`effort-pill${on ? " on" : ""}`}
+                      disabled={!on && choice.compareModels.length >= MAX_COMPARE}
+                      onClick={() => setChoice({ compareModels: on ? choice.compareModels.filter((id) => id !== m.id) : [...choice.compareModels, m.id] })}
+                    >
+                      {m.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="menu-footnote">選ぶと、同じ発言をそのモデルにも送り、答えを並べて比べます ({MAX_COMPARE} つまで)。料金はモデルの数だけかかります</div>
+            </>
+          )}
         </>
       )}
     </Dropdown>
@@ -222,7 +252,7 @@ function ModelMenu() {
 
 // claude.ai と同じく、添付、スタイル、検索やツールを「＋」1 つにまとめる。
 // 新しいチャットでは入力欄が画面の中ほどにあり、上に開くと項目が画面からはみ出す
-function PlusMenu({ direction, onAddFiles }: { direction: "up" | "down"; onAddFiles: () => void }) {
+function PlusMenu({ direction, onAddFiles, onCapture }: { direction: "up" | "down"; onAddFiles: () => void; onCapture: () => void }) {
   const choice = useStore((s) => s.choice);
   const styles = useStore((s) => s.extensions.outputStyles);
   const [stylesOpen, setStylesOpen] = useState(false);
@@ -262,6 +292,7 @@ function PlusMenu({ direction, onAddFiles }: { direction: "up" | "down"; onAddFi
       {(close) => (
         <>
           <MenuItem icon={<Paperclip size={16} />} hint="画像、PDF、テキスト、Office 文書" onClick={() => { close(); onAddFiles(); }}>ファイルや写真を追加</MenuItem>
+          <MenuItem icon={<Camera size={16} />} hint="範囲を選んで撮り、そのまま添付" onClick={() => { close(); onCapture(); }}>画面を撮って添付</MenuItem>
           <MenuItem icon={<Type size={16} />} hint={styles.find((st) => st.id === choice.style)?.label ?? "標準"} onClick={() => setStylesOpen((o) => !o)}>
             <span className="menu-expand">スタイルを使う <ChevronRight size={13} className={stylesOpen ? "rotated" : ""} /></span>
           </MenuItem>
@@ -389,6 +420,7 @@ function useSlashItems(query: string | null) {
 
 export function Composer({ conversationId, autoFocus, prefill }: { conversationId: string | null; autoFocus?: boolean; prefill?: { text: string; nonce: number } }) {
   const running = useStore((s) => (conversationId ? !!s.live[conversationId] : false));
+  const offlineQueued = useStore((s) => s.offlineQueued);
   const research = useStore((s) => s.choice.research);
   const style = useStore((s) => s.choice.style);
   const styleLabel = useStore((s) => s.extensions.outputStyles.find((st) => st.id === s.choice.style)?.label);
@@ -617,7 +649,20 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
         }}
       />
       <div className="composer-bar">
-        <PlusMenu direction={conversationId ? "up" : "down"} onAddFiles={() => fileInput.current?.click()} />
+        <PlusMenu
+          direction={conversationId ? "up" : "down"}
+          onAddFiles={() => fileInput.current?.click()}
+          onCapture={async () => {
+            const shot = await captureScreen();
+            if (shot) await addFiles([shot]);
+          }}
+        />
+        {offlineQueued > 0 && (
+          <span className="offline-chip" title="ネットにつながったら送ります">
+            <WifiOff size={13} /> 送信待ち {offlineQueued} 件
+            <button type="button" className="icon-button small" title="送るのをやめる" onClick={cancelOffline}><X size={12} /></button>
+          </span>
+        )}
         {style !== "default" && styleLabel && (
           <button type="button" className="research-chip style-chip" title="スタイルを標準に戻す" onClick={() => setChoice({ style: "default" })}>
             <Type size={13} /> {styleLabel} <X size={12} />
@@ -630,7 +675,7 @@ export function Composer({ conversationId, autoFocus, prefill }: { conversationI
         )}
         <ModeMenu conversationId={conversationId} />
         <span className="spacer" />
-        <ModelMenu />
+        <ModelMenu isNew={!conversationId} />
         {running ? (
           <>
             <button

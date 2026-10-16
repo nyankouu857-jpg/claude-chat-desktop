@@ -79,6 +79,7 @@ export interface Conversation {
   forkView?: Record<string, { count: number; active: number }>;
   incognito?: boolean;
   topEffort?: string | null;
+  tags?: string[];
 }
 
 export interface ConversationSummary {
@@ -92,6 +93,7 @@ export interface ConversationSummary {
   parentId?: string | null;
   kind: ChatKind;
   lastRunStatus?: string | null;
+  tags?: string[];
 }
 
 export interface Folder {
@@ -258,6 +260,15 @@ export interface McpServerStatus {
   tools: McpTool[];
 }
 
+export interface SessionFile {
+  id: string;
+  path: string;
+  size: number;
+  writtenBy?: string | null;
+  writtenByTitle?: string | null;
+  updatedAt: number;
+}
+
 export interface UpdateInfo {
   available: boolean;
   current: string | null;
@@ -323,6 +334,7 @@ export type ChatEvent =
 export type View =
   | { name: "new"; folderId?: string; incognito?: boolean }
   | { name: "chat"; id: string }
+  | { name: "compare"; ids: string[] }
   | { name: "recents" }
   | { name: "projects" }
   | { name: "artifacts" }

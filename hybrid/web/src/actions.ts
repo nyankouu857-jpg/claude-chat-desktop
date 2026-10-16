@@ -1,7 +1,8 @@
 import { call, on } from "./bridge";
-import { FAST_MODELS } from "./models";
+import { FAST_MODELS, defaultEffortOf } from "./models";
 import { getState, setState, type AppState } from "./store";
 import type {
+  SessionFile,
   Approval,
   ChatEvent,
   Conversation,
@@ -28,7 +29,7 @@ import type {
 // C# 側の FileToolProvider.Source と同じ
 export const FILES_SOURCE = "files";
 // 組み込みツールの持ち主。サーバー側の Source と同じ名前
-export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser", "browse", "agents", "chats", "todo", "artifacts", "memory", "schedule", "skills", "ask", "notify", "compose"];
+export const BUILTIN_SOURCE_IDS = [FILES_SOURCE, "terminal", "programs", "browser", "browse", "agents", "chats", "todo", "session", "artifacts", "memory", "schedule", "skills", "ask", "notify", "compose"];
 
 let toastId = 0;
 
@@ -82,7 +83,9 @@ export async function init() {
   on("workflow.changed", (run: WorkflowRun) => setState((s) => ({ ...s, workflows: { ...s.workflows, [run.id]: run } })));
   on("folders.changed", () => void refreshFolders());
   // Windows の通知を押したとき
-  on("app.navigate", ({ conversationId }: { conversationId: string }) => navigate({ name: "chat", id: conversationId }));
+  // 別の窓は 1 つの会話だけを出すので、通知を押したときの移動はメインの窓に任せる
+  on("app.navigate", ({ conversationId }: { conversationId: string }) => { if (!SINGLE_CHAT) navigate({ name: "chat", id: conversationId }); });
+  window.addEventListener("online", () => void flushOffline());
   on("update.available", (info: UpdateInfo) => setState((s) => ({ ...s, update: info })));
   on("update.installing", (info: UpdateInfo) => setState((s) => ({ ...s, update: { ...info, installing: true } })));
   on("update.failed", (message: string) => {
@@ -121,9 +124,11 @@ export async function init() {
       permissionMode: "default",
       disabledSources: [],
       fast: false,
+      compareModels: [],
     },
   }));
   if (!data.secrets.hasApiKey) navigate({ name: "settings", tab: "api" });
+  else if (SINGLE_CHAT) navigate({ name: "chat", id: SINGLE_CHAT });
 }
 
 async function refreshFolders() {
@@ -374,10 +379,29 @@ function chatOptions() {
   };
 }
 
+// 別の窓で 1 つの会話だけを出しているとき、その会話の ID
+export const SINGLE_CHAT = new URLSearchParams(location.search).get("chat");
+
+// ネットにつながっていない間に送った分。つながったら順に送る
+let offlineQueue: Record<string, unknown>[] = [];
+
+async function flushOffline() {
+  const queued = offlineQueue;
+  offlineQueue = [];
+  setState((s) => ({ ...s, offlineQueued: 0 }));
+  for (const payload of queued) await guard(() => call("chat.send", payload));
+  if (queued.length) toast(`送信待ちだった ${queued.length} 件を送りました`);
+}
+
+export function cancelOffline() {
+  offlineQueue = [];
+  setState((s) => ({ ...s, offlineQueued: 0 }));
+}
+
 export async function send(conversationId: string | null, content: WireMessage["content"], extra: { research?: boolean } = {}) {
   const { choice, view } = getState();
   const research = extra.research ?? choice.research;
-  const result = await guard(() => call<{ conversationId: string }>("chat.send", {
+  const payload = {
     conversationId,
     content,
     research,
@@ -386,7 +410,28 @@ export async function send(conversationId: string | null, content: WireMessage["
     folderId: conversationId ? undefined : view.name === "new" ? view.folderId : view.name === "project" ? view.id : undefined,
     incognito: !conversationId && view.name === "new" && !view.folderId && view.incognito ? true : undefined,
     ...chatOptions(),
-  }));
+  };
+  if (!navigator.onLine) {
+    offlineQueue.push(payload);
+    setState((s) => ({ ...s, offlineQueued: offlineQueue.length }));
+    toast("ネットにつながっていません。つながったら送ります");
+    return true;
+  }
+  // 新しいチャットで比べるモデルを選んでいたら、同じ発言をモデルごとのチャットに送って並べる
+  if (!conversationId && choice.compareModels.length > 0 && !research && !payload.incognito) {
+    const models = [choice.model, ...choice.compareModels.filter((m) => m !== choice.model)];
+    const ids: string[] = [];
+    for (const model of models) {
+      const effort = model === choice.model ? choice.effort : defaultEffortOf(model);
+      const started = await guard(() => call<{ conversationId: string }>("chat.send", { ...payload, model, effort, fast: model === choice.model && payload.fast }));
+      if (started) ids.push(started.conversationId);
+    }
+    setChoice({ compareModels: [] });
+    if (ids.length === 0) return false;
+    navigate({ name: "compare", ids });
+    return true;
+  }
+  const result = await guard(() => call<{ conversationId: string }>("chat.send", payload));
   if (result && research) setChoice({ research: false });
   // 権限モードは始めた会話に移したので、次の新しいチャットは毎回確認から始める
   if (result && !conversationId && choice.permissionMode !== "default") setChoice({ permissionMode: "default" });
@@ -404,6 +449,51 @@ export async function send(conversationId: string | null, content: WireMessage["
 }
 
 export const stop = (conversationId: string) => guard(() => call("chat.stop", { conversationId }));
+
+export async function openChatWindow(conversationId: string) {
+  // 開発用ホストはブラウザで開いているので、新しいタブで同じ会話を出す
+  if (!(window as any).chrome?.webview) {
+    window.open(`${location.pathname}?chat=${conversationId}`, "_blank");
+    return;
+  }
+  await guard(() => call("app.openChatWindow", { conversationId }));
+}
+
+export async function forkConversation(conversationId: string, upTo: number) {
+  const conversation = await guard(() => call<Conversation>("conversations.fork", { id: conversationId, upTo }));
+  if (!conversation) return;
+  setState((s) => putConversation(s, conversation));
+  navigate({ name: "chat", id: conversation.id });
+  toast("ここまでを新しいチャットに分けました");
+}
+
+export const changedFiles = (conversationId: string) => guard(() => call<Record<string, string[]>>("chat.changedFiles", { conversationId }));
+
+export async function undoFiles(conversationId: string, humanIndex: number) {
+  const result = await guard(() => call<{ conversation: Conversation; files: { restored: string[]; skipped: string[] } }>("chat.undoFiles", { conversationId, humanIndex }));
+  if (!result) return null;
+  setState((s) => putConversation(s, result.conversation));
+  const skipped = result.files.skipped.length ? `。戻せなかったもの: ${result.files.skipped.join("、")}` : "";
+  toast(`${result.files.restored.length} 個のファイルを元に戻しました${skipped}`);
+  return result;
+}
+
+// 撮った画像を添付にする。撮らずにやめたら null
+export async function captureScreen(): Promise<File | null> {
+  const base64 = await guard(() => call<string | null>("screen.capture"));
+  if (!base64) return null;
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  return new File([bytes], `screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`, { type: "image/png" });
+}
+
+export interface BudgetView {
+  todayUsd: number;
+  monthUsd: number;
+  dailyLimitUsd: number;
+  monthlyLimitUsd: number;
+}
+
+export const budgetView = () => guard(() => call<BudgetView>("usage.budget"));
 
 export async function hurry(conversationId: string) {
   const ok = await guard(async () => {
@@ -488,6 +578,16 @@ export async function answer(conversationId: string, requestId: string, answers:
 export const searchConversations = (query: string) => guard(() => call<{ id: string; snippet: string }[]>("conversations.search", { query }));
 
 export const renameConversation = (id: string, title: string) => guard(() => call("conversations.rename", { id, title }));
+
+export async function setTags(id: string, tags: string[]) {
+  const conversation = await guard(() => call<Conversation>("conversations.setTags", { id, tags }));
+  if (conversation) setState((s) => (s.conversations[id] ? putConversation(s, conversation) : s));
+}
+
+export async function exportUsageCsv() {
+  const result = await guard(() => call<{ path: string }>("usage.exportCsv"));
+  if (result) toast(`書き出しました: ${result.path}`);
+}
 export const starConversation = (id: string, starred: boolean) => guard(() => call("conversations.star", { id, starred }));
 
 export async function deleteConversation(id: string) {
@@ -608,6 +708,27 @@ export const rewindTurns = (conversationId: string) => guard(() => call<number[]
 
 // ブラウザの confirm の代わり。claude.ai と同じく、赤いボタンの確認ダイアログを出す
 let confirmResolver: ((ok: boolean) => void) | null = null;
+
+export interface SessionListing {
+  rootId: string;
+  path: string;
+  own: boolean;
+  files: SessionFile[];
+}
+
+export const sessionList = (conversationId: string) => guard(() => call<SessionListing>("session.list", { conversationId }));
+export const openSessionFile = (conversationId: string, fileId?: string) => guard(() => call("session.open", { conversationId, fileId }));
+
+// セッションのフォルダは会話を消すと一緒に消えるので、ファイルがあれば数を添えて確かめる
+export async function confirmDeleteConversations(ids: string[], label: string) {
+  let files = 0;
+  for (const id of ids) {
+    const listing = await sessionList(id);
+    if (listing?.own) files += listing.files.length;
+  }
+  const folder = files > 0 ? `\n\nこのチャットのフォルダにファイルが ${files} 個あります。削除するとフォルダとファイルも消えます。本当に削除してよいですか?` : "";
+  return askConfirm("チャットを削除", `${label}を削除しますか? この操作は取り消せません。${folder}`);
+}
 
 export function askConfirm(title: string, message: string, confirmLabel = "削除") {
   confirmResolver?.(false);

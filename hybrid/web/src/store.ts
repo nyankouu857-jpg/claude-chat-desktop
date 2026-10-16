@@ -38,6 +38,8 @@ export interface ComposerChoice {
   disabledSources: string[];
   // 高速モード。対応しているモデルのときだけ送る
   fast: boolean;
+  // 新しいチャットで、同じ発言を並べて比べるほかのモデル
+  compareModels: string[];
 }
 
 export type DialogState =
@@ -82,6 +84,8 @@ export interface AppState {
   view: View;
   sidebarOpen: boolean;
   choice: ComposerChoice;
+  // ネットにつながったら送る発言の数
+  offlineQueued: number;
   toasts: Toast[];
 }
 
@@ -119,8 +123,9 @@ let state: AppState = {
   dialog: null,
   view: { name: "new" },
   sidebarOpen: true,
-  choice: { model: "claude-opus-5-5", effort: "medium", webSearch: false, webFetch: true, codeExecution: false, research: false, style: "default", permissionMode: "default", disabledSources: [], fast: false },
+  choice: { model: "claude-opus-5-5", effort: "medium", webSearch: false, webFetch: true, codeExecution: false, research: false, style: "default", permissionMode: "default", disabledSources: [], fast: false, compareModels: [] },
   toasts: [],
+  offlineQueued: 0,
 };
 
 const listeners = new Set<() => void>();

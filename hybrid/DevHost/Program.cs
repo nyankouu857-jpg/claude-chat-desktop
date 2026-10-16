@@ -140,6 +140,9 @@ sealed class ConsolePlatform(string trashDir) : IPlatform
     public bool IsActive => false;
     public void ShowWindow() { }
     public string? SetStartWithWindows(bool enabled) => "この環境では自動起動を設定できません";
+    public Task<string?> CaptureScreenAsync(CancellationToken cancellationToken) => throw new InvalidOperationException("この環境では画面を撮れません");
+    // ブラウザなら画面の側で新しいタブを開ける
+    public string? OpenChatWindow(string conversationId) => "開発用のホストでは別の窓を開けません";
 
     // ごみ箱の代わり
     public void MoveToTrash(string path)

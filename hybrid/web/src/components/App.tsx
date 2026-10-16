@@ -1,10 +1,11 @@
 import { LoaderCircle } from "lucide-react";
 import { useEffect } from "react";
-import { navigate, toggleSidebar } from "../actions";
+import { SINGLE_CHAT, navigate, toggleSidebar } from "../actions";
 import { setState, useStore } from "../store";
 import { ArtifactPanel } from "./ArtifactPanel";
 import { ArtifactsPage } from "./Artifacts";
 import { ChatView } from "./ChatView";
+import { CompareView } from "./Compare";
 import { GlobalDialog } from "./Dialogs";
 import { NewChat } from "./NewChat";
 import { ProjectPage, ProjectsPage } from "./Projects";
@@ -73,10 +74,11 @@ export function App() {
 
   return (
     <div className="app">
-      <Sidebar />
+      {!SINGLE_CHAT && <Sidebar />}
       <main className="main">
         {view.name === "new" && <NewChat />}
         {view.name === "chat" && <ChatView key={view.id} id={view.id} />}
+        {view.name === "compare" && <CompareView ids={view.ids} />}
         {view.name === "recents" && <Recents />}
         {view.name === "projects" && <ProjectsPage />}
         {view.name === "artifacts" && <ArtifactsPage />}

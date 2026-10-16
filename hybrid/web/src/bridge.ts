@@ -7,8 +7,10 @@ interface WebViewHost {
 }
 
 const webview: WebViewHost | undefined = (window as any).chrome?.webview;
-const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+const pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void }>();
 const listeners = new Map<string, Set<Listener>>();
+// 返事はすべての窓に届くので、窓ごとに違う ID にして取り違えないようにする
+const windowKey = crypto.randomUUID();
 let nextId = 1;
 let socket: WebSocket | null = null;
 let ready: Promise<void>;
@@ -37,7 +39,7 @@ if (webview) {
 
 export async function call<T = any>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   await ready;
-  const id = nextId++;
+  const id = `${windowKey}-${nextId++}`;
   const payload = JSON.stringify({ id, method, params });
   return new Promise<T>((resolve, reject) => {
     pending.set(id, { resolve, reject });

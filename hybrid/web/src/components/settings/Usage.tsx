@@ -1,6 +1,6 @@
 import { RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { localUsage, navigate, openPath, orgUsage, reloadPricing, setSecret, toast, updateSettings } from "../../actions";
+import { exportUsageCsv, localUsage, navigate, openPath, orgUsage, reloadPricing, setSecret, toast, updateSettings } from "../../actions";
 import { modelLabel } from "../../models";
 import { useStore } from "../../store";
 import { NumberField, tokens, usd } from "../ui";
@@ -188,6 +188,7 @@ function LocalUsage() {
         </>
       )}
       <div className="button-row">
+        <button type="button" className="button" onClick={() => void exportUsageCsv()}>CSV に書き出す</button>
         <button type="button" className="button" onClick={() => void openPath("pricing")}>料金表を開く</button>
         <button type="button" className="button" onClick={async () => {
           const s = await reloadPricing();

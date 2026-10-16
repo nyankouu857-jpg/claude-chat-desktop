@@ -1,4 +1,4 @@
-import { AppWindow, Bell, Bot, Brain, CalendarClock, CircleQuestionMark, FolderOpen, Globe, ListChecks, Mail, MessagesSquare, MousePointerClick, NotebookPen, PanelsTopLeft, Plug, SquareTerminal, type LucideIcon } from "lucide-react";
+import { AppWindow, Archive, Bell, Bot, Brain, CalendarClock, CircleQuestionMark, FolderOpen, Globe, ListChecks, Mail, MessagesSquare, MousePointerClick, NotebookPen, PanelsTopLeft, Plug, SquareTerminal, type LucideIcon } from "lucide-react";
 import { modelLabel } from "./models";
 import type { Settings } from "./types";
 
@@ -158,6 +158,16 @@ export const BUILTIN_SOURCES: BuiltinSource[] = [
     hint: () => "文書やアプリを横に表示",
     titles: { create: "アーティファクトを作る", update: "アーティファクトを直す", list: "アーティファクトの一覧", read: "アーティファクトを読む" },
     subject: (_, input) => input.title ?? input.id ?? input.query ?? (input.scope === "all" ? "すべてのチャット" : ""),
+  },
+  {
+    id: "session",
+    group: "claude",
+    label: "セッションのファイル",
+    icon: Archive,
+    isAvailable: () => true,
+    hint: () => "エージェント同士でファイル ID で受け渡す",
+    titles: { write_file: "セッションにファイルを書く", read_file: "セッションのファイルを読む", list_files: "セッションのファイルの一覧" },
+    subject: (_, input) => input.path ?? input.file_id ?? "",
   },
   {
     id: "todo",

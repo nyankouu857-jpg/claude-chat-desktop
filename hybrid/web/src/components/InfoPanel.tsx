@@ -1,12 +1,59 @@
 import { ChevronDown, ChevronRight, Cloud, FileCode, Folder as FolderIcon, FolderOpen, GitBranch, Plus, Settings2, Shapes } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
-import { compact, openArtifact, openFile, openSettings } from "../actions";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { compact, openArtifact, openFile, openSessionFile, openSettings, sessionList, type SessionListing } from "../actions";
+import { on } from "../bridge";
 import { contextWindowOf } from "../models";
 import { useStore } from "../store";
 import { MODE_LABELS } from "./Composer";
 import { tokens } from "./ui";
 
 const FILE_WRITE_TOOLS = ["files__write_file", "files__edit_file"];
+
+const formatSize = (bytes: number) => (bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`);
+
+// エージェント同士が受け渡したファイル。サブエージェントは親のフォルダを共有するので、親と同じ中身が出る
+function SessionCard({ conversationId }: { conversationId: string }) {
+  const [listing, setListing] = useState<SessionListing | null>(null);
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      const next = await sessionList(conversationId);
+      if (alive && next) setListing(next);
+    };
+    void load();
+    const off = on("session.changed", (data: { conversationId: string }) => {
+      if (!listing || data.conversationId === listing.rootId) void load();
+    });
+    return () => {
+      alive = false;
+      off();
+    };
+  }, [conversationId, listing?.rootId]);
+  if (!listing || listing.files.length === 0) return null;
+  return (
+    <Card
+      title="セッションのフォルダ"
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      aside={<span className="info-aside">{listing.files.length} 個</span>}
+    >
+      <ul className="info-list">
+        {listing.files.map((f) => (
+          <li key={f.id} className="clickable" title={`${f.id}\n${f.writtenByTitle ?? ""}`} onClick={() => void openSessionFile(conversationId, f.id)}>
+            <FileCode size={15} />
+            <span className="info-item-text">{f.path}</span>
+            <span className="info-item-aside">{formatSize(f.size)}</span>
+          </li>
+        ))}
+        <li className="clickable" onClick={() => void openSessionFile(conversationId)}>
+          <FolderOpen size={15} />
+          <span className="info-item-text muted">フォルダを開く</span>
+        </li>
+      </ul>
+    </Card>
+  );
+}
 
 function Card({ title, aside, open, onToggle, children }: { title: string; aside?: ReactNode; open?: boolean; onToggle: () => void; children?: ReactNode }) {
   // 中身のある札は畳め、中身の無い札は押すと詳しい画面へ移る
@@ -96,6 +143,7 @@ export function InfoPanel({ conversationId }: { conversationId: string }) {
         </div>
       </Card>
       <Card title="コネクタ" onToggle={() => openSettings("connectors")} aside={<span className="info-aside">{connected}件接続済み</span>} />
+      <SessionCard conversationId={conversationId} />
       {(conversation.artifacts.length > 0 || codeFiles.length > 0 || writtenFiles.length > 0) && (
         <Card title="成果物" open={outputsOpen} onToggle={() => setOutputsOpen((o) => !o)}>
           <ul className="info-list">

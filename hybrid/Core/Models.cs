@@ -11,6 +11,8 @@ public static class ModelCatalog
         "claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
     ];
     public static readonly string[] Efforts = ["low", "medium", "high", "xhigh", "max"];
+    // 入力欄の「自動」。送るたびに発言の難しさで Haiku / Sonnet / Opus から選ぶ
+    public const string AutoModel = "auto";
 
     // ツールから来たモデルと effort を確かめ、会話の設定に重ねる形にする。どちらも無ければ null
     public static JsonObject? Overrides(string? model, string? effort)

@@ -59,6 +59,17 @@ public sealed class Checkpoints(AppPaths paths, IPlatform platform)
         }
     }
 
+    // 発言ごとに、フォルダ操作で変えたファイル。画面の「この返答で変えたファイル」用
+    public Dictionary<int, List<string>> ChangedFiles(string conversationId)
+    {
+        lock (sync)
+        {
+            return Turns(conversationId).ToDictionary(
+                turn => turn,
+                turn => (Json.ReadAsync<List<Entry>>(Path.Combine(TurnDir(conversationId, turn), "manifest.json")).GetAwaiter().GetResult() ?? []).Select(e => e.Path).ToList());
+        }
+    }
+
     public List<int> Turns(string conversationId)
     {
         var dir = Path.Combine(paths.CheckpointsDir, conversationId);

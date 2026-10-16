@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace ClaudeChat.Core;
@@ -118,6 +119,10 @@ public sealed class Conversation
     public bool Incognito { get; set; }
     // 最初に送った effort。上の effort を変えるとキャッシュが切れるので、後の変更は EffortMarks で伝える
     public string? TopEffort { get; set; }
+    // 一覧で絞り込むための目印。利用者が付ける
+    public List<string> Tags { get; set; } = [];
+    // 「ここから別のチャット」で分けた元。元のセッションのファイルを読めるようにする
+    public string? ForkedFrom { get; set; }
     public List<EffortMark> EffortMarks { get; set; } = [];
     // キャッシュが外れた理由を API に聞くための前の応答の ID。保存しない
     public string? LastResponseId { get; set; }
@@ -275,6 +280,33 @@ public sealed class Conversation
         }
     }
 
+    // 先頭から upTo 件目の手前までを、新しい会話として写す。コンテナや作業中の状態は元に残す
+    public Conversation ForkUpTo(int upTo)
+    {
+        lock (sync)
+        {
+            if (upTo <= 0 || upTo > Messages.Count) throw new InvalidOperationException("分ける位置が不正です");
+            var fork = new Conversation
+            {
+                Title = $"{Title} (分岐)",
+                Model = Model,
+                FolderId = FolderId,
+                Options = Options?.DeepClone() as JsonObject,
+                PermissionMode = PermissionMode == "bypass" ? "default" : PermissionMode,
+                Messages = Messages.Take(upTo).Select(m => (JsonObject)m.DeepClone()).ToList(),
+                TopEffort = TopEffort,
+                EffortMarks = EffortMarks.Where(m => m.Index < upTo).Select(m => new EffortMark { Index = m.Index, Effort = m.Effort }).ToList(),
+                Files = new Dictionary<string, string>(Files),
+                Tags = [.. Tags],
+                ForkedFrom = Id,
+                LastRunStatus = "done",
+            };
+            if (ApiStart <= upTo) (fork.ApiStart, fork.CompactionBlock) = (ApiStart, CompactionBlock?.DeepClone() as JsonObject);
+            lock (Artifacts) fork.Artifacts = Json.ToNode(Artifacts).Deserialize<List<Artifact>>(Json.Wire) ?? [];
+            return fork;
+        }
+    }
+
     public void ApplyCompaction(JsonObject? block, int apiStart)
     {
         lock (sync)
@@ -338,6 +370,8 @@ public sealed class Conversation
                 ["files"] = new JsonObject(Files.Select(f => KeyValuePair.Create(f.Key, (JsonNode?)f.Value))),
                 ["incognito"] = Incognito,
                 ["topEffort"] = TopEffort,
+                ["forkedFrom"] = ForkedFrom,
+                ["tags"] = new JsonArray(Tags.Select(t => (JsonNode)t).ToArray()),
                 ["effortMarks"] = Json.ToNode(EffortMarks),
                 ["forkView"] = new JsonObject(Forks.Select(f => KeyValuePair.Create(f.Key.ToString(), (JsonNode?)new JsonObject { ["count"] = f.Value.Versions.Count, ["active"] = f.Value.Active }))),
             };
@@ -359,6 +393,7 @@ public sealed class ConversationSummary
     public string? ParentId { get; set; }
     public string Kind { get; set; } = "chat";
     public string? LastRunStatus { get; set; }
+    public List<string> Tags { get; set; } = [];
 }
 
 public sealed class ConversationStore(AppPaths paths)
@@ -408,6 +443,9 @@ public sealed class ConversationStore(AppPaths paths)
         }
     }
 
+    // 外で作った会話 (分けたチャットなど) を、保存の前に手元の控えに載せる
+    public void Adopt(Conversation conversation) => cache[conversation.Id] = conversation;
+
     public Conversation Create()
     {
         var conversation = new Conversation();
@@ -438,6 +476,7 @@ public sealed class ConversationStore(AppPaths paths)
                 ParentId = conversation.ParentId,
                 Kind = conversation.Kind,
                 LastRunStatus = conversation.LastRunStatus,
+                Tags = [.. conversation.Tags],
             });
             await Json.WriteAtomicAsync(IndexPath, index);
         }

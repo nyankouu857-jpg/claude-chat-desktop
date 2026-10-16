@@ -1122,6 +1122,47 @@ public sealed class ChatEngine(AnthropicClient client, ToolRegistry tools, Usage
         return text.Length > 0 ? text : throw new InvalidOperationException("答えが空でした");
     }
 
+    // 入力欄で「自動」を選んだときの振り分け先。難しさの段ごとに 1 つ
+    static readonly Dictionary<string, string> RouteTargets = new()
+    {
+        ["simple"] = "claude-haiku-5-5",
+        ["standard"] = "claude-sonnet-5-5",
+        ["hard"] = "claude-opus-5-5",
+    };
+
+    // 発言の難しさを Haiku に聞いて、答えるモデルを選ぶ。判定できなかったら標準のモデルにする
+    public async Task<string> RouteModelAsync(Conversation conversation, string request, CancellationToken cancellationToken)
+    {
+        var context = conversation.CopyMessages().Where(m => Conversation.IsHumanTurn(m) || (string?)m["role"] == "assistant").TakeLast(4)
+            .Select(m => $"{((string?)m["role"] == "user" ? "User" : "Assistant")}: {Clip(WireText.Of(m["content"]))}");
+        var response = await client.Messages.Create(new NonBeta.MessageCreateParams
+        {
+            Model = TitleModel,
+            MaxTokens = 16,
+            OutputConfig = new NonBeta.OutputConfig { Effort = NonBeta.Effort.Low },
+            // 1 語で答えるのに考える時間は要らない
+            Thinking = new NonBeta.ThinkingConfigDisabled(),
+            System = "You route a chat request to a model. Reply with exactly one word. simple: greetings, small talk, short factual questions, quick rewrites or translations. standard: everyday writing, explanations, ordinary coding and analysis. hard: complex multi-step reasoning, large or tricky code, design, research, math proofs, long agentic tasks with tools.",
+            Messages = [new() { Role = NonBeta.Role.User, Content = $"<recent>\n{string.Join("\n", context)}\n</recent>\n<request>\n{Clip(request)}\n</request>" }],
+        }, cancellationToken);
+        await ledger.RecordAsync(new UsageRecord
+        {
+            At = DateTimeOffset.UtcNow,
+            ConversationId = conversation.Incognito ? null : conversation.Id,
+            Kind = "route",
+            Model = TitleModel,
+            Input = response.Usage.InputTokens,
+            Output = response.Usage.OutputTokens,
+            CacheWrite = response.Usage.CacheCreationInputTokens ?? 0,
+            CacheRead = response.Usage.CacheReadInputTokens ?? 0,
+        });
+        var answer = string.Concat(response.Content.Select(b => b.Value).OfType<NonBeta.TextBlock>().Select(t => t.Text)).Trim().Trim('.').ToLowerInvariant();
+        return RouteTargets.GetValueOrDefault(answer, RouteTargets["standard"]);
+
+        // 難しさの見当には冒頭で足りる。長い貼り付けで判定の料金を増やさない
+        static string Clip(string text) => text.Length > 1500 ? text[..1500] : text;
+    }
+
     public async Task<string?> GenerateTitleAsync(Conversation conversation)
     {
         var messages = conversation.CopyMessages();

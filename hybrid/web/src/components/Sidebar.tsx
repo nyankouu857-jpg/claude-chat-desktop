@@ -1,9 +1,49 @@
 import { Archive, ArchiveRestore, Bot, ChartColumn, Shapes, Keyboard, ChevronRight, CircleArrowUp, EllipsisVertical, Folder as FolderIcon, FolderInput, FolderOpen, LoaderCircle, MessagesSquare, PanelLeft, Pencil, Plug, Plus, Settings, Star, Trash, Workflow, X } from "lucide-react";
-import { useState } from "react";
-import { archiveConversation, askConfirm, deleteConversation, installUpdate, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
-import { setState, useStore } from "../store";
+import { useEffect, useMemo, useState } from "react";
+import { archiveConversation, askConfirm, budgetView, confirmDeleteConversations, deleteConversation, installUpdate, setTags, moveConversation, navigate, openPath, openSettings, renameConversation, starConversation, toggleSidebar } from "../actions";
+import { on } from "../bridge";
+import { setState, useStore, type AppState } from "../store";
 import type { ChatStatus, ConversationSummary } from "../types";
 import { Dialog, Dropdown, MenuItem } from "./ui";
+
+// 料金の動きは応答の終わりに知らせが来る。それとは別に、日付が変わったときのためにときどき読み直す
+const BUDGET_REFRESH_MS = 60_000;
+// これを超えたら色を変えて、上限が近いと分かるようにする
+const BUDGET_WARN_RATIO = 0.8;
+
+function BudgetGauge() {
+  const [budget, setBudget] = useState<Awaited<ReturnType<typeof budgetView>>>();
+  const settingsBudget = useStore((s: AppState) => s.settings?.budget);
+  useEffect(() => {
+    const load = async () => setBudget(await budgetView());
+    void load();
+    const timer = setInterval(() => void load(), BUDGET_REFRESH_MS);
+    const off = on("conversations.changed", () => void load());
+    return () => {
+      clearInterval(timer);
+      off();
+    };
+  }, [settingsBudget?.dailyLimitUsd, settingsBudget?.monthlyLimitUsd]);
+  if (!budget) return null;
+  const row = (label: string, spent: number, limit: number) => {
+    const ratio = limit > 0 ? Math.min(1, spent / limit) : 0;
+    return (
+      <div key={label}>
+        <div className="row">
+          <span className="label">{label}</span>
+          <span>${spent.toFixed(2)}{limit > 0 ? ` / $${limit}` : ""}</span>
+        </div>
+        {limit > 0 && <div className={`bar${ratio >= BUDGET_WARN_RATIO ? " near" : ""}`}><span style={{ width: `${ratio * 100}%` }} /></div>}
+      </div>
+    );
+  };
+  return (
+    <button type="button" className="budget-gauge" title="使用量と料金を開く" onClick={() => openSettings("usage")}>
+      {row("今日", budget.todayUsd, budget.dailyLimitUsd)}
+      {row("今月", budget.monthUsd, budget.monthlyLimitUsd)}
+    </button>
+  );
+}
 
 export const STATUS_LABELS: Record<ChatStatus, string> = {
   running: "応答中",
@@ -81,7 +121,7 @@ export function ConversationMenu({ summary, onRename, onMove, align = "right" }:
           )}
           <MenuItem icon={<Trash size={16} />} danger onClick={() => {
             close();
-            void (async () => { if (await askConfirm("チャットを削除", `「${summary.title}」を削除しますか? この操作は取り消せません。`)) await deleteConversation(summary.id); })();
+            void (async () => { if (await confirmDeleteConversations([summary.id], `「${summary.title}」`)) await deleteConversation(summary.id); })();
           }}>削除</MenuItem>
         </>
       )}
@@ -107,6 +147,40 @@ export function RenameDialog({ summary, onClose }: { summary: { id: string; titl
       }
     >
       <input className="input" autoFocus value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && save()} />
+    </Dialog>
+  );
+}
+
+// カンマか読点で区切って入力する。今ある目印を押すと足せる
+export function TagsDialog({ summary, onClose }: { summary: { id: string; tags?: string[] }; onClose: () => void }) {
+  const [text, setText] = useState((summary.tags ?? []).join(", "));
+  const summaries = useStore((s) => s.summaries);
+  const known = useMemo(() => [...new Set(summaries.flatMap((c) => c.tags ?? []))].sort(), [summaries]);
+  const parse = (value: string) => value.split(/[,、]/).map((t) => t.trim()).filter(Boolean);
+  const save = async () => {
+    await setTags(summary.id, parse(text));
+    onClose();
+  };
+  const current = parse(text);
+  return (
+    <Dialog
+      title="タグを編集"
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="button ghost" onClick={onClose}>キャンセル</button>
+          <button type="button" className="button primary" onClick={save}>保存</button>
+        </>
+      }
+    >
+      <input className="input" autoFocus placeholder="例: 仕事, 調べ物" value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && save()} />
+      {known.length > 0 && (
+        <div className="tag-row">
+          {known.filter((t) => !current.includes(t)).map((t) => (
+            <button key={t} type="button" className="tag-chip" onClick={() => setText([...current, t].join(", "))}>+ {t}</button>
+          ))}
+        </div>
+      )}
     </Dialog>
   );
 }
@@ -166,7 +240,10 @@ export function Sidebar() {
   const starredProjects = folders.filter((f) => f.starred && !f.archived);
   const starred = roots.filter((s) => s.starred);
   // claude.ai と同じく、プロジェクトのチャットも最近の項目に並べる
-  const recents = roots.filter((s) => !s.starred);
+  // 目印で絞り込む。絞り込んでいる間はスター付きも含めて、その目印のものだけを出す
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const allTags = [...new Set(roots.flatMap((s) => s.tags ?? []))].sort();
+  const recents = tagFilter ? roots.filter((s) => s.tags?.includes(tagFilter)) : roots.filter((s) => !s.starred);
   const displayName = profile?.fullName || profile?.nickname || "あなた";
 
   const updateBanner = update && (
@@ -256,7 +333,7 @@ export function Sidebar() {
         </button>
       </div>
       <div className="sidebar-scroll">
-        {(starred.length > 0 || starredProjects.length > 0) && (
+        {!tagFilter && (starred.length > 0 || starredProjects.length > 0) && (
           <>
             <div className="sidebar-section">スター付き</div>
             {starredProjects.map((f) => (
@@ -268,9 +345,17 @@ export function Sidebar() {
             {starred.map((s) => <ConversationTree key={s.id} summary={s} depth={0} activeId={activeId} childrenOf={childrenOf} />)}
           </>
         )}
-        {recents.length > 0 && <div className="sidebar-section">最近の項目</div>}
+        {allTags.length > 0 && (
+          <div className="tag-row sidebar-tags">
+            {allTags.map((t) => (
+              <button key={t} type="button" className={`tag-chip${tagFilter === t ? " on" : ""}`} onClick={() => setTagFilter(tagFilter === t ? null : t)}>{t}</button>
+            ))}
+          </div>
+        )}
+        {recents.length > 0 && <div className="sidebar-section">{tagFilter ? `タグ: ${tagFilter}` : "最近の項目"}</div>}
         {recents.map((s) => <ConversationTree key={s.id} summary={s} depth={0} activeId={activeId} childrenOf={childrenOf} />)}
       </div>
+      <BudgetGauge />
       {updateBanner}
       {userMenu}
     </nav>

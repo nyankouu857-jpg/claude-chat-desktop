@@ -237,6 +237,14 @@ public sealed class UsageLedger(AppPaths paths)
     // 画面のランキングに出す数
     const int TopConversations = 10;
 
+    public async Task<List<UsageRecord>> AllAsync()
+    {
+        var table = await GetPricingAsync();
+        var records = await ReadAllAsync();
+        foreach (var r in records) r.CostUsd = table.Cost(r);
+        return records;
+    }
+
     public async Task<JsonObject> SummaryAsync(TimeZoneInfo zone)
     {
         var table = await GetPricingAsync();

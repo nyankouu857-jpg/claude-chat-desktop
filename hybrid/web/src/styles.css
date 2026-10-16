@@ -1221,3 +1221,31 @@ kbd { font-family: var(--font-mono); font-size: 12px; padding: 1px 6px; border: 
 .top-conversations .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .top-conversations .cost { font-variant-numeric: tabular-nums; }
 .top-conversations .deleted { color: var(--text-400); }
+.confirm-message { white-space: pre-line; }
+.compare-view { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.compare-title { padding: 12px 20px; color: var(--text-300); font-size: 13.5px; border-bottom: 0.5px solid var(--border); }
+.compare-columns { flex: 1; display: grid; min-height: 0; }
+.compare-column { display: flex; flex-direction: column; min-height: 0; border-right: 0.5px solid var(--border); }
+.compare-column:last-child { border-right: none; }
+.compare-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 0.5px solid var(--border); }
+.compare-model { font-weight: 600; }
+.compare-scroll { flex: 1; overflow-y: auto; }
+.compare-scroll .message-list { padding: 12px 14px; }
+.changed-files { margin: 4px 0 8px; }
+.changed-files-body { padding: 6px 0 4px 20px; font-size: 13px; }
+.changed-files-body ul { margin: 0 0 8px; padding-left: 16px; }
+.changed-files-body li { margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.budget-gauge { margin: 4px 10px 6px; font-size: 12px; color: var(--text-300); display: grid; gap: 4px; }
+.budget-gauge .row { display: flex; align-items: center; gap: 6px; }
+.budget-gauge .label { flex: 1; }
+.budget-gauge .bar { height: 4px; border-radius: 2px; background: var(--bg-300); overflow: hidden; }
+.budget-gauge .bar > span { display: block; height: 100%; background: var(--accent); }
+.budget-gauge .bar.near > span { background: var(--danger); }
+.offline-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-300); padding: 2px 8px; border-radius: 12px; background: var(--bg-300); }
+.compare-pick { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 12px 8px; }
+.tag-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.sidebar-tags { margin: 4px 10px 2px; }
+.tag-chip { font-size: 11.5px; padding: 1px 8px; border-radius: 10px; background: var(--bg-300); color: var(--text-300); border: 0.5px solid transparent; }
+.tag-chip:hover:not(.static) { color: var(--text-100); }
+.tag-chip.on { border-color: var(--accent); color: var(--accent); }
+.tag-chip.static { cursor: default; }

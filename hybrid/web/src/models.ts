@@ -32,7 +32,10 @@ export const OTHER_MODELS: ModelInfo[] = [
   { id: "claude-sonnet-4-6", label: "Sonnet 4.6", defaultEffort: "high", efforts: WITHOUT_XHIGH },
 ];
 
-export const ALL_MODELS = [...MODELS, ...OTHER_MODELS];
+// 送るたびに、発言の難しさで Haiku / Sonnet / Opus から選ぶ
+export const AUTO_MODEL: ModelInfo = { id: "auto", label: "自動", description: "質問の難しさで Haiku / Sonnet / Opus を選ぶ", defaultEffort: "medium" };
+
+export const ALL_MODELS = [...MODELS, ...OTHER_MODELS, AUTO_MODEL];
 
 export const defaultEffortOf = (model: string): Effort => ALL_MODELS.find((m) => m.id === model)?.defaultEffort ?? "medium";
 

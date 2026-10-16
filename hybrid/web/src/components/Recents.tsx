@@ -1,6 +1,6 @@
 import { Plus, Search, Star } from "lucide-react";
 import { useEffect, useState } from "react";
-import { archiveConversation, askConfirm, deleteConversation, navigate, searchConversations } from "../actions";
+import { archiveConversation, confirmDeleteConversations, deleteConversation, navigate, searchConversations } from "../actions";
 import { useStore } from "../store";
 import type { ConversationSummary } from "../types";
 import { ConversationMenu, MoveDialog, RenameDialog } from "./Sidebar";
@@ -43,6 +43,8 @@ export function Recents() {
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const q = query.trim().toLowerCase();
+  const [tag, setTag] = useState<string | null>(null);
+  const allTags = [...new Set(summaries.flatMap((s) => s.tags ?? []))].sort();
 
   // claude.ai と同じく本文まで探す。題名と最初の発言はすぐに絞り込み、本文の分は届いたら足す
   useEffect(() => {
@@ -56,9 +58,10 @@ export function Recents() {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [q]);
 
+  const tagged = tag ? summaries.filter((s) => s.tags?.includes(tag)) : summaries;
   const filtered = q
-    ? summaries.filter((s) => s.title.toLowerCase().includes(q) || s.preview.toLowerCase().includes(q) || (bodyHits && s.id in bodyHits))
-    : summaries;
+    ? tagged.filter((s) => s.title.toLowerCase().includes(q) || s.preview.toLowerCase().includes(q) || (bodyHits && s.id in bodyHits))
+    : tagged;
   const toggle = (id: string, on: boolean) => setSelected((current) => {
     const next = new Set(current);
     if (on) next.add(id);
@@ -66,7 +69,7 @@ export function Recents() {
     return next;
   });
   const deleteSelected = async () => {
-    if (!(await askConfirm("チャットを削除", `${selected.size} 件のチャットを削除しますか? この操作は取り消せません。`))) return;
+    if (!(await confirmDeleteConversations([...selected], `${selected.size} 件のチャット`))) return;
     for (const id of selected) await deleteConversation(id);
     setSelected(new Set());
     setSelecting(false);
@@ -88,8 +91,15 @@ export function Recents() {
           <Search size={16} />
           <input autoFocus placeholder="チャットを検索..." value={query} onChange={(e) => setQuery(e.target.value)} />
         </label>
+        {allTags.length > 0 && (
+          <div className="tag-row">
+            {allTags.map((t) => (
+              <button key={t} type="button" className={`tag-chip${tag === t ? " on" : ""}`} onClick={() => setTag(tag === t ? null : t)}>{t}</button>
+            ))}
+          </div>
+        )}
         <div className="recent-toolbar">
-          <span className="recent-count">{q ? `${filtered.length} 件見つかりました` : `${summaries.length} 件の${showArchived ? "アーカイブしたチャット" : "チャット"}`}</span>
+          <span className="recent-count">{q || tag ? `${filtered.length} 件見つかりました` : `${summaries.length} 件の${showArchived ? "アーカイブしたチャット" : "チャット"}`}</span>
           {(archivedCount > 0 || showArchived) && (
             <button type="button" className="link-button" onClick={() => { setShowArchived((v) => !v); setSelected(new Set()); }}>
               {showArchived ? "チャットに戻る" : `アーカイブ (${archivedCount})`}

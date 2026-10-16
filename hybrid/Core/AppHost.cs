@@ -28,6 +28,10 @@ public interface IPlatform
     string? Commit { get; }
     // 取り出した新しい exe と今の exe を入れ替えて再起動する。できなかったら理由を返す
     string? InstallUpdate(string newExePath);
+    // 画面の範囲を選んで撮り、PNG を base64 で返す。撮らずにやめたら null。できない環境では理由を投げる
+    Task<string?> CaptureScreenAsync(CancellationToken cancellationToken);
+    // 会話を別の窓で開く。できなかったら理由を返す
+    string? OpenChatWindow(string conversationId);
 }
 
 // 画面 (WebView2 やブラウザ) とのやり取りを一手に引き受ける。通信路には依存しない
@@ -61,6 +65,8 @@ public sealed class AppHost : IAsyncDisposable
     readonly HttpClient http = new();
     readonly Updater updater;
     readonly Housekeeping housekeeping;
+    readonly SessionFiles sessionFiles;
+    readonly Uploads uploads;
     // 画面を読み直すたびに確かめ直さない
     int updateChecked;
 
@@ -82,6 +88,12 @@ public sealed class AppHost : IAsyncDisposable
         hub.DeleteConversation = async id => await DeleteConversationAsync(id);
         updater = new Updater(platform, http);
         hub.Alert = Alert;
+        uploads = new Uploads(paths);
+        sessionFiles = new SessionFiles(paths, conversations)
+        {
+            CanShare = hub.CanMessageAsync,
+            Changed = rootId => Emit("session.changed", new JsonObject { ["conversationId"] = rootId }),
+        };
         housekeeping = new Housekeeping(paths, settings, conversations, hub, () => Emit("conversations.changed", null),
             problem => platform.Notify("バックアップに失敗しました", problem));
         workflows = new WorkflowRunner(hub, settings, conversations, events);
@@ -103,6 +115,7 @@ public sealed class AppHost : IAsyncDisposable
             new AgentToolProvider(hub, conversations, folders, settings, workflows),
             new ChatSearchToolProvider(conversations, settings),
             new TodoToolProvider(),
+            new SessionToolProvider(sessionFiles),
             new ArtifactToolProvider(settings, conversations, async conversation =>
             {
                 await conversations.SaveAsync(conversation, touch: false);
@@ -167,11 +180,21 @@ public sealed class AppHost : IAsyncDisposable
         "conversations.get" => GetConversationAsync(Str(p, "id")),
         "conversations.rename" => UpdateConversationAsync(Str(p, "id"), c => c.Title = NonEmpty(Str(p, "title"))),
         "conversations.archive" => UpdateConversationAsync(Str(p, "id"), c => c.Archived = (bool?)p["archived"] == true),
+        "conversations.setTags" => UpdateConversationAsync(Str(p, "id"), c => c.Tags = CleanTags(p["tags"] as JsonArray)),
+        "usage.exportCsv" => ExportUsageCsvAsync(),
         "app.backup" => BackupAsync(),
         "app.backupStatus" => BackupStatusAsync(),
         "conversations.star" => UpdateConversationAsync(Str(p, "id"), c => c.Starred = (bool?)p["starred"] == true),
         "conversations.move" => MoveConversationAsync(Str(p, "id"), (string?)p["folderId"]),
         "conversations.delete" => DeleteConversationAsync(Str(p, "id")),
+        "session.list" => SessionListAsync(Str(p, "conversationId")),
+        "conversations.fork" => ForkConversationAsync(Str(p, "id"), (int?)p["upTo"] ?? throw new InvalidOperationException("upTo がありません")),
+        "chat.changedFiles" => Task.FromResult<JsonNode?>(ChangedFilesView(Str(p, "conversationId"))),
+        "chat.undoFiles" => UndoFilesAsync(Str(p, "conversationId"), (int?)p["humanIndex"] ?? throw new InvalidOperationException("humanIndex がありません")),
+        "screen.capture" => CaptureScreenAsync(),
+        "app.openChatWindow" => OpenChatWindowAsync(Str(p, "conversationId")),
+        "usage.budget" => BudgetViewAsync(),
+        "session.open" => SessionOpenAsync(Str(p, "conversationId"), (string?)p["fileId"]),
         "conversations.search" => SearchConversationsAsync(Str(p, "query")),
         "folders.list" => ListFoldersAsync(),
         "folders.save" => SaveFolderAsync(p),
@@ -592,10 +615,151 @@ public sealed class AppHost : IAsyncDisposable
         foreach (var run in workflows.ForParent(id)) workflows.Stop(run.Id);
         foreach (var child in await DescendantsAsync(id)) hub.Stop(child.Id);
         hub.Stop(id);
+        // 親のフォルダを子と共有しているので、消すのは親を消したときだけ
+        if (await conversations.GetAsync(id) is { } deleting) await sessionFiles.DeleteFolderAsync(deleting);
         await conversations.DeleteAsync(id);
+        if (await secrets.GetAsync(SecretStore.ApiKey) is { } apiKey) await uploads.ReleaseAsync(hub.GetClient(apiKey), id);
         hub.Forget(id);
         checkpoints.Forget(id);
         Emit("conversations.changed", null);
+        return null;
+    }
+
+    // 一覧に並べて読める長さと数に抑える
+    const int MaxTags = 10;
+    const int MaxTagLength = 20;
+
+    static List<string> CleanTags(JsonArray? tags) => (tags ?? [])
+        .Select(t => ((string?)t ?? "").Trim())
+        .Where(t => t.Length > 0)
+        .Select(t => t.Length > MaxTagLength ? t[..MaxTagLength] : t)
+        .Distinct()
+        .Take(MaxTags)
+        .ToList();
+
+    // Excel でそのまま開けるよう、BOM 付きの UTF-8 で書く
+    async Task<JsonNode?> ExportUsageCsvAsync()
+    {
+        var titles = (await conversations.ListAsync()).ToDictionary(c => c.Id, c => c.Title);
+        var text = new System.Text.StringBuilder("日時,会話,種類,モデル,入力,出力,キャッシュ書き込み,キャッシュ書き込み (1 時間),キャッシュ読み込み,Web 検索,バッチ,高速,料金 (USD)\r\n");
+        foreach (var r in (await ledger.AllAsync()).OrderBy(r => r.At))
+        {
+            var owner = r.ParentId ?? r.ConversationId;
+            var title = owner is null ? "(シークレット)" : titles.GetValueOrDefault(owner, "(削除したチャット)");
+            string[] cells =
+            [
+                r.At.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), title, r.Kind, r.Model,
+                r.Input.ToString(), r.Output.ToString(), r.CacheWrite.ToString(), r.CacheWrite1h.ToString(), r.CacheRead.ToString(), r.WebSearches.ToString(),
+                r.Batch ? "1" : "0", r.Fast ? "1" : "0", r.CostUsd?.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture) ?? "",
+            ];
+            text.Append(string.Join(",", cells.Select(CsvCell))).Append("\r\n");
+        }
+        var path = Path.Combine(paths.ExportsDir, $"usage-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
+        Directory.CreateDirectory(paths.ExportsDir);
+        await File.WriteAllTextAsync(path, text.ToString(), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        return new JsonObject { ["path"] = path };
+    }
+
+    // 先頭の = や + は Excel が式として動かすので、文字として扱わせる
+    static string CsvCell(string value)
+    {
+        if (value.Length > 0 && "=+-@\t\r".Contains(value[0])) value = "'" + value;
+        return value.IndexOfAny([',', '"', '\n', '\r']) >= 0 ? $"\"{value.Replace("\"", "\"\"")}\"" : value;
+    }
+
+    async Task<JsonNode?> ForkConversationAsync(string id, int upTo)
+    {
+        var source = await RequireConversationAsync(id);
+        if (source.Incognito || source.ParentId is not null) throw new InvalidOperationException("シークレットチャットとサブエージェントは分けられません");
+        var fork = source.ForkUpTo(upTo);
+        conversations.Adopt(fork);
+        await uploads.ShareAsync(source.Id, fork.Id);
+        await conversations.SaveAsync(fork);
+        Emit("conversations.changed", null);
+        return fork.ToWire();
+    }
+
+    JsonNode ChangedFilesView(string conversationId) =>
+        new JsonObject(checkpoints.ChangedFiles(conversationId).Select(t => KeyValuePair.Create(t.Key.ToString(), (JsonNode?)new JsonArray(t.Value.Select(p => (JsonNode)p).ToArray()))));
+
+    // 返答で変えたファイルを、会話は残したまま元に戻す。後の返答で変えた分も一緒に戻る
+    async Task<JsonNode?> UndoFilesAsync(string conversationId, int humanIndex)
+    {
+        var conversation = await RequireConversationAsync(conversationId);
+        var restored = await hub.ExclusiveAsync(conversation, async _ =>
+        {
+            var result = checkpoints.Restore(conversation.Id, humanIndex);
+            var paths = (result["restored"] as JsonArray ?? []).Select(n => (string?)n).OfType<string>().ToList();
+            if (paths.Count > 0)
+            {
+                // 戻したことを Claude が知らないと、次の返答で書いたはずの中身を前提にしてしまう
+                conversation.Append(new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = $"<files-reverted>\nユーザーが次のファイルを、変更する前の状態に戻しました:\n{string.Join("\n", paths)}\n</files-reverted>" }),
+                });
+                await conversations.SaveAsync(conversation);
+            }
+            return result;
+        });
+        Emit("conversations.changed", null);
+        return new JsonObject { ["conversation"] = conversation.ToWire(), ["files"] = restored };
+    }
+
+    async Task<JsonNode?> OpenChatWindowAsync(string conversationId)
+    {
+        await RequireConversationAsync(conversationId);
+        if (platform.OpenChatWindow(conversationId) is { } problem) throw new InvalidOperationException(problem);
+        return null;
+    }
+
+    async Task<JsonNode?> CaptureScreenAsync()
+    {
+        // 範囲を選ぶのを待つ上限。忘れて放っておいても待ち続けない
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        return await platform.CaptureScreenAsync(timeout.Token);
+    }
+
+    async Task<JsonNode?> BudgetViewAsync()
+    {
+        var budget = (await settings.GetAsync()).Budget;
+        var (today, month) = await ledger.SpentAsync();
+        return new JsonObject
+        {
+            ["todayUsd"] = today,
+            ["monthUsd"] = month,
+            ["dailyLimitUsd"] = budget.DailyLimitUsd,
+            ["monthlyLimitUsd"] = budget.MonthlyLimitUsd,
+        };
+    }
+
+    async Task<JsonNode?> SessionListAsync(string conversationId)
+    {
+        var conversation = await RequireConversationAsync(conversationId);
+        var root = await sessionFiles.RootOfAsync(conversation);
+        var list = await sessionFiles.ListAsync(conversation);
+        return new JsonObject
+        {
+            ["rootId"] = root.Id,
+            ["path"] = sessionFiles.DirOf(root),
+            // 消すときの確認は、この会話が持つフォルダのファイルだけ数える
+            ["own"] = conversation.ParentId is null,
+            ["files"] = new JsonArray(list.OrderBy(f => f.Path).Select(f => (JsonNode)SessionFiles.ToWire(f)).ToArray()),
+        };
+    }
+
+    async Task<JsonNode?> SessionOpenAsync(string conversationId, string? fileId)
+    {
+        var conversation = await RequireConversationAsync(conversationId);
+        if (fileId is null)
+        {
+            var dir = sessionFiles.DirOf(await sessionFiles.RootOfAsync(conversation));
+            Directory.CreateDirectory(dir);
+            platform.OpenPath(dir);
+            return null;
+        }
+        var (_, full) = await sessionFiles.FindAsync(conversation, fileId, null);
+        platform.OpenPath(full);
         return null;
     }
 
@@ -718,6 +882,7 @@ public sealed class AppHost : IAsyncDisposable
         conversation.Archived = false;
         await ApplyModeAsync(conversation, (string?)p["permissionMode"]);
         content = await PrepareContentAsync(conversation, content);
+        content = await UploadLargeAsync(conversation, content);
         var message = new JsonObject { ["role"] = "user", ["content"] = content };
         if ((bool?)p["research"] == true)
         {
@@ -726,14 +891,59 @@ public sealed class AppHost : IAsyncDisposable
         else
         {
             var options = await OptionsAsync(conversation, p);
+            string? routed = null;
+            if ((string?)p["model"] == ModelCatalog.AutoModel)
+            {
+                routed = await RouteAsync(conversation, WireText.Of(content));
+                // 判定に使ったモデル名で指示を作り直す。会話の設定には「自動」を残し、次の発言も振り分ける
+                var request = (JsonObject)conversation.Options!.DeepClone();
+                request["model"] = routed;
+                options = await hub.OptionsForAsync(conversation, request);
+            }
             await hub.StartAsync(conversation, () =>
             {
                 conversation.Append(message);
                 return Task.CompletedTask;
             }, options);
+            if (routed is not null) hub.Notice(conversation.Id, $"自動で {ModelCatalog.DisplayName(routed)} を選びました");
         }
         return new JsonObject { ["conversationId"] = conversation.Id };
     }
+
+    // 上げられなかったら、これまでどおり中身ごと送る
+    async Task<JsonNode> UploadLargeAsync(Conversation conversation, JsonNode content)
+    {
+        if (await secrets.GetAsync(SecretStore.ApiKey) is not { } apiKey) return content;
+        try
+        {
+            using var timeout = new CancellationTokenSource(UploadTimeout);
+            return await uploads.ReplaceLargeAsync(hub.GetClient(apiKey), conversation, content.DeepClone(), timeout.Token);
+        }
+        catch (Exception e) when (e is not InvalidOperationException)
+        {
+            return content;
+        }
+    }
+
+    // 大きな PDF でも回線が遅いときに送信が止まって見えない長さ
+    static readonly TimeSpan UploadTimeout = TimeSpan.FromMinutes(2);
+
+    // 振り分けに失敗しても送るのは止めず、前回のモデルか標準のモデルで答える
+    async Task<string> RouteAsync(Conversation conversation, string request)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(RouteTimeout);
+            return await (await hub.EngineAsync()).RouteModelAsync(conversation, request, timeout.Token);
+        }
+        catch (Exception e) when (e is not InvalidOperationException)
+        {
+            return conversation.Model ?? "claude-sonnet-5-5";
+        }
+    }
+
+    // 振り分けで送信が待たされすぎないように
+    static readonly TimeSpan RouteTimeout = TimeSpan.FromSeconds(10);
 
     async Task<ChatOptions> OptionsAsync(Conversation conversation, JsonObject p)
     {

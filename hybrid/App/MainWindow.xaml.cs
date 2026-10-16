@@ -20,6 +20,9 @@ public partial class MainWindow : Window
     readonly WindowsPlatform platform;
     readonly Dictionary<string, string> resources;
     AppHost? host;
+    CoreWebView2Environment? environment;
+    // 画面を出している WebView。別の窓で開いたチャットにも同じ知らせを流す
+    readonly List<CoreWebView2> views = [];
     // トレイの「終了」や更新など、本当に終わらせるとき。× はトレイにしまうだけ
     bool exiting;
     // 片付けを待つ上限。止まったものを待ち続けて、閉じたはずのアプリを残さない
@@ -115,7 +118,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(paths.CacheDir, "webview2"));
+            environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(paths.CacheDir, "webview2"));
             await Browser.EnsureCoreWebView2Async(environment);
         }
         catch (WebView2RuntimeNotFoundException)
@@ -129,6 +132,25 @@ public partial class MainWindow : Window
         }
 
         var core = Browser.CoreWebView2;
+        Configure(core);
+        views.Add(core);
+
+        host = new AppHost(paths, new DpapiProtector(), platform, json =>
+        {
+            // UI スレッドのキューは先入れ先出しなので、通知の順番が保たれる。返事も全部の窓に流し、ID の合う窓だけが受け取る
+            Dispatcher.InvokeAsync(() =>
+            {
+                foreach (var view in views) view.PostWebMessageAsString(json);
+            });
+        });
+        platform.ChatWindowOpener = OpenChatWindow;
+        await host.StartAsync();
+        core.Navigate($"{AppOrigin}/index.html");
+    }
+
+    // メインの窓と別の窓の WebView に、同じ制限と通り道を付ける
+    void Configure(CoreWebView2 core)
+    {
         core.Settings.IsStatusBarEnabled = false;
 #if DEBUG
         core.Settings.AreDevToolsEnabled = true;
@@ -176,12 +198,6 @@ public partial class MainWindow : Window
             e.Cancel = true;
             if (e.Uri.StartsWith("http://") || e.Uri.StartsWith("https://")) WindowsPlatform.OpenUrl(e.Uri);
         };
-
-        host = new AppHost(paths, new DpapiProtector(), platform, json =>
-        {
-            // UI スレッドのキューは先入れ先出しなので、通知の順番が保たれる
-            Dispatcher.InvokeAsync(() => core.PostWebMessageAsString(json));
-        });
         core.WebMessageReceived += (_, e) =>
         {
             // アプリの画面以外から中身を操作させない
@@ -190,8 +206,31 @@ public partial class MainWindow : Window
             // 重い処理で画面が固まらないよう、受け取ったら UI スレッドから離す
             if (host is { } current) _ = Task.Run(() => current.HandleAsync(message));
         };
-        await host.StartAsync();
-        core.Navigate($"{AppOrigin}/index.html");
+    }
+
+    // 1 つの会話だけを出す窓。サイドバーは出さず、知らせはメインの窓と同じものを受け取る
+    string? OpenChatWindow(string conversationId)
+    {
+        if (environment is null || host is null) return "まだ起動の途中です";
+        if (!Guid.TryParse(conversationId, out _)) return "チャットの ID が不正です";
+        var browser = new Microsoft.Web.WebView2.Wpf.WebView2 { DefaultBackgroundColor = Browser.DefaultBackgroundColor };
+        var chatWindow = new Window { Title = "ClaudeChat", Width = 900, Height = 820, Content = browser, Background = Background, Icon = Icon };
+        CoreWebView2? core = null;
+        chatWindow.Loaded += async (_, _) =>
+        {
+            await browser.EnsureCoreWebView2Async(environment);
+            core = browser.CoreWebView2;
+            Configure(core);
+            views.Add(core);
+            core.Navigate($"{AppOrigin}/index.html?chat={conversationId}");
+        };
+        chatWindow.Closed += (_, _) =>
+        {
+            if (core is not null) views.Remove(core);
+            browser.Dispose();
+        };
+        chatWindow.Show();
+        return null;
     }
 
     // アーティファクトのページが上の窓に読み込まれると、画面と同じ扱いで中身を操作できてしまう。画面そのものだけを通す

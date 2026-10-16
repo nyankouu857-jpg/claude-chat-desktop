@@ -1,6 +1,6 @@
-import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FastForward, FileOutput, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, Mail, MessageSquare, PanelsTopLeft, Pencil, Play, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
+import { Bell, Bot, CalendarClock, Check, Quote, ChevronLeft, ChevronRight, Code, Copy, Download, ExternalLink, FastForward, FileOutput, FilePen, GitFork, Undo2, FolderOpen, Globe, History, Inbox, Link, ListTree, LoaderCircle, Mail, MessageSquare, PanelsTopLeft, Pencil, Play, Plug, RotateCcw, Square, TerminalSquare, TriangleAlert, Webhook, Workflow, X } from "lucide-react";
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
-import { answer, approve, edit, navigate, openArtifact, openFile, openMail, retry, setQuote, stopWorkflow, switchBranch, textOf } from "../actions";
+import { answer, approve, askConfirm, changedFiles, edit, forkConversation, navigate, openArtifact, openFile, openMail, retry, setQuote, stopWorkflow, switchBranch, textOf, undoFiles } from "../actions";
 import { MODELS } from "../models";
 import { findBuiltin } from "../builtins";
 import { renderMarkdown } from "../markdown";
@@ -149,7 +149,7 @@ export const Markdown = memo(function Markdown({ text, cites }: { text: string; 
 });
 
 // ほかのチャットやアプリから届いた発言の印。中身はタグで包まれている
-const PEER_TAGS = ["message", "task", "task-notification", "idle-notification", "scheduled-task", "hook-feedback", "compact-summary", "command", "hurry", "resumed"];
+const PEER_TAGS = ["message", "task", "task-notification", "idle-notification", "scheduled-task", "hook-feedback", "compact-summary", "command", "hurry", "resumed", "files-reverted"];
 const PEER_PATTERN = new RegExp(`^<(${PEER_TAGS.join("|")})((?:\\s+[\\w-]+="[^"]*")*)\\s*>\\n?([\\s\\S]*?)\\n?</\\1>\\s*$`);
 
 export interface PeerMessage {
@@ -182,6 +182,7 @@ function peerHeader(peer: PeerMessage): { icon: ReactNode; title: string } {
     case "command": return { icon: <TerminalSquare size={15} />, title: a.name ?? "コマンド" };
     case "hurry": return { icon: <FastForward size={15} />, title: "急ぐよう伝えました" };
     case "resumed": return { icon: <Play size={15} />, title: "アプリの再起動後に続きから再開しました" };
+    case "files-reverted": return { icon: <Undo2 size={15} />, title: "変えたファイルを元に戻しました" };
     default: return { icon: <Inbox size={15} />, title: peer.tag };
   }
 }
@@ -822,7 +823,39 @@ function RetryMenu({ conversationId, human }: { conversationId: string; human: n
 // useStore の戻り値が毎回別の配列だと再描画が止まらなくなるので、空は使い回す
 const NO_NOTICES: string[] = [];
 
-function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, { kind: "assistant" }>; conversationId: string; isLast: boolean }) {
+// フォルダ操作でこの返答が変えたファイル。まとめて元に戻せる
+function ChangedFiles({ conversationId, human, files, later, onUndone }: { conversationId: string; human: number; files: string[]; later: number; onUndone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const baseName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+  return (
+    <div className={`changed-files${open ? " open" : ""}`}>
+      <button type="button" className="thinking-toggle" onClick={() => setOpen((o) => !o)}>
+        <FilePen size={14} />
+        <span>この返答で変えたファイル ({files.length})</span>
+        <ChevronRight size={14} className="chevron" />
+      </button>
+      {open && (
+        <div className="changed-files-body">
+          <ul>{files.map((f) => <li key={f} title={f}>{baseName(f)} <span className="field-hint">{f}</span></li>)}</ul>
+          <button type="button" className="button small" onClick={async () => {
+            const also = later > 0 ? `\n\nこれより後の返答で変えたファイル (${later} 個) も一緒に戻ります。` : "";
+            if (!(await askConfirm("ファイルを元に戻す", `この返答で変える前の状態に戻します。今のファイルはごみ箱に移します。会話はそのまま残ります。${also}`, "元に戻す"))) return;
+            if (await undoFiles(conversationId, human)) onUndone();
+          }}><Undo2 size={14} /> まとめて元に戻す</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AssistantTurn({ turn, conversationId, isLast, forkAt, changed }: {
+  turn: Extract<Turn, { kind: "assistant" }>;
+  conversationId: string;
+  isLast: boolean;
+  // ここまでを新しいチャットに分けるときの、写す発言の数
+  forkAt?: number;
+  changed?: { files: string[]; later: number; reload: () => void };
+}) {
   const showThinking = useStore((s) => s.settings?.chat.showThinking ?? true);
   const lastTurn: { seconds: number; tokens: number } | undefined = useStore((s) => (isLast ? (s.conversations[conversationId] as any)?._lastTurn : undefined));
   const notices: string[] = useStore((s) => (isLast ? s.live[conversationId]?.notices ?? (s.conversations[conversationId] as any)?._notices ?? NO_NOTICES : NO_NOTICES));
@@ -894,6 +927,9 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
     <div className="assistant-turn">
       {elements}
       {notices.map((n: string, i: number) => <div key={`n${i}`} className="notice">{n}</div>)}
+      {!live && changed && changed.files.length > 0 && (
+        <ChangedFiles conversationId={conversationId} human={turn.human} files={changed.files} later={changed.later} onUndone={changed.reload} />
+      )}
       <div className="assistant-footer">
         {/* claude.ai と同じく、マークは最新の回答の下にだけ出す */}
         {(isLast || live) && <span className={`footer-spark${live ? " live" : ""}`}><Spark size={live ? 22 : 18} spinning={!!live} /></span>}
@@ -902,6 +938,11 @@ function AssistantTurn({ turn, conversationId, isLast }: { turn: Extract<Turn, {
             {forkView && <BranchNav conversationId={conversationId} index={turn.start} fork={forkView} />}
             <CopyButton text={fullText} />
             {turn.human >= 0 && <RetryMenu conversationId={conversationId} human={turn.human} />}
+            {forkAt !== undefined && (
+              <button type="button" className="icon-button small" title="ここまでを新しいチャットに分ける" onClick={() => void forkConversation(conversationId, forkAt)}>
+                <GitFork size={15} />
+              </button>
+            )}
           </div>
         )}
         {live && <LiveTurnStatus live={live} />}
@@ -966,7 +1007,7 @@ function UserTurn({ turn, conversationId, running }: { turn: Extract<Turn, { kin
   return (
     <div className="user-turn">
       <div className="user-bubble">
-        {documents.map((doc, i) => <FileChip key={`d${i}`} name={doc.title || "添付ファイル"} kind={doc.source?.media_type === "application/pdf" ? "pdf" : "text"} />)}
+        {documents.map((doc, i) => <FileChip key={`d${i}`} name={doc.title || "添付ファイル"} kind={doc.source?.media_type === "application/pdf" || doc.source?.type === "file" ? "pdf" : "text"} />)}
         {images.map((img, i) => <img key={i} src={`data:${img.source.media_type};base64,${img.source.data}`} alt="" />)}
         {text && <div className="user-text">{text}</div>}
       </div>
@@ -1063,6 +1104,20 @@ export function MessageList({ conversationId }: { conversationId: string }) {
     return () => window.removeEventListener("chat-show-all", showAll);
   }, []);
   const showEarlier = useMemo(() => () => setShown((n) => n + TURN_WINDOW), []);
+  // 発言ごとにフォルダ操作で変えたファイル。返答が終わるたびに読み直す
+  const [changes, setChanges] = useState<Record<string, string[]>>({});
+  const [changesVersion, setChangesVersion] = useState(0);
+  const messageCount = conversation?.messages.length ?? 0;
+  useEffect(() => {
+    if (live) return;
+    let alive = true;
+    void (async () => {
+      const latest = await changedFiles(conversationId);
+      if (alive && latest) setChanges(latest);
+    })();
+    return () => { alive = false; };
+  }, [conversationId, messageCount, !!live, changesVersion]);
+  const reloadChanges = useMemo(() => () => setChangesVersion((v) => v + 1), []);
   if (!conversation) return <div className="loading"><LoaderCircle className="spin" /></div>;
   const lastAssistant = turns.map((t) => t.kind).lastIndexOf("assistant");
   // /compact の要約は履歴の外にあるので、要約した境目に出す。応答の途中で要約したときは、その応答の前に出す
@@ -1078,7 +1133,17 @@ export function MessageList({ conversationId }: { conversationId: string }) {
           {compaction && i === compactedAt && <CompactionBlock block={compaction} active={false} />}
           {turn.kind === "human"
             ? <UserTurn turn={turn} conversationId={conversationId} running={!!live} />
-            : <AssistantTurn turn={turn} conversationId={conversationId} isLast={i === lastAssistant} />}
+            : <AssistantTurn
+                turn={turn}
+                conversationId={conversationId}
+                isLast={i === lastAssistant}
+                forkAt={!conversation.incognito && !conversation.parentId && !turn.live ? (turns[i + 1]?.kind === "human" ? (turns[i + 1] as { index: number }).index : conversation.messages.length) : undefined}
+                changed={changes[String(turn.human)] ? {
+                  files: changes[String(turn.human)],
+                  later: Object.entries(changes).filter(([k]) => Number(k) > turn.human).reduce((n, [, v]) => n + v.length, 0),
+                  reload: reloadChanges,
+                } : undefined}
+              />}
         </Fragment>
       ))}
       {compaction && compactedAt === turns.length && <CompactionBlock block={compaction} active={false} />}

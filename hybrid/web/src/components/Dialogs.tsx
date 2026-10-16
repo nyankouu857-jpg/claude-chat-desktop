@@ -205,7 +205,7 @@ function ConfirmDialog({ dialog }: { dialog: Extract<DialogState, { kind: "confi
         </>
       }
     >
-      <p className="settings-desc">{dialog.message}</p>
+      <p className="settings-desc confirm-message">{dialog.message}</p>
     </Dialog>
   );
 }

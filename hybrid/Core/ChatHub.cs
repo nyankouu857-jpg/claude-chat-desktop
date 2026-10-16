@@ -121,6 +121,12 @@ public sealed class ChatHub(
         var depth = DepthOf(conversation);
         // 画面からの指定が無いとき (ほかのチャットからの通信など) は、その会話の直近の設定で動かす
         var source = request ?? conversation.Options ?? [];
+        // 「自動」は送るときに振り分ける。振り分けずに動き出したときは、前回選んだモデルで続ける
+        if ((string?)source["model"] == ModelCatalog.AutoModel)
+        {
+            source = (JsonObject)source.DeepClone();
+            source["model"] = conversation.Model ?? defaults.Model;
+        }
         var enabled = source["enabledSources"] is JsonArray list ? list.Select(n => (string?)n).OfType<string>().ToHashSet() : null;
         // サブエージェントはさらに子を作ったり、ほかのチャットを動かしたりしない
         if (depth > 0) enabled = (enabled ?? Tools.SourceNames().ToHashSet()).Where(s => s != AgentToolProvider.Source).ToHashSet();
@@ -408,6 +414,9 @@ public sealed class ChatHub(
             return Task.CompletedTask;
         }, options);
     }
+
+    public void Notice(string conversationId, string text) =>
+        EmitChatEvent(conversationId, new JsonObject { ["type"] = "notice", ["text"] = text });
 
     // 応答を止めずに、考えすぎている問い合わせだけをやり直させる
     public bool Hurry(string conversationId)

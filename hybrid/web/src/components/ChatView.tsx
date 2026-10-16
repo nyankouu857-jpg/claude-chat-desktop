@@ -1,11 +1,11 @@
-import { ArrowDown, ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, Ghost, GitBranch, ListTree, LoaderCircle, PanelRight, Pencil, Play, Square, Star, Trash, Workflow, X } from "lucide-react";
+import { AppWindow, Tag, ArrowDown, ArrowLeft, ChevronDown, FileDown, Folder as FolderIcon, FolderInput, Ghost, GitBranch, ListTree, LoaderCircle, PanelRight, Pencil, Play, Square, Star, Trash, Workflow, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { askConfirm, compact, deleteConversation, dismissInterrupted, exportConversation, navigate, resume, starConversation, stop, stopWorkflow, toggleInfoPanel } from "../actions";
+import { SINGLE_CHAT, askConfirm, compact, confirmDeleteConversations, deleteConversation, dismissInterrupted, exportConversation, navigate, openChatWindow, resume, starConversation, stop, stopWorkflow, toggleInfoPanel } from "../actions";
 import { setState, useStore } from "../store";
 import { Composer } from "./Composer";
 import { ChatSearch } from "./ChatSearch";
 import { MessageList } from "./Messages";
-import { MoveDialog, RenameDialog, STATUS_LABELS, StatusDot } from "./Sidebar";
+import { MoveDialog, RenameDialog, STATUS_LABELS, StatusDot, TagsDialog } from "./Sidebar";
 import { Dropdown, MenuItem, tokens, usd } from "./ui";
 
 // リサーチのように、会話の外で動いているワークフローの進み具合
@@ -35,6 +35,7 @@ export function ChatView({ id }: { id: string }) {
   const conversation = useStore((s) => s.conversations[id]);
   const live = useStore((s) => s.live[id]);
   const [renaming, setRenaming] = useState(false);
+  const [tagging, setTagging] = useState(false);
   const [moving, setMoving] = useState(false);
   const folder = useStore((s) => s.folders.find((f) => f.id === conversation?.folderId));
   const parent = useStore((s) => (conversation?.parentId ? s.summaries.find((p) => p.id === conversation.parentId) : undefined));
@@ -84,18 +85,21 @@ export function ChatView({ id }: { id: string }) {
                   {conversation.starred ? "スターを外す" : "スターを付ける"}
                 </MenuItem>
                 <MenuItem icon={<Pencil size={16} />} onClick={() => { close(); setRenaming(true); }}>名前を変更</MenuItem>
+                {!conversation.incognito && <MenuItem icon={<Tag size={16} />} onClick={() => { close(); setTagging(true); }}>タグを編集</MenuItem>}
                 {!conversation.parentId && <MenuItem icon={<FolderInput size={16} />} onClick={() => { close(); setMoving(true); }}>プロジェクトへ移動</MenuItem>}
                 <MenuItem icon={<Workflow size={16} />} onClick={() => { close(); setState((s) => ({ ...s, dialog: { kind: "tasks", conversationId: id } })); }}>タスク一覧</MenuItem>
                 <MenuItem icon={<ListTree size={16} />} onClick={() => { close(); void compact(id); }}>ここまでを要約する</MenuItem>
                 <MenuItem icon={<FileDown size={16} />} onClick={() => { close(); void exportConversation(id); }}>Markdown に書き出す</MenuItem>
+                {!SINGLE_CHAT && !conversation.incognito && <MenuItem icon={<AppWindow size={16} />} onClick={() => { close(); void openChatWindow(id); }}>別の窓で開く</MenuItem>}
                 <MenuItem icon={<Trash size={16} />} danger onClick={() => {
                   close();
-                  void (async () => { if (await askConfirm("チャットを削除", `「${title}」を削除しますか? この操作は取り消せません。`)) await deleteConversation(id); })();
+                  void (async () => { if (await confirmDeleteConversations([id], `「${title}」`)) await deleteConversation(id); })();
                 }}>削除</MenuItem>
               </>
             )}
           </Dropdown>
         )}
+        {conversation?.tags?.map((t) => <span key={t} className="tag-chip static">{t}</span>)}
         {status && status !== "idle" && status !== "running" && <span className="status-chip"><StatusDot status={status} /> {STATUS_LABELS[status]}</span>}
         <span className="spacer" />
         {conversation?.worktreePath && <span className="cost-chip" title={conversation.worktreePath}><GitBranch size={13} /> ワークツリー</span>}
@@ -148,6 +152,7 @@ export function ChatView({ id }: { id: string }) {
         <Composer conversationId={id} autoFocus={!live} />
       </div>
       {renaming && conversation && <RenameDialog summary={conversation} onClose={() => setRenaming(false)} />}
+      {tagging && conversation && <TagsDialog summary={conversation} onClose={() => setTagging(false)} />}
       {moving && conversation && <MoveDialog summary={conversation} onClose={() => setMoving(false)} />}
     </div>
   );
